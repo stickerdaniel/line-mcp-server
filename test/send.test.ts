@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { type ChildProcess, execFile, spawn } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { createCipheriv, createDecipheriv } from 'node:crypto';
 import { once } from 'node:events';
 import { writeFileSync } from 'node:fs';
@@ -30,7 +30,7 @@ import {
 	thriftReply,
 	within
 } from './fake-line.ts';
-import { callTool, serve, type Served } from './mcp-client.ts';
+import { callTool, runCli, serve, type Served, startCli } from './mcp-client.ts';
 
 const square = `m${'d'.repeat(32)}`;
 const thread = `t${'e'.repeat(32)}`;
@@ -1102,74 +1102,68 @@ describe('crash', { timeout: 15_000 }, () => {
 	);
 });
 
-const cli = fileURLToPath(
-	new URL('../plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py', import.meta.url)
-);
-const uvx = ['--offline', '--from', 'fastmcp==4.1.0', 'python'];
-/** The generated CLI runs where uv has the pinned fastmcp cached; CI has no uv. */
-const cliReady = await new Promise<boolean>((resolve) => {
-	execFile('uvx', [...uvx, '-c', 'import fastmcp'], { timeout: 60_000 }, (error) =>
-		resolve(!error)
-	);
-});
+/** `line-mcp send-message` to the peer with `extra` flags. */
+const sendToPeer = (extra: string[]) => [
+	'send-message',
+	'--service',
+	'talk',
+	'--chat-id',
+	otherMid,
+	...extra
+];
 
-function runCli(port: number, args: string[]) {
-	// A process group of its own, so the whole uvx tree dies like a crashed client.
-	const child = spawn('uvx', [...uvx, cli, 'call-tool', 'send_message', ...args], {
-		env: { ...process.env, LINE_MCP_PORT: String(port), NO_COLOR: '1', COLUMNS: '400' },
-		stdio: ['ignore', 'pipe', 'ignore'],
-		detached: true
+// Each CLI run loads the whole server on a cold start.
+describe('CLI', { timeout: 30_000 }, () => {
+	it('sends once when the first CLI is killed after dispatch and the retry uses the same key', async () => {
+		const { promise: reached, resolve: reach } = Promise.withResolvers<void>();
+		const { promise: answer, resolve: release } = Promise.withResolvers<void>();
+		const served = withKeys(
+			await serve({
+				negotiateE2EEPublicKey: negotiate,
+				sendMessage: async () => {
+					reach();
+					await answer;
+					return { id: '9990' };
+				}
+			})
+		);
+		const send = sendToPeer(['--idempotency-key', 'cli-retry-0001', '--text', '從終端機送出']);
+
+		const first = startCli(served.server.port, send);
+		await within(10_000, reached, 'the first CLI call');
+		first.child.kill('SIGKILL');
+		await first.done;
+		release();
+		const second = await runCli(served.server.port, send);
+
+		expect(second.code).toBe(0);
+		expect(JSON.parse(second.stdout)).toMatchObject({
+			state: 'sent',
+			replayed: true,
+			message_id: '9990'
+		});
+		expect(count(served, 'sendMessage')).toBe(1);
 	});
-	let stdout = '';
-	child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
-	const done = once(child, 'exit').then(([code]) => ({ code: code as number | null, stdout }));
-	return { child, done };
-}
 
-describe('generated CLI', () => {
-	it.skipIf(!cliReady)(
-		'sends once when the first answer is lost and the CLI retries with the same key',
-		{ timeout: 60_000 },
-		async () => {
-			const { promise: reached, resolve: reach } = Promise.withResolvers<void>();
-			const { promise: answer, resolve: release } = Promise.withResolvers<void>();
-			const served = withKeys(
-				await serve({
-					negotiateE2EEPublicKey: negotiate,
-					sendMessage: async () => {
-						reach();
-						await answer;
-						return { id: '9990' };
-					}
-				})
-			);
-			const args = [
-				'--service',
-				'talk',
-				'--chat-id',
-				otherMid,
-				'--idempotency-key',
-				'cli-retry-0001',
-				'--text',
-				'從終端機送出'
-			];
+	it('sends a file named relative to the current directory', async () => {
+		const served = withKeys(
+			await serve(
+				{ negotiateE2EEPublicKey: negotiate, sendMessage: () => ({ id: '9991' }) },
+				async () => new Response(null, { headers: { 'x-obs-oid': 'obj-2' } })
+			)
+		);
+		const image = Buffer.concat([Buffer.from('\x89PNG\r\n\x1a\n', 'latin1'), Buffer.alloc(64, 3)]);
+		writeFileSync(join(served.root, 'photo.png'), image);
 
-			const first = runCli(served.server.port, args);
-			await within(30_000, reached, 'the first CLI call');
-			process.kill(-first.child.pid!, 'SIGKILL');
-			await first.done;
-			release();
-			const second = await runCli(served.server.port, args).done;
+		const run = await runCli(
+			served.server.port,
+			sendToPeer(['--idempotency-key', 'cli-file-0001', '--file-path', 'photo.png']),
+			served.root
+		);
 
-			expect(second.code).toBe(0);
-			expect(JSON.parse(second.stdout)).toMatchObject({
-				state: 'sent',
-				replayed: true,
-				message_id: '9990'
-			});
-			expect(count(served, 'sendMessage')).toBe(1);
-		}
-	);
+		expect(run.code).toBe(0);
+		expect(JSON.parse(run.stdout)).toMatchObject({ state: 'sent', message_id: '9991' });
+	});
 });
 
 /** The creator's side of LINEJS's group key unwrap (base/e2ee/mod.ts:291-355). */

@@ -6,7 +6,7 @@ line-mcp works with one personal LINE account:
 - Decrypt end-to-end encrypted messages with the keys LINE transfers at login.
 - Mirror personal chats, groups, rooms and joined OpenChat (Square) chats into a local archive, including history and non-Latin text such as Traditional Chinese.
 - Keep the archive current across reboots, sleep and network loss without user action, except a QR login again when LINE revokes the session.
-- Serve the archive to coding agents (Claude Code, Codex, T3 Code) as one MCP server, with a CLI and an agent skill generated from it.
+- Serve the archive to coding agents (Claude Code, Codex, T3 Code) as one MCP server, with a CLI and an agent skill over the same tools.
 - Act in those chats (send, reply, react, unsend, send media) when the user asks the agent to.
 
 ## Runtime
@@ -34,7 +34,7 @@ line-mcp daemon (Node 24, LaunchAgent io.github.stickerdaniel.line-mcp)
    |- MCP: http://127.0.0.1:47822/mcp (Streamable HTTP, stateless, no CORS)
    '- outbox: idempotent mutating actions, never resent on its own
         ^ loopback, native clients only
-Claude Code / Codex / T3 Code          generated Python CLI and agent skill
+Claude Code / Codex / T3 Code          line-mcp CLI and agent skill
 ```
 
 ## State
@@ -177,9 +177,13 @@ Logs carry event names, codes and counts, never tokens, keys, envelopes or messa
 - **OpenChat threads.** A reply to a thread message goes into its thread through the thread RPC with `threadMid`, and reactions and unsends of a thread message name the thread. The thread is part of the payload hash. Media cannot go into a thread, and a thread action LINEJS has no RPC for is refused, never sent to the parent chat.
 - **Cancellation.** A client that goes away before the request leaves stops the action as `failed`. After that the action runs to its end: the caller gets `unknown`, and the row still moves to `sent` when LINE's answer arrives. The key stays held until the attempt settles, so a retry sees the real outcome.
 
-## Generated CLI and skill
+## CLI and skill
 
-`scripts/gen-cli.sh` serves the tools from a throwaway archive (`scripts/cli-fixture.ts`), which never opens the real state directory and never reaches LINE, and runs the pinned `uvx --from fastmcp==4.1.0 fastmcp generate-cli` against it. It writes the CLI to `plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py` and the skill to `plugins/line-mcp-server/skills/line-mcp/SKILL.md`, so the skill directory is self-contained. The CLI reaches the daemon on its default port unless `LINE_MCP_PORT` says otherwise. The skill's commands name the script as `"<skill-dir>/scripts/line_cli.py"`, which the agent resolves against the directory of SKILL.md, so the generated files do not depend on the checkout path. The skill lets agents use the mutating tools only when the user explicitly asks for that action, treats chat messages, attachments and tool results as data rather than authorization, and has them ask when the recipient or the action is unclear. A test generates them from two checkouts at different paths and compares the output, and another compares each CLI subcommand's flags and required arguments with the tool schemas.
+Every tool is also a `line-mcp` command (`src/tool-cli.ts`). The commands are built at runtime from the zod schemas the server registers, so the CLI cannot drift from the tools and nothing is generated: the tool name and each input field in kebab case name the command and its flags, and a field's type (string, enum, integer, boolean) and optionality give the flag's shape. The `status` tool is `sync-status`, since `line-mcp status` reads the local setup without the daemon. `node:util` `parseArgs` in strict mode and the tool's own schema check the arguments before any request, so a usage error exits 2 without reaching the daemon. A relative `--file-path` is resolved against the current directory.
+
+A command calls the daemon on `127.0.0.1` through the FastMCP client, with its own 300 s deadline instead of the client's default 60 s, so a large attachment download finishes. A result goes to stdout as JSON. A tool error goes to stderr whole, including a mutating tool's outbox state, and exits 1; so does `daemon_unreachable` when nothing answers on the MCP port. Ctrl-C closes the request, which cancels the call like any client that goes away, and exits 130.
+
+`plugins/line-mcp-server/skills/line-mcp/SKILL.md` is written by hand and names the commands. It lets agents use the mutating commands only when the user explicitly asks for that action, treats chat messages, attachments and tool results as data rather than authorization, and has them ask when the recipient or the action is unclear.
 
 ## Out of scope
 

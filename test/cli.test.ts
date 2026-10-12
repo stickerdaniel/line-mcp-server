@@ -12,23 +12,16 @@ import {
 } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { healthKey, writeState } from '../src/archive.ts';
 import { openDatabase, setAuthState } from '../src/db.ts';
 import { selectNode } from '../src/launchd.ts';
 import { databasePath } from '../src/paths.ts';
 import { freePort, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
-import { callTool, type ToolCall } from './mcp-client.ts';
+import { callTool, cliEntry, type ToolCall } from './mcp-client.ts';
 
-/**
- * The CLI under test: the sources, or an installed `line-mcp` bin named by
- * `LINE_MCP_TEST_CLI` (scripts/smoke-pack.sh). `cli` is its real path, which
- * `install` writes into the LaunchAgent.
- */
-const entry =
-	process.env.LINE_MCP_TEST_CLI || fileURLToPath(new URL('../src/cli.ts', import.meta.url));
-const cli = realpathSync(entry);
+/** The real path of the CLI under test, which `install` writes into the LaunchAgent. */
+const cli = realpathSync(cliEntry);
 
 /**
  * A copy of the CLI's package under an npx cache path, sharing its
@@ -70,7 +63,7 @@ async function runCli(
 	home = tempRoot(),
 	env: NodeJS.ProcessEnv = {},
 	exits: Record<string, number> = {},
-	script = entry
+	script = cliEntry
 ) {
 	const state = join(home, 'state');
 	const calls = join(home, 'launchctl-calls');
@@ -154,7 +147,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 	it('installs the real CLI file when started through a global bin symlink', async () => {
 		const bin = join(tempRoot(), 'bin', 'line-mcp');
 		mkdirSync(dirname(bin));
-		symlinkSync(entry, bin);
+		symlinkSync(cliEntry, bin);
 
 		const result = await runCli(['install'], tempRoot(), {}, {}, bin);
 
@@ -333,7 +326,7 @@ describe('commands', { timeout: 15_000 }, () => {
 		writeState(db, healthKey, { state: 'needs_login', since: Date.now() });
 		db.close();
 		const port = await freePort();
-		const daemon = spawn(process.execPath, [entry, 'daemon'], {
+		const daemon = spawn(process.execPath, [cliEntry, 'daemon'], {
 			env: {
 				...process.env,
 				HOME: home,

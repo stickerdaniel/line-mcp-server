@@ -25,6 +25,7 @@ import { acquireLock, lockInUse } from './lock.ts';
 import { databasePath, stateRoot } from './paths.ts';
 import { probe } from './probe.ts';
 import { type Log, login, openSession, stderrLog } from './session.ts';
+import { runToolCommand, toolCommands, toolUsage } from './tool-cli.ts';
 
 const usage = `Usage: line-mcp <command>
 
@@ -34,7 +35,11 @@ const usage = `Usage: line-mcp <command>
   daemon     Run the sync daemon (started by the LaunchAgent)
   install    Install and start the LaunchAgent [--dry-run] [--node <path>]
   uninstall  Stop and remove the LaunchAgent; keeps the archive [--dry-run] [--purge]
-  doctor     Check the local setup without contacting LINE`;
+  doctor     Check the local setup without contacting LINE
+
+Tool commands call the running daemon; line-mcp <command> --help lists the flags:
+
+${toolUsage()}`;
 
 /**
  * The real path of this file: `src/cli.ts` in a clone, `dist/cli.js` in the
@@ -64,9 +69,12 @@ async function main(command: string | undefined, args: string[]): Promise<number
 		case '-h':
 			console.log(usage);
 			return 0;
-		default:
+		default: {
+			const tool = toolCommands.get(command ?? '');
+			if (tool) return await runToolCommand(tool, args);
 			console.error(usage);
 			return 2;
+		}
 	}
 }
 

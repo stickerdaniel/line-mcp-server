@@ -2,7 +2,7 @@
 
 Local MCP server that mirrors a personal LINE account into SQLite, so coding agents (Claude Code, Codex, T3 Code) can read, search and answer messages.
 
-A Node 24 daemon, started by launchd, logs in to LINE as a secondary Android device, keeps a local copy of every chat, and serves MCP tools on `127.0.0.1`. A CLI and an agent skill are generated from the same tools.
+A Node 24 daemon, started by launchd, logs in to LINE as a secondary Android device, keeps a local copy of every chat, and serves MCP tools on `127.0.0.1`. The `line-mcp` CLI runs the same tools from a shell, and an agent skill teaches agents to use it.
 
 Status: in development. See [`docs/architecture.md`](docs/architecture.md) for the architecture.
 
@@ -14,7 +14,6 @@ Status: in development. See [`docs/architecture.md`](docs/architecture.md) for t
 - macOS. The daemon runs as a per-user LaunchAgent.
 - [Node](https://nodejs.org) 24.18 or later
 - [Bun](https://bun.sh) to install from a clone and for development
-- [uv](https://docs.astral.sh/uv/) for the generated CLI and skill (`uvx`)
 - The LINE app on your phone, logged in to the account
 
 ## Install
@@ -113,13 +112,15 @@ T3 Code runs Claude Code and Codex, which read the configuration above. Nothing 
 
 ### CLI and skill
 
-`plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py` calls every tool. From the clone root:
+Every tool is also a `line-mcp` command that calls the running daemon:
 
 ```bash
-uvx --from fastmcp==4.1.0 python plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py call-tool search_messages --query 晚餐
+line-mcp search-messages --query 晚餐
 ```
 
-`plugins/line-mcp-server/skills/line-mcp/SKILL.md` describes those commands for agents. The plugins install it; otherwise link or copy that directory into an agent's skills directory. The skill finds its script next to SKILL.md, so it works from any location. Both files are generated: after changing a tool, run `scripts/gen-cli.sh` (needs `uvx`). It serves the tools from a throwaway archive, never the real one.
+Commands and flags are the tool and field names in kebab case; the `status` tool is `sync-status`, since `line-mcp status` reports the local setup without the daemon. `line-mcp help` lists the commands and `line-mcp <command> --help` a command's flags. A result is JSON on stdout. An error is JSON on stderr with exit code 1, or 2 for a usage error.
+
+`plugins/line-mcp-server/skills/line-mcp/SKILL.md` teaches agents these commands. The plugins install it; otherwise link or copy that directory into an agent's skills directory. The skill runs `line-mcp` from PATH; from a clone, `bun run build && npm link` puts it there.
 
 ## Trust boundary
 
