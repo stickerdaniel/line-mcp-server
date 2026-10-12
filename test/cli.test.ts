@@ -119,7 +119,8 @@ async function uninstall(bootout: number) {
 	return { ...result, plistKept: existsSync(plist) };
 }
 
-describe('install and uninstall', () => {
+// Each CLI run is a cold Node start that loads the whole server; under load it can pass 5 s.
+describe('install and uninstall', { timeout: 15_000 }, () => {
 	it('prints the LaunchAgent and launchctl commands on a dry run and changes nothing', async () => {
 		const result = await runCli(['install', '--dry-run'], tempRoot(), { LINE_MCP_PORT: '47900' });
 
@@ -311,7 +312,8 @@ describe('install and uninstall', () => {
 	});
 });
 
-describe('commands', () => {
+// One cold CLI start per test, as above.
+describe('commands', { timeout: 15_000 }, () => {
 	it('prints the usage on --help and exits 0', async () => {
 		const result = await runCli(['--help']);
 
