@@ -1,6 +1,8 @@
 import { type BaseClient, InternalError } from '@evex/linejs/base';
 import { LINEStruct } from '@evex/linejs/thrift';
 import type {
+	FetchMyEventsRequest,
+	FetchMyEventsResponse,
 	FetchSquareChatEventsRequest,
 	FetchSquareChatEventsResponse,
 	Square,
@@ -20,6 +22,24 @@ export async function fetchSquareChatEvents(
 	return await base.request.request(
 		LINEStruct.SquareService_fetchSquareChatEvents_args({ request: { limit: 100, ...request } }),
 		'fetchSquareChatEvents',
+		4,
+		true,
+		'/SQ1'
+	);
+}
+
+/**
+ * `fetchMyEvents` through the generated Thrift request, so a 64-bit
+ * `subscriptionId` passes as a bigint (the wrapper types it as `number`,
+ * base/service/square/mod.ts:105-125).
+ */
+export async function fetchMyEvents(
+	base: BaseClient,
+	request: Partial<FetchMyEventsRequest>
+): Promise<FetchMyEventsResponse> {
+	return await base.request.request(
+		LINEStruct.SquareService_fetchMyEvents_args({ request: { limit: 100, ...request } }),
+		'fetchMyEvents',
 		4,
 		true,
 		'/SQ1'

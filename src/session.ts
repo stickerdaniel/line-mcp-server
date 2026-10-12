@@ -46,6 +46,11 @@ export interface Session {
 	readonly db: DatabaseSync;
 	readonly account: Account;
 	state(): SessionState;
+	/**
+	 * Enters the terminal `storage_error` state after an archive write failed:
+	 * every further upstream dispatch is refused, cached reads stay available.
+	 */
+	storageFailed(): void;
 	close(): Promise<void>;
 }
 
@@ -104,6 +109,7 @@ export async function openSession(options: SessionOptions = {}): Promise<Session
 			db: live,
 			account,
 			state: () => control.state,
+			storageFailed: control.storageFailed,
 			close: async () => {
 				live.close();
 				await lock.release();
@@ -322,7 +328,13 @@ function installGuards(base: BaseClient, control: Control, storage: SqliteStorag
 		try {
 			return await request(...args);
 		} catch (error) {
-			control.log({ event: 'upstream_error', ...mapError(error, method) });
+			// A Talk long poll that ends without news answers 410 after about
+			// 110 s: LINE's normal idle answer, not a failure.
+			if (method === 'sync' && isHttpStatus(error, 410)) {
+				control.log({ event: 'long_poll_ended', method });
+			} else {
+				control.log({ event: 'upstream_error', ...mapError(error, method) });
+			}
 			if (recover && canRecoverSquareAuth(args, error, storage)) {
 				// LINEJS refreshes only on the Talk code, so a Square read whose
 				// token expired gets one refresh and one retry before it counts as
