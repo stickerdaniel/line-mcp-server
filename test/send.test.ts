@@ -128,9 +128,9 @@ function store(served: Served, ...rows: MessageRow[]): void {
 const count = (served: Served, method: string) =>
 	served.upstream.calls.filter((call) => call === method).length;
 
-async function until(check: () => boolean, what: string): Promise<void> {
+async function until(check: () => boolean, what: string, ms = 5000): Promise<void> {
 	await within(
-		5000,
+		ms,
 		(async () => {
 			while (!check()) await new Promise((resolve) => setTimeout(resolve, 10));
 		})(),
@@ -1056,14 +1056,20 @@ function crashFixture(root: string, lockPort: number, mode: 'before' | 'after') 
 		partial = parts.pop()!;
 		lines.push(...parts);
 	});
+	// 10 s like serving() in cli.test.ts: the first line waits for a cold start of the server.
 	const line = async (pattern: RegExp) => {
-		await until(() => lines.some((entry) => pattern.test(entry)), `fixture line ${pattern}`);
+		await until(
+			() => lines.some((entry) => pattern.test(entry)),
+			`fixture line ${pattern}`,
+			10_000
+		);
 		return lines.find((entry) => pattern.test(entry))!;
 	};
 	return { child, line };
 }
 
-describe('crash', () => {
+// The timeout covers the fixture's 10 s start deadline plus the retry.
+describe('crash', { timeout: 15_000 }, () => {
 	it.each([
 		['after', { state: 'unknown', replayed: true, cause: { code: 'interrupted' } }, 0],
 		['before', { state: 'sent', replayed: false, message_id: '9900' }, 1]
