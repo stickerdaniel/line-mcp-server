@@ -33,25 +33,36 @@ export interface FakeUpstream {
 	createClient: (storage: BaseStorage) => BaseClient;
 }
 
+/** Where a faked RPC goes on the transport; never a real host. */
+const rpcOrigin = 'https://fake-rpc.invalid';
+
 /**
- * Answers RPCs at the LINEJS request layer, below the session guards. Plain
- * HTTP requests (media) go to `fetch`, which refuses them by default.
+ * Answers RPCs in place of LINEJS's request step, below the session guards.
+ * Each RPC first leaves through `base.fetch`, as LINEJS's own request does
+ * (base/request/mod.ts:163-169), so the session's transport guards see it;
+ * then its handler answers. Plain HTTP requests (media) go to `fetch`, which
+ * refuses them by default.
  */
 export function fakeUpstream(
 	handlers: Record<string, Handler>,
 	fetch: (request: Request) => Promise<Response> = refuseFetch
 ): FakeUpstream {
 	const calls: string[] = [];
+	const transport = async (request: Request) =>
+		request.url.startsWith(`${rpcOrigin}/`) ? new Response(null) : await fetch(request);
 	return {
 		calls,
 		createClient: (storage) => {
-			const base = new BaseClient({ device: 'ANDROIDSECONDARY', storage, fetch });
-			base.request.request = (async (value: NestedArray, method: string) => {
-				calls.push(method);
-				const handler = handlers[method];
-				if (!handler) throw new Error(`unexpected upstream call ${method}`);
-				return await handler(value, base);
-			}) as typeof base.request.request;
+			const base = new BaseClient({ device: 'ANDROIDSECONDARY', storage, fetch: transport });
+			Object.assign(base.request, {
+				requestCore: async (path: string, value: NestedArray, method: string) => {
+					await base.fetch(`${rpcOrigin}${path}`, { method: 'POST' });
+					calls.push(method);
+					const handler = handlers[method];
+					if (!handler) throw new Error(`unexpected upstream call ${method}`);
+					return { data: { success: await handler(value, base) } };
+				}
+			});
 			return base;
 		}
 	};
@@ -85,6 +96,15 @@ export function fakeHttpUpstream(
 				}
 			})
 	};
+}
+
+/**
+ * The arguments of a Thrift call as LINE receives them, by field id. Binary
+ * fields that happen to be valid UTF-8 arrive as strings, as LINEJS reads them.
+ */
+export async function callArgs(request: Request): Promise<Record<number, unknown>> {
+	const body = new Uint8Array(await request.clone().arrayBuffer());
+	return helper.thrift.readThrift(body, Protocols[4]).data as Record<number, unknown>;
 }
 
 /** A Thrift reply carrying exception struct field 1 with this numeric code. */

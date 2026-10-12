@@ -25,7 +25,12 @@ export type ErrorCode =
 	| 'no_attachment'
 	| 'attachment_too_large'
 	| 'cancelled'
-	| 'shutting_down';
+	| 'shutting_down'
+	| 'idempotency_conflict'
+	| 'outcome_unknown'
+	| 'unsupported_action'
+	| 'file_error'
+	| 'upload_failed';
 
 /**
  * An error raised by line-mcp itself. Its message is fixed text written in this
@@ -48,12 +53,30 @@ export interface MappedError {
 }
 
 /**
+ * A failure that already went through the mapper, with fields for the caller
+ * beyond the error itself (the outbox state of a mutating call). Every field
+ * is line-mcp's own.
+ */
+export class MappedFailure extends Error {
+	readonly mapped: MappedError;
+	readonly details: Record<string, unknown>;
+
+	constructor(mapped: MappedError, details: Record<string, unknown>) {
+		super(mapped.message);
+		this.name = 'MappedFailure';
+		this.mapped = mapped;
+		this.details = details;
+	}
+}
+
+/**
  * The only path from a failure to a log line or a tool result. Upstream text is
  * never copied: LINEJS parse errors embed response headers (including the next
  * access token) and body bytes, and exception reasons can quote message data.
  * Only codes from the published LINE enums pass through.
  */
 export function mapError(error: unknown, operation: string): MappedError {
+	if (error instanceof MappedFailure) return { ...error.mapped, operation };
 	if (error instanceof LineMcpError) {
 		return { code: error.code, operation, message: error.message };
 	}

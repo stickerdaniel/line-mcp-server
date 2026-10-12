@@ -70,6 +70,8 @@ The daemon serves Streamable HTTP at `http://127.0.0.1:47822/mcp`, stateless, fo
 
 Read tools: `status`, `list_chats`, `read_messages`, `search_messages`, `list_changes`, `get_attachment`, `get_announcements`, `get_profile`. Every result reports `stale` and the last sync times. Times come as `utc` and as `local`, an ISO 8601 time with its offset in the daemon's system time zone, which `status` reports as `time_zone`.
 
+Mutating tools: `send_message`, `react`, `unsend`. Each call needs an `idempotency_key`; a retry with the same key and arguments never acts twice. A result with state `unknown` means LINE may have acted, and line-mcp never resends it on its own.
+
 ### Claude Code
 
 ```bash
@@ -105,7 +107,7 @@ uvx --from fastmcp==4.1.0 python skills/line-mcp/scripts/line_cli.py call-tool s
 
 ## Trust boundary
 
-Every local client that can connect to the loopback listener can call every tool, including sending messages. There is no per-user isolation and no confirmation step. The listener binds `127.0.0.1` only, refuses any request with an `Origin` header (every browser request) and any `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, and sends no CORS headers, so web pages cannot reach it. There is no bearer token.
+Every local client that can connect to the loopback listener can call every tool, including sending, reacting to and unsending messages. There is no per-user isolation and no confirmation step. `send_message` with `file_path` reads any local file the daemon's user can read and sends it to the chat. The listener binds `127.0.0.1` only, refuses any request with an `Origin` header (every browser request) and any `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, and sends no CORS headers, so web pages cannot reach it. There is no bearer token.
 
 ## Development
 

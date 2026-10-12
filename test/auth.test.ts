@@ -166,18 +166,19 @@ describe('token refresh', () => {
 });
 
 describe('startup', () => {
-	it('refuses to start when LINE never returns the profile', async () => {
+	it('opens in needs_login when the refreshed token is refused again', async () => {
 		const root = seeded();
 		const upstream = fakeHttpUpstream({
-			// The retry after the refresh is told to refresh again, so LINEJS
-			// resolves the profile call with nothing.
+			// The retry after the refresh is told to refresh again, which LINEJS
+			// resolves without a profile instead of throwing.
 			getProfile: () => thriftError('getProfile', MUST_REFRESH_V3_TOKEN),
 			refresh: refreshed
 		});
 
-		await expect(start(root, { createClient: upstream.createClient })).rejects.toMatchObject({
-			code: 'not_logged_in'
-		});
+		const session = await start(root, { createClient: upstream.createClient });
+
+		expect(session.state()).toBe('needs_login');
+		expect(readAccount(session.db)?.authState).toBe('needs_login');
 		expect(upstream.calls).toEqual(['getProfile', 'refresh', 'getProfile']);
 	});
 });
@@ -296,7 +297,7 @@ describe('auth loss', () => {
 		expect(upstream.calls.filter((method) => method === 'getJoinedSquareChats')).toHaveLength(1);
 	});
 
-	it('does not retry a Square mutation after an authentication failure', async () => {
+	it('refreshes once but does not resend a Square mutation after an authentication failure', async () => {
 		const root = seeded();
 		const upstream = fakeHttpUpstream({
 			getProfile: profileReply,
@@ -307,10 +308,28 @@ describe('auth loss', () => {
 
 		await expect(
 			session.base.square.leaveSquareChat({ request: { squareChatMid: 'm1' } })
+		).rejects.toMatchObject({ data: { errorCode: 'AUTHENTICATION_FAILURE' } });
+
+		expect(session.state()).toBe('online');
+		expect(upstream.calls).toEqual(['getProfile', 'leaveSquareChat', 'refresh']);
+		expect(stored(root, 'authToken')).toBe('access-new');
+	});
+
+	it('enters needs_login when the refresh for a Square mutation is rejected', async () => {
+		const root = seeded();
+		const upstream = fakeHttpUpstream({
+			getProfile: profileReply,
+			leaveSquareChat: () => thriftError('leaveSquareChat', 401),
+			refresh: refreshRejected
+		});
+		const session = await start(root, { createClient: upstream.createClient });
+
+		await expect(
+			session.base.square.leaveSquareChat({ request: { squareChatMid: 'm1' } })
 		).rejects.toBeDefined();
 
 		expect(session.state()).toBe('needs_login');
-		expect(upstream.calls).toEqual(['getProfile', 'leaveSquareChat']);
+		expect(upstream.calls).toEqual(['getProfile', 'leaveSquareChat', 'refresh']);
 	});
 
 	it('opens in needs_login when the device was revoked before startup', async () => {

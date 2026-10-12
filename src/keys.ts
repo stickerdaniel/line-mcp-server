@@ -1,7 +1,8 @@
 import { Buffer } from 'node:buffer';
 import { type BaseClient, InternalError } from '@evex/linejs/base';
 import { enums, type Message } from '@evex/linejs-types';
-import { LineMcpError } from './errors.ts';
+import { LineMcpError, upstreamCode } from './errors.ts';
+import { allowGroupKeyRegistration, type Log } from './session.ts';
 
 export type DecryptResult =
 	| { state: 'ok'; payload: Record<string, unknown> | undefined }
@@ -138,7 +139,7 @@ async function exactPublicKey(
 	return data;
 }
 
-async function groupKey(
+export async function groupKey(
 	base: BaseClient,
 	selfMid: string,
 	chatMid: string,
@@ -174,4 +175,105 @@ async function groupKey(
 	}
 	if (Number(key.keyId) !== id) return missing('group_key');
 	return { privateKey: Buffer.from(key.privKey, 'base64') };
+}
+
+/** The group's current shared key, or undefined when it has none. */
+async function lastGroupKey(base: BaseClient, chatMid: string) {
+	try {
+		return await base.talk.getLastE2EEGroupSharedKey({ keyVersion: 2, chatMid });
+	} catch (error) {
+		if (error instanceof InternalError && error.data.code === 'NOT_FOUND') return undefined;
+		throw error;
+	}
+}
+
+/** The keys of one outgoing E2EE message, as LINEJS's `encryptE2EEMessage` derives them. */
+export interface SendingKeys {
+	senderKeyId: number;
+	receiverKeyId: number;
+	/** The ECDH secret the message key is derived from. */
+	keyData: Buffer;
+	specVersion: number;
+}
+
+/**
+ * The keys LINEJS's `encryptE2EEMessage` uses for a Talk message to `to`
+ * (base/e2ee/mod.ts:636-682), or null when a one-to-one peer does not support
+ * E2EE. A DM pairs the own key with the peer key LINE negotiates. A group or
+ * room uses its current shared key, unwrapped with exactly the generations it
+ * names. A group without one gets a new key, registered as LINEJS does
+ * (base/e2ee/mod.ts:356-409); that is the only registration line-mcp performs
+ * (architecture, E2EE key boundaries). Only the send path calls this.
+ */
+export async function sendingKeys(
+	base: BaseClient,
+	selfMid: string,
+	to: string,
+	log: Log
+): Promise<SendingKeys | null> {
+	let self: { keyId?: unknown; privKey?: unknown; pubKey?: unknown } | undefined;
+	try {
+		self = (await base.e2ee.getE2EESelfKeyData(selfMid)) as typeof self;
+	} catch (error) {
+		if (!(error instanceof InternalError && error.type === 'NoE2EEKey')) throw error;
+	}
+	if (
+		typeof self?.privKey !== 'string' ||
+		typeof self.pubKey !== 'string' ||
+		!Number.isSafeInteger(Number(self.keyId))
+	) {
+		throw new LineMcpError('missing_key', 'No own E2EE key is stored for sending');
+	}
+	const senderKeyId = Number(self.keyId);
+	if (to.startsWith('u')) {
+		const negotiated = await base.talk.negotiateE2EEPublicKey({ mid: to });
+		if (Number(negotiated?.specVersion) === -1) return null;
+		const peer = negotiated?.publicKey;
+		if (!peer?.keyData || !Number.isSafeInteger(Number(peer.keyId))) {
+			throw new LineMcpError('missing_key', 'LINE returned no public key for this contact');
+		}
+		return {
+			senderKeyId,
+			receiverKeyId: Number(peer.keyId),
+			keyData: Buffer.from(
+				base.e2ee.generateSharedSecret(
+					Buffer.from(self.privKey, 'base64'),
+					Buffer.from(peer.keyData)
+				)
+			),
+			specVersion: Number(negotiated.specVersion)
+		};
+	}
+	let shared = await lastGroupKey(base, to);
+	if (!shared) {
+		try {
+			shared = await allowGroupKeyRegistration(() => base.e2ee.tryRegisterE2EEGroupKey(to));
+			log({ event: 'group_key_registered', chat_id: to });
+		} catch (error) {
+			// Another member may have registered one meanwhile. LINE documents no
+			// code for that, so any refusal gets one more lookup; a key found
+			// there is the group's current key.
+			if (!(error instanceof InternalError && upstreamCode(error.data))) throw error;
+			shared = await lastGroupKey(base, to);
+			if (!shared) throw error;
+		}
+	}
+	const groupKeyId = Number(shared?.groupKeyId);
+	const group = Number.isSafeInteger(groupKeyId)
+		? await groupKey(base, selfMid, to, groupKeyId)
+		: missing('group_key');
+	if ('missing' in group) {
+		throw new LineMcpError(
+			'missing_key',
+			`The keys of this group are not available (${group.missing})`
+		);
+	}
+	return {
+		senderKeyId,
+		receiverKeyId: groupKeyId,
+		keyData: Buffer.from(
+			base.e2ee.generateSharedSecret(group.privateKey, Buffer.from(self.pubKey, 'base64'))
+		),
+		specVersion: 2
+	};
 }

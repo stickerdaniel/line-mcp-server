@@ -4,7 +4,8 @@ import type { BaseClient } from '@evex/linejs/base';
 import { type FastMCP, ToolResult } from '@prefecthq/fastmcp-ts/server';
 import { z } from 'zod';
 import type { ArchiveStatus } from '../archive.ts';
-import { LineMcpError, mapError } from '../errors.ts';
+import { LineMcpError, MappedFailure, mapError } from '../errors.ts';
+import type { Outbox } from '../outbox.ts';
 import { freshness, maxLimit } from '../queries.ts';
 import type { Log } from '../session.ts';
 import type { Pool } from '../sync/loop.ts';
@@ -25,6 +26,11 @@ export interface ToolContext {
 	log: Log;
 }
 
+/** The context the served tools get: the caller's, plus the outbox the server opened. */
+export interface ServedContext extends ToolContext {
+	outbox: Outbox;
+}
+
 export const service = z
 	.enum(['talk', 'square'])
 	.describe('talk: one-to-one chats, groups and rooms; square: OpenChat');
@@ -40,6 +46,14 @@ export const limit = z
 	.max(maxLimit)
 	.optional()
 	.describe(`Items per page, 1 to ${maxLimit}; default 50`);
+export const idempotencyKey = z
+	.string()
+	.min(8)
+	.max(200)
+	.regex(/^[\x21-\x7e]+$/)
+	.describe(
+		'Unique key for this one intended action (for example a UUID), 8 to 200 printable ASCII characters. Reuse it only to retry the same action: a retry never acts twice. A new action needs a new key.'
+	);
 export const cursor = z
 	.string()
 	.min(1)
@@ -53,8 +67,10 @@ export interface ToolDefinition<S extends z.ZodObject> {
 	input: S;
 	/** True when the tool asks LINE rather than reading the archive. */
 	upstream?: boolean;
+	/** True when the tool acts on LINE (send, react, unsend) through the outbox. */
+	mutating?: boolean;
 	/** `signal` aborts when the client goes away or the server shuts down. */
-	run: (args: z.output<S>, context: ToolContext, signal: AbortSignal) => Promise<object> | object;
+	run: (args: z.output<S>, context: ServedContext, signal: AbortSignal) => Promise<object> | object;
 }
 
 /**
@@ -101,14 +117,15 @@ export function defineTool<S extends z.ZodObject>(
 }
 
 /**
- * Registers a read tool. Every result is an object envelope that reports the
+ * Registers a tool. Every result is an object envelope that reports the
  * archive's freshness. Every failure goes through the allowlisted mapper
  * (architecture, Errors): Prefect would otherwise return `err.message` as the
  * tool output, and LINEJS messages can carry response headers and body bytes.
+ * A mutating tool's failure also reports its outbox state.
  */
 export function registerTool<S extends z.ZodObject>(
 	server: FastMCP,
-	context: ToolContext,
+	context: ServedContext,
 	definition: ToolDefinition<S>,
 	invocations: Invocations
 ): void {
@@ -117,7 +134,10 @@ export function registerTool<S extends z.ZodObject>(
 			name: definition.name,
 			description: definition.description,
 			input: definition.input,
-			annotations: { readOnlyHint: true, openWorldHint: definition.upstream === true }
+			// The idempotency key makes a repeated call with the same arguments act once.
+			annotations: definition.mutating
+				? { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
+				: { readOnlyHint: true, openWorldHint: definition.upstream === true }
 		},
 		// Prefect validates the arguments with `input` before calling this.
 		(args: Record<string, unknown>) =>
@@ -128,8 +148,9 @@ export function registerTool<S extends z.ZodObject>(
 				} catch (error) {
 					const mapped = mapError(error, definition.name);
 					context.log({ event: 'tool_failed', ...mapped });
+					const details = error instanceof MappedFailure ? error.details : {};
 					return new ToolResult({
-						content: [{ type: 'text', text: JSON.stringify({ error: mapped }) }],
+						content: [{ type: 'text', text: JSON.stringify({ error: mapped, ...details }) }],
 						isError: true
 					});
 				}

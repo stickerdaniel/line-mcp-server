@@ -267,5 +267,45 @@ async def get_profile(
     await _call_tool('get_profile', {'service': service, 'id': id})
 
 
+@call_tool_app.command(name='send_message')
+async def send_message(
+    *,
+    service: Annotated[str, cyclopts.Parameter(help="talk: one-to-one chats, groups and rooms; square: OpenChat")],
+    chat_id: Annotated[str, cyclopts.Parameter(help="Chat ID from list_chats")],
+    idempotency_key: Annotated[str, cyclopts.Parameter(help="Unique key for this one intended action (for example a UUID), 8 to 200 printable ASCII characters. Reuse it only to retry the same action: a retry never acts twice. A new action needs a new key.")],
+    text: Annotated[str | None, cyclopts.Parameter(help="Message text; give either text or file_path")] = None,
+    file_path: Annotated[str | None, cyclopts.Parameter(help="Absolute path of a local image (JPEG, PNG, GIF) or other file to send instead of text")] = None,
+    reply_to: Annotated[str | None, cyclopts.Parameter(help="Reply to this message of the chat")] = None,
+    thread_id: Annotated[str | None, cyclopts.Parameter(help="Send into this OpenChat thread (thread_id from read_messages)")] = None,
+) -> None:
+    '''Sends a message from the connected LINE account: text, or a local image (JPEG, PNG, GIF) or file, optionally as a reply. Talk messages are end-to-end encrypted wherever the chat is. In OpenChat, a reply to a thread message goes into its thread; media cannot go into a thread or be a reply there. Needs an idempotency_key: a retry with the same key never sends twice. A result with state unknown means LINE may have sent it; check read_messages before anything else.'''
+    await _call_tool('send_message', {'service': service, 'chat_id': chat_id, 'idempotency_key': idempotency_key, 'text': text, 'file_path': file_path, 'reply_to': reply_to, 'thread_id': thread_id})
+
+
+@call_tool_app.command(name='react')
+async def react(
+    *,
+    service: Annotated[str, cyclopts.Parameter(help="talk: one-to-one chats, groups and rooms; square: OpenChat")],
+    chat_id: Annotated[str, cyclopts.Parameter(help="Chat ID from list_chats")],
+    message_id: Annotated[str, cyclopts.Parameter(help="LINE message ID (decimal string)")],
+    reaction: Annotated[str, cyclopts.Parameter(help="One of nice, love, fun, amazing, sad, omg")],
+    idempotency_key: Annotated[str, cyclopts.Parameter(help="Unique key for this one intended action (for example a UUID), 8 to 200 printable ASCII characters. Reuse it only to retry the same action: a retry never acts twice. A new action needs a new key.")],
+) -> None:
+    '''Reacts to a message as the connected LINE account. An OpenChat thread message is reacted to in its thread. Needs an idempotency_key: a retry with the same key never reacts twice. A result with state unknown means LINE may have applied it.'''
+    await _call_tool('react', {'service': service, 'chat_id': chat_id, 'message_id': message_id, 'reaction': reaction, 'idempotency_key': idempotency_key})
+
+
+@call_tool_app.command(name='unsend')
+async def unsend(
+    *,
+    service: Annotated[str, cyclopts.Parameter(help="talk: one-to-one chats, groups and rooms; square: OpenChat")],
+    chat_id: Annotated[str, cyclopts.Parameter(help="Chat ID from list_chats")],
+    message_id: Annotated[str, cyclopts.Parameter(help="LINE message ID (decimal string)")],
+    idempotency_key: Annotated[str, cyclopts.Parameter(help="Unique key for this one intended action (for example a UUID), 8 to 200 printable ASCII characters. Reuse it only to retry the same action: a retry never acts twice. A new action needs a new key.")],
+) -> None:
+    '''Unsends a message the connected LINE account sent, for everyone. An OpenChat thread message is unsent in its thread. Needs an idempotency_key: a retry with the same key never acts twice. A result with state unknown means LINE may have unsent it.'''
+    await _call_tool('unsend', {'service': service, 'chat_id': chat_id, 'message_id': message_id, 'idempotency_key': idempotency_key})
+
+
 if __name__ == "__main__":
     app()
