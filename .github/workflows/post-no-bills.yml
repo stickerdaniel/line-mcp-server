@@ -1,0 +1,24 @@
+name: Post No Bills
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  post-no-bills:
+    runs-on: ubicloud-standard-2
+    steps:
+      - name: Check agent attribution and hidden Unicode
+        uses: stickerdaniel/post-no-bills@7fd24bb70700c7cab15df1572cd11320b815d7b5 # v3.1.0
+        with:
+          model-attribution: host
+          # Traditional Chinese fixtures are intentional non-Latin text.
+          unicode-exclude-paths: |
+            test/fixtures/

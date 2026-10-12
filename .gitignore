@@ -1,0 +1,9 @@
+node_modules/
+scratch/
+coverage/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+.DS_Store

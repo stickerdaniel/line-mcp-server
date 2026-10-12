@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in line-mcp failed or behaved unexpectedly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This tracker is public. Never paste QR codes, login PINs, tokens, keys, archives, chat transcripts, message text, MIDs or screenshots of chats. Replace them with made-up values.
+
+        If someone outside your machine can reach the tools or your data, use private vulnerability reporting instead (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The commit SHA you run (`git rev-parse HEAD`)
+      placeholder: 40-character commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS and Node versions
+      placeholder: macOS 27.0, Node 24.18.0
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Error codes and log lines, with any private values replaced
+    validations:
+      required: true

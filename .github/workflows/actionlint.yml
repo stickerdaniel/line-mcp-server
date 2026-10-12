@@ -1,0 +1,28 @@
+name: Actionlint
+
+# No path filter: this check is required, and a required check that never
+# starts blocks every pull request that does not touch a workflow.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: Lint Workflows
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: reviewdog/action-actionlint@2085657ab2c7f48c58edcc767fba576f63bea76b # v1.77.0
+        with:
+          # Log-only reporter: needs no write permissions and works on both
+          # pull_request and push events. fail_level makes findings fail the job
+          # instead of only annotating.
+          reporter: github-annotations
+          filter_mode: nofilter
+          fail_level: error

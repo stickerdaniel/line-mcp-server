@@ -1,0 +1,19 @@
+{
+	"$schema": "https://docs.renovatebot.com/renovate-schema.json",
+	"extends": ["config:best-practices"],
+	"schedule": ["before 6am on Monday"],
+	"vulnerabilityAlerts": {
+		"enabled": true,
+		"labels": ["security"],
+		"schedule": ["at any time"]
+	},
+	"packageRules": [
+		{
+			"description": "Group safe non-major updates; LINEJS talks to an unofficial protocol, so its updates stay separate",
+			"matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+			"matchPackageNames": ["!@evex/linejs"],
+			"groupName": "all non-major dependencies",
+			"groupSlug": "all-minor-patch"
+		}
+	]
+}
