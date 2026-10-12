@@ -215,6 +215,47 @@ describe('Talk sync cadence', () => {
 		expect(waits[0]).toBeGreaterThan(900);
 	});
 
+	it('never reports a sync as held once it has answered', async () => {
+		let revision = 0;
+		const { context } = await syncFixture({
+			sync: () => {
+				revision++;
+				return {
+					operationResponse: {
+						operations: [receive(revision, textMessage(String(300 + revision), 'x'))],
+						hasMoreOps: false
+					}
+				};
+			}
+		});
+		const controller = new AbortController();
+		let sleeping = false;
+		let heldWhileSleeping = 0;
+		let sleeps = 0;
+
+		await runTalkLoop(
+			context,
+			{
+				name: 'talk',
+				signal: controller.signal,
+				// No sync is in flight between polls; a held report now comes from a finished one.
+				sleep: async () => {
+					sleeping = true;
+					await new Promise((resolve) => setTimeout(resolve, 60));
+					sleeping = false;
+					if (++sleeps === 3) controller.abort();
+				},
+				random: Math.random,
+				canRun: () => true,
+				log: () => {}
+			},
+			{ heldMs: 20, onHeld: () => void (sleeping && heldWhileSleeping++) }
+		);
+
+		expect(sleeps).toBe(3);
+		expect(heldWhileSleeping).toBe(0);
+	});
+
 	it('backs off exponentially with jitter between 1 s and 5 min and resets after success', async () => {
 		expect([0, 1, 2].map((failures) => backoffMs(failures, () => 0))).toEqual([1000, 1000, 2000]);
 		expect(backoffMs(30, () => 1)).toBe(300_000);
