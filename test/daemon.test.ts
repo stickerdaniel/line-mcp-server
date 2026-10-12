@@ -348,12 +348,12 @@ describe('daemon', () => {
 					};
 				}
 			},
-			{ notify: () => {}, worker: false, talkHeldMs: 20 }
+			// Far above the 5 ms answers, so a slow runner cannot make one look held.
+			{ notify: () => {}, worker: false, talkHeldMs: 1000 }
 		);
 
-		await new Promise((resolve) => setTimeout(resolve, 200));
+		await until(() => revision > 5, 'more than five polls');
 
-		expect(revision).toBeGreaterThan(5);
 		expect(daemon.health()).toBe('catching_up');
 	});
 
