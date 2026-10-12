@@ -158,7 +158,7 @@ describe('MCP transport', () => {
 	});
 
 	it(
-		'drops the queued work of 1,000 abandoned tool calls and keeps none of it',
+		'drops the queued work of 1,000 abandoned tool calls and keeps none of their requests alive',
 		{ timeout: 30_000 },
 		async () => {
 			setFlagsFromString('--expose-gc');
