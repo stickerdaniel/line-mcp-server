@@ -96,7 +96,30 @@ const migrations = [
 	) STRICT;`,
 	// Read order of one chat: send time (a tombstone without one sorts as 0),
 	// then row id, so keyset pages never skip or repeat a row.
-	`CREATE INDEX message_chat_order ON message (service, chat_id, coalesce(sent_at, 0), id);`
+	`CREATE INDEX message_chat_order ON message (service, chat_id, coalesce(sent_at, 0), id);`,
+	// Mutating actions by caller idempotency key (architecture, Outbox). The frozen
+	// payload keeps message text only as its SHA-256, so no plaintext outlives
+	// an unsend here (architecture, Tombstones); `payload_hash` covers the text.
+	`CREATE TABLE outbox (
+		idempotency_key TEXT PRIMARY KEY,
+		operation TEXT NOT NULL CHECK (operation IN ('send_message', 'react', 'unsend')),
+		service TEXT NOT NULL CHECK (service IN ('talk', 'square')),
+		chat_id TEXT NOT NULL,
+		thread_id TEXT,
+		target_id TEXT,
+		payload TEXT NOT NULL,
+		payload_hash TEXT NOT NULL,
+		state TEXT NOT NULL CHECK (state IN ('in_flight', 'sent', 'failed', 'unknown')),
+		request_seq TEXT,
+		message_id TEXT,
+		correlation TEXT NOT NULL DEFAULT '{}',
+		error TEXT,
+		reconciled_by TEXT,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	) STRICT;
+	CREATE INDEX outbox_message ON outbox (service, chat_id, message_id) WHERE message_id IS NOT NULL;
+	CREATE INDEX outbox_in_flight ON outbox (state) WHERE state = 'in_flight';`
 ];
 
 export const schemaVersion = migrations.length;

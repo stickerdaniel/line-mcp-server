@@ -4,8 +4,12 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import { FastMCP, type Logger } from '@prefecthq/fastmcp-ts/server';
 import { LineMcpError } from '../errors.ts';
 import { lockPort } from '../lock.ts';
+import { Outbox } from '../outbox.ts';
 import { Invocations, type ToolContext, registerTool } from './tool.ts';
 import * as archiveTools from './tools/archive.ts';
+import { react } from './tools/react.ts';
+import { sendMessage } from './tools/send.ts';
+import { unsend } from './tools/unsend.ts';
 import * as upstreamTools from './tools/upstream.ts';
 
 /** Default MCP port; the lock port (47821) is a different one. */
@@ -35,6 +39,9 @@ export const readTools = [
 	upstreamTools.getProfile
 ];
 
+/** Tools that act on LINE, each through the outbox. */
+export const mutatingTools = [sendMessage, react, unsend];
+
 export interface McpServer {
 	readonly port: number;
 	readonly url: string;
@@ -59,7 +66,9 @@ function refuse(res: ServerResponse, status: number, message: string): void {
 }
 
 /**
- * Serves the read tools over Streamable HTTP on `127.0.0.1:<port>/mcp`.
+ * Serves the tools over Streamable HTTP on `127.0.0.1:<port>/mcp`. Opening the
+ * outbox here is the startup step that turns an `in_flight` action left by a
+ * stopped daemon into `unknown`.
  *
  * Prefect's own listener (`run()`) answers CORS preflights and attaches
  * `Access-Control-Allow-Origin: *` unless told otherwise, and its DNS-rebinding
@@ -83,7 +92,10 @@ export async function startMcpServer(
 		logLevel: 'warn'
 	});
 	const invocations = new Invocations();
-	for (const tool of readTools) registerTool(mcp, context, tool, invocations);
+	const served = { ...context, outbox: new Outbox(context.db, { log: context.log }) };
+	for (const tool of [...readTools, ...mutatingTools]) {
+		registerTool(mcp, served, tool, invocations);
+	}
 
 	const handler = toNodeHandler(
 		{ fetch: (request, init) => mcp.fetch(request, init) },

@@ -93,8 +93,7 @@ export async function openSession(options: SessionOptions = {}): Promise<Session
 				if (control.state === 'needs_login') return undefined;
 				throw error;
 			});
-			// LINEJS resolves undefined when the retry after a refresh is told to
-			// refresh again (base/request/mod.ts:238-278); that verifies nothing.
+			// An answer without the profile verifies nothing.
 			if (control.state !== 'needs_login') {
 				if (!profile?.mid) {
 					throw new LineMcpError('not_logged_in', 'LINE did not return the account profile');
@@ -280,6 +279,35 @@ class Control {
 	}
 }
 
+/**
+ * The dispatch hook of the mutation in progress, if any. Inside `watchDispatch`
+ * every request that passed the guards calls it at the transport, after LINEJS
+ * built and serialized it and right before it leaves for LINE, so the outbox
+ * can tell a failure before LINE could have acted from one after. Talk and
+ * Square RPCs, obs uploads and E2EE media all leave through `base.fetch`.
+ */
+const dispatchHook = new AsyncLocalStorage<() => void>();
+
+/** Runs `body` with `onDispatch` as its dispatch hook; a hook that throws stops the request unsent. */
+export function watchDispatch<T>(onDispatch: () => void, body: () => Promise<T>): Promise<T> {
+	return dispatchHook.run(onDispatch, body);
+}
+
+/**
+ * Set only while a send registers the missing shared key of its group, the
+ * one registration line-mcp performs (architecture, E2EE key boundaries): LINE drops a group's
+ * key on every membership change, and the next sender has to create one.
+ */
+const groupKeyRegistration = new AsyncLocalStorage<true>();
+
+/**
+ * Runs `body` with `registerE2EEGroupKey` and LINEJS's `tryRegisterE2EEGroupKey`
+ * allowed. Every other registration stays blocked inside it as well.
+ */
+export function allowGroupKeyRegistration<T>(body: () => Promise<T>): Promise<T> {
+	return groupKeyRegistration.run(true, body);
+}
+
 /** RPCs never sent: key registration and read state (architecture, E2EE key boundaries). */
 const blockedMethods = new Map<string, ErrorCode>([
 	['registerE2EEPublicKey', 'key_registration_blocked'],
@@ -300,8 +328,11 @@ function installGuards(base: BaseClient, control: Control, storage: SqliteStorag
 			'LINE transferred no E2EE keys and registering a new key pair is disabled'
 		);
 	};
-	// Reached from a NOT_FOUND group key lookup (base/e2ee/mod.ts:240-246).
-	base.e2ee.tryRegisterE2EEGroupKey = async () => {
+	// Reached from a NOT_FOUND group key lookup (base/e2ee/mod.ts:240-246), so
+	// a read of a keyless group would register one; only a send may.
+	const tryRegisterE2EEGroupKey = base.e2ee.tryRegisterE2EEGroupKey.bind(base.e2ee);
+	base.e2ee.tryRegisterE2EEGroupKey = async (chatMid) => {
+		if (groupKeyRegistration.getStore()) return await tryRegisterE2EEGroupKey(chatMid);
 		throw new LineMcpError(
 			'missing_key',
 			'The group key is not available and group key registration is disabled'
@@ -316,13 +347,34 @@ function installGuards(base: BaseClient, control: Control, storage: SqliteStorag
 	Object.assign(base, {
 		fetch: (async (info, init) => {
 			control.assertOnline();
+			dispatchHook.getStore()?.();
 			return await fetch(info, init);
 		}) satisfies typeof fetch,
 		fetchPush: (async (info, init) => {
 			control.assertOnline();
+			dispatchHook.getStore()?.();
 			return await fetchPush(info, init);
 		}) satisfies typeof fetchPush
 	});
+
+	// LINEJS resolves a request whose retry after a refresh is told to refresh
+	// again with that refusal instead of throwing (base/request/mod.ts:238-278),
+	// so its caller would read an empty answer as success. Thrown as LINEJS
+	// throws any other refusal, it counts as auth loss below.
+	const core = base.request as unknown as { requestCore: RequestCore };
+	const requestCore = core.requestCore.bind(base.request);
+	core.requestCore = async (...args) => {
+		const response = await requestCore(...args);
+		if (response.data.e) {
+			const [path, , method] = args;
+			throw new InternalError(
+				'RequestError',
+				`Request internal failed, ${String(method)}(${String(path)})`,
+				response.data.e as Record<string, unknown>
+			);
+		}
+		return response;
+	};
 
 	installRefresh(base, storage);
 
@@ -333,7 +385,8 @@ function installGuards(base: BaseClient, control: Control, storage: SqliteStorag
 		const method = args[1];
 		control.assertOnline();
 		const blocked = blockedMethods.get(method);
-		if (blocked) {
+		const allowed = method === 'registerE2EEGroupKey' && groupKeyRegistration.getStore();
+		if (blocked && !allowed) {
 			control.log({ event: 'upstream_blocked', method });
 			throw new LineMcpError(blocked, `${method} is disabled in line-mcp`);
 		}
@@ -349,12 +402,14 @@ function installGuards(base: BaseClient, control: Control, storage: SqliteStorag
 				control.log({ event: 'upstream_error', ...mapError(error, method) });
 			}
 			if (recover && canRecoverSquareAuth(args, error, storage)) {
-				// LINEJS refreshes only on the Talk code, so a Square read whose
-				// token expired gets one refresh and one retry before it counts as
-				// auth loss. Mutations stay with the caller. A rejected refresh
-				// marks the loss in its own pass through this wrapper.
+				// LINEJS refreshes only on the Talk code, so a Square request whose
+				// token expired gets one refresh before it counts as auth loss. A
+				// read is retried; a mutation is not resent, since LINE may have
+				// acted on it, and its caller keeps this failure. A rejected
+				// refresh marks the loss in its own pass through this wrapper.
 				await base.auth.tryRefreshToken();
-				return await call(args, false);
+				if (squareReadMethod.test(method)) return await call(args, false);
+				throw error;
 			}
 			if (isTerminalAuthError(error)) control.needsLogin();
 			throw error;
@@ -364,6 +419,9 @@ function installGuards(base: BaseClient, control: Control, storage: SqliteStorag
 		call(args, true)) as typeof base.request.request;
 }
 
+/** LINEJS's private request step, which returns the parsed answer with its exception. */
+type RequestCore = (...args: unknown[]) => Promise<{ data: Record<string, unknown> }>;
+
 const squareReadMethod = /^(get|fetch|search|find)[A-Z]/;
 
 function canRecoverSquareAuth(
@@ -371,10 +429,9 @@ function canRecoverSquareAuth(
 	error: unknown,
 	storage: SqliteStorage
 ): boolean {
-	const [, method, , , path] = args;
+	const [, , , , path] = args;
 	return (
 		path === '/SQ1' &&
-		squareReadMethod.test(method) &&
 		error instanceof InternalError &&
 		error.data.errorCode === 'AUTHENTICATION_FAILURE' &&
 		typeof storage.getSync('refreshToken') === 'string'

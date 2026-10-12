@@ -6,7 +6,13 @@ import { readAccount } from '../src/db.ts';
 import { mapError } from '../src/errors.ts';
 import { decryptMessage } from '../src/keys.ts';
 import { databasePath } from '../src/paths.ts';
-import { type LogEntry, openSession, type Session, type SessionOptions } from '../src/session.ts';
+import {
+	allowGroupKeyRegistration,
+	type LogEntry,
+	openSession,
+	type Session,
+	type SessionOptions
+} from '../src/session.ts';
 import {
 	fakeHttpUpstream,
 	fakeUpstream,
@@ -72,6 +78,49 @@ describe('session guards', () => {
 
 		expect(upstream.calls).not.toContain('getLastE2EEPublicKeys');
 		expect(upstream.calls.filter((method) => method.startsWith('register'))).toEqual([]);
+	});
+
+	it('allows only group key registration, and only inside its allowance', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const upstream = fakeUpstream({
+			getProfile: profile,
+			registerE2EEGroupKey: () => ({ groupKeyId: 11 }),
+			registerE2EEPublicKey: () => ({ keyId: 3 }),
+			registerE2EEPublicKeyV2: () => ({})
+		});
+		const session = await start(root, { createClient: upstream.createClient });
+		const { base } = session;
+		const groupKey = () =>
+			base.talk.registerE2EEGroupKey({
+				keyVersion: 1,
+				chatMid: groupMid,
+				members: [selfMid],
+				keyIds: [2],
+				encryptedSharedKeys: [Buffer.alloc(48)]
+			});
+		const others = () => [
+			base.talk.registerE2EEPublicKey({
+				publicKey: { version: 1, keyId: 3, keyData: Buffer.alloc(32) }
+			}),
+			base.request.request([], 'registerE2EEPublicKeyV2', 4, true, '/S4'),
+			base.e2ee.registerE2EEKeyPair()
+		];
+		const blocked = { code: 'key_registration_blocked' };
+
+		await expect(groupKey()).rejects.toMatchObject(blocked);
+		const inside = await allowGroupKeyRegistration(async () => ({
+			group: await groupKey(),
+			others: await Promise.allSettled(others())
+		}));
+
+		expect(inside.group).toMatchObject({ groupKeyId: 11 });
+		expect(inside.others.map((result) => result.status)).toEqual([
+			'rejected',
+			'rejected',
+			'rejected'
+		]);
+		expect(upstream.calls).toEqual(['getProfile', 'registerE2EEGroupKey']);
 	});
 
 	it('blocks all upstream work after a token write fails', async () => {

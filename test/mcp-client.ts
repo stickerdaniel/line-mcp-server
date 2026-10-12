@@ -33,15 +33,26 @@ export interface Served {
 	logs: LogEntry[];
 }
 
+export interface ServeOptions {
+	maxAttachmentBytes?: number;
+	/** An existing state root, as left by an earlier server; a fresh one by default. */
+	root?: string;
+	/** Answers instead of `handlers` and `fetch`, for example at the HTTP layer. */
+	upstream?: FakeUpstream;
+	/** The server's upstream pool; two slots by default. */
+	pool?: Pool;
+}
+
 /** The MCP server on a free port over a real session on a temporary state root. */
 export async function serve(
 	handlers: Record<string, Handler> = {},
 	fetch?: (request: Request) => Promise<Response>,
-	options: { maxAttachmentBytes?: number; pool?: Pool } = {}
+	options: ServeOptions = {}
 ): Promise<Served> {
-	const root = tempRoot();
-	seedLive(root, selfMid, { authToken: 'token' });
-	const upstream = fakeUpstream({ getProfile: () => ({ mid: selfMid }), ...handlers }, fetch);
+	const root = options.root ?? tempRoot();
+	if (!options.root) seedLive(root, selfMid, { authToken: 'token' });
+	const upstream =
+		options.upstream ?? fakeUpstream({ getProfile: () => ({ mid: selfMid }), ...handlers }, fetch);
 	const session = await openSession({
 		root,
 		lockPort: await freePort(),
@@ -54,9 +65,9 @@ export async function serve(
 			db: session.db,
 			base: session.base,
 			selfMid,
-			pool: new Pool(2),
+			pool: options.pool ?? new Pool(2),
 			attachments: join(root, 'attachments'),
-			...options,
+			...(options.maxAttachmentBytes ? { maxAttachmentBytes: options.maxAttachmentBytes } : {}),
 			status: () => archiveStatus(session.db),
 			log: (entry) => void logs.push(entry)
 		},

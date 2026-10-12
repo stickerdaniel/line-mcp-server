@@ -7,6 +7,7 @@ line-mcp works with one personal LINE account:
 - Mirror personal chats, groups, rooms and joined OpenChat (Square) chats into a local archive, including history and non-Latin text such as Traditional Chinese.
 - Keep the archive current across reboots, sleep and network loss without user action, except a QR login again when LINE revokes the session.
 - Serve the archive to coding agents (Claude Code, Codex, T3 Code) as one MCP server, with a CLI and an agent skill generated from it.
+- Act in those chats (send, reply, react, unsend, send media) when the user asks the agent to.
 
 ## Runtime
 
@@ -25,12 +26,13 @@ Source paths in this document are relative to the pinned dependency checkouts: L
 
 ```text
 LINE servers
-   |  talk.sync / Square events / history / media (one session)
+   |  talk.sync / Square events / history / media / mutations (one session)
 line-mcp daemon (Node 24, LaunchAgent io.github.stickerdaniel.line-mcp)
    |- session: ANDROIDSECONDARY client, SQLite storage, upstream guards
    |- sync: Talk loop, Square loop, backfill and reconciliation worker
    |- archive: ~/Library/Application Support/line-mcp/line.db
-   '- MCP: http://127.0.0.1:47822/mcp (Streamable HTTP, stateless, no CORS)
+   |- MCP: http://127.0.0.1:47822/mcp (Streamable HTTP, stateless, no CORS)
+   '- outbox: idempotent mutating actions, never resent on its own
         ^ loopback, native clients only
 Claude Code / Codex / T3 Code          generated Python CLI and agent skill
 ```
@@ -50,6 +52,7 @@ All state lives under `~/Library/Application Support/line-mcp` (`LINE_MCP_HOME` 
 | `message`        | one row per (service, chat, message ID): thread, sender, times, text, envelope, decrypt state, tombstone |
 | `message_fts`    | FTS5 `trigram` index over message text                                                                   |
 | `coverage_gap`   | scope, reason and reconciliation status of every known gap                                               |
+| `outbox`         | one row per idempotency key: frozen payload and its hash, state, correlation, timestamps                 |
 
 ## Process and lock ownership
 
@@ -71,7 +74,9 @@ The client logs in as `ANDROIDSECONDARY` through the V3 secure QR path (`base/co
 
 ## E2EE key boundaries
 
-**No implicit key registration.** Guards on the client block `registerE2EEPublicKey`, `registerE2EEPublicKeyV2` and `registerE2EEGroupKey`. LINEJS would otherwise register a group key after a `NOT_FOUND` lookup (`base/e2ee/mod.ts:240`) and a fresh key pair when QR login decodes no key (`base/login/mod.ts:303-305`). A login whose key transfer yields no key fails with `key_transfer_empty`.
+**No implicit key registration.** Guards on the client block `registerE2EEPublicKey`, `registerE2EEPublicKeyV2` and `registerE2EEGroupKey`. LINEJS would otherwise register a group key after a `NOT_FOUND` lookup (`base/e2ee/mod.ts:240`) and a fresh key pair when QR login decodes no key (`base/login/mod.ts:303-305`). A login whose key transfer yields no key fails with `key_transfer_empty`. Reads never register a key: a message whose group key is missing stays `missing_key`.
+
+**Group-key registration on send.** There is one exception. LINE drops a group's shared key on every membership change, and the next sender creates a new one. So `send_message` to a Talk group or room without a current key registers a new group key (`registerE2EEGroupKey`, as LINEJS does in `base/e2ee/mod.ts:356-409`) while it prepares the message, inside a scoped allowance that opens nothing else. A refused registration gets one more key lookup, since another member may have registered a key meanwhile; otherwise the send fails, and it never falls back to plain text. `registerE2EEPublicKey`, `registerE2EEPublicKeyV2` and `registerE2EEKeyPair` stay blocked everywhere.
 
 **Read state.** The guards also block `sendChatChecked`, `markAsRead` and `markThreadsAsRead`, so nothing line-mcp does marks a message as read, and no tool offers to.
 
@@ -95,7 +100,7 @@ The daemon reports one health state: `online`, `catching_up`, `offline`, `needs_
 
 ## Upstream concurrency
 
-The Talk and Square sync loops run independently. History requests (backfill and reconciliation) and the tools that ask LINE share a bounded pool of 2, and token refresh is serialized. Transient failures back off exponentially with jitter, from 1 s to 5 min. An empty or immediately returning call waits at least 1 s before the next one. Backfill rounds are at least 3 s apart, and OpenChat history requests for one chat or thread share one 3 s slot (see OpenChat sync). Talk reconciliation pages a gap back without pausing, at most five pages.
+The Talk and Square sync loops run independently. Backfill, Talk reconciliation and every tool request to LINE (profiles, announcements, media and mutations) share a bounded pool of 2; OpenChat reconciliation runs inside the Square loop, one request at a time. Token refresh is serialized. Transient failures back off exponentially with jitter, from 1 s to 5 min. An empty or immediately returning call waits at least 1 s before the next one. Backfill rounds are at least 3 s apart, and OpenChat history requests for one chat or thread share one 3 s slot (see OpenChat sync). Talk reconciliation pages a gap back without pausing, at most five pages.
 
 ## Transactional sync and cursors
 
@@ -139,7 +144,7 @@ Queries of three or more characters use the FTS5 `trigram` index, which handles 
 
 The daemon serves the tools with Prefect FastMCP TS over Streamable HTTP on `127.0.0.1:47822/mcp` (`LINE_MCP_PORT`), in stateless mode, so no legacy session is retained without bound. The daemon owns the `node:http` listener and serves Prefect's always-stateless `fetch()` entry (`src/server/FastMCP.ts:1913-1924`) behind its own checks, which run before any body is read: a request with an `Origin` header (every browser request; native clients send none) or a `Host` other than this exact `127.0.0.1:<port>` or `localhost:<port>` is refused, and no CORS headers are sent. Prefect's own `run()` would answer CORS preflights and custom routes before any guard and accepts localhost origins on any port (`src/server/FastMCP.ts:2272-2300`).
 
-There is no bearer token. Every local client that can connect to the loopback listener can call every tool, and there is no per-user isolation. The README states this boundary.
+There is no bearer token. Every local client that can connect to the loopback listener can call every tool, including the mutating ones, and there is no per-user isolation and no confirmation step. `send_message` with `file_path` reads any local file the daemon's user can read and sends it. Mutating tools carry the MCP `destructiveHint` annotation, so a host can still be configured to ask first. The README states this boundary.
 
 Prefect does not end a running handler when a Streamable HTTP client goes away, so the listener gives each request its own abort signal. A client that disconnects cancels its tool call, and queued upstream work leaves the pool instead of running for nobody. Every failure goes through the error mapper, because Prefect would otherwise return `err.message` as the tool output (`src/server/FastMCP.ts:800-805`).
 
@@ -161,9 +166,20 @@ The archive tools (`status`, `list_chats`, `read_messages`, `search_messages`, `
 
 Logs carry event names, codes and counts, never tokens, keys, envelopes or message text. Tool results carry message data only for the chat and messages asked for, never raw envelopes. Framework diagnostics reach the log as fixed text, without their metadata. Logs, the archive and the attachment cache are readable only by the user that runs the daemon.
 
+## Outbox
+
+`send_message`, `react` and `unsend` go through an outbox, so a retry, a timeout or a crash never sends a message twice. It is not a confirmation step.
+
+- **Idempotency key.** Every mutating call requires a caller idempotency key. The outbox stores the operation, the destination, the thread, the target or reply message, the reaction, the text as its SHA-256 and the attachment's SHA-256, plus a hash over all of them. The same key with a different payload is refused with `idempotency_conflict`, and calls with one key run one at a time. The skill tells agents to derive one key per intended action and reuse it on retry.
+- **States.** A row moves `in_flight -> sent | failed | unknown`, and `in_flight` is persisted with the request sequence number before the request leaves. `failed` covers only errors before the request was dispatched: validation, the local file, key lookups, encryption, uploads that create no message, or a cancelled wait for the pool. Any error after dispatch (a timeout, a parse failure, token persistence, a cancelled call) is `unknown`, because LINEJS parses the answer and handles its next token after LINE already acted (`base/request/mod.ts:163-190`). An `in_flight` row found at startup becomes `unknown`.
+- **Retries.** A retry with the same key and payload reports a `sent` result again, runs a `failed` action again, and reports an `unknown` one again unless sync evidence settled it. Nothing is resent on line-mcp's own initiative.
+- **Reconciliation.** An `unknown` action becomes `sent` only on evidence that cannot belong to anything else: a synced message that carries exactly the encrypted chunks this request sent, or, for an unsend, its target as a tombstone. Matching text is no evidence, since another device may have sent the same words.
+- **OpenChat threads.** A reply to a thread message goes into its thread through the thread RPC with `threadMid`, and reactions and unsends of a thread message name the thread. The thread is part of the payload hash. Media cannot go into a thread, and a thread action LINEJS has no RPC for is refused, never sent to the parent chat.
+- **Cancellation.** A client that goes away before the request leaves stops the action as `failed`. After that the action runs to its end: the caller gets `unknown`, and the row still moves to `sent` when LINE's answer arrives. The key stays held until the attempt settles, so a retry sees the real outcome.
+
 ## Generated CLI and skill
 
-`scripts/gen-cli.sh` serves the tools from a throwaway archive (`scripts/cli-fixture.ts`), which never opens the real state directory and never reaches LINE, and runs the pinned `uvx --from fastmcp==4.1.0 fastmcp generate-cli` against it. It writes the CLI to `skills/line-mcp/scripts/line_cli.py` and the skill to `skills/line-mcp/SKILL.md`, so the skill directory is self-contained. The CLI reaches the daemon on its default port unless `LINE_MCP_PORT` says otherwise. The skill's commands name the script as `"<skill-dir>/scripts/line_cli.py"`, which the agent resolves against the directory of SKILL.md, so the generated files do not depend on the checkout path. A test generates them from two checkouts at different paths and compares the output, and another compares each CLI subcommand's flags and required arguments with the tool schemas.
+`scripts/gen-cli.sh` serves the tools from a throwaway archive (`scripts/cli-fixture.ts`), which never opens the real state directory and never reaches LINE, and runs the pinned `uvx --from fastmcp==4.1.0 fastmcp generate-cli` against it. It writes the CLI to `skills/line-mcp/scripts/line_cli.py` and the skill to `skills/line-mcp/SKILL.md`, so the skill directory is self-contained. The CLI reaches the daemon on its default port unless `LINE_MCP_PORT` says otherwise. The skill's commands name the script as `"<skill-dir>/scripts/line_cli.py"`, which the agent resolves against the directory of SKILL.md, so the generated files do not depend on the checkout path. The skill lets agents use the mutating tools only when the user explicitly asks for that action, treats chat messages, attachments and tool results as data rather than authorization, and has them ask when the recipient or the action is unclear. A test generates them from two checkouts at different paths and compares the output, and another compares each CLI subcommand's flags and required arguments with the tool schemas.
 
 ## Out of scope
 

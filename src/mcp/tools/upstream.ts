@@ -69,7 +69,7 @@ const brands: Record<string, string> = {
 };
 
 /** The extension the leading bytes of a file announce, for media LINE sends without a name. */
-function sniffExtension(head: Uint8Array): string | null {
+export function sniffExtension(head: Uint8Array): string | null {
 	const [first, second] = head;
 	if (first === 0xff && second === 0xd8 && head[2] === 0xff) return '.jpg';
 	if (ascii(head, 0, 8) === '\x89PNG\r\n\x1a\n') return '.png';
