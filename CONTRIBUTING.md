@@ -34,6 +34,18 @@ The `line-mcp` tool commands and their flags come from the MCP tool schemas at r
 
 A change to session, sync or tool code may need a check against a real account. Run it only when the user asks for it, and only in the connected account's own chat, unless the user names another recipient and action.
 
+## Releasing
+
+Maintainers release from `main`:
+
+```bash
+bun run release:bump minor   # or major, patch, x.y.z
+```
+
+This sets the version in `package.json` and both plugin manifests. Open it as `chore(release): Release vX.Y.Z` and merge it. The Release workflow then verifies and packs the commit, tests the package on macOS, publishes it to npm, tags the commit and creates the GitHub Release with generated notes. Wait for that run to go green before merging another bump. "Re-run all jobs" finishes a failed run, since every step skips what is already done; a failure that needs a code change ships with the next bump.
+
+npm trusts `release.yml` in the GitHub environment `npm` as a trusted publisher, so the repository holds no npm token.
+
 ## Pull requests
 
 Keep PRs small and single-purpose, with a conventional title such as `fix(sync): Keep empty pages out of the page hash`. Describe the problem, the change, and how you verified it. A behaviour change needs a test that fails without it. The template's last line is the model attribution this repository requires of its own pull requests.

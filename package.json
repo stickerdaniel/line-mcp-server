@@ -34,6 +34,7 @@
 		"build": "node scripts/build.ts",
 		"prepack": "bun run build",
 		"cli": "node src/cli.ts",
+		"release:bump": "node scripts/bump.ts",
 		"check": "tsc --noEmit",
 		"lint": "oxlint",
 		"format": "prettier --write .",
