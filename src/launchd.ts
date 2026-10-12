@@ -2,13 +2,12 @@ import { execFile, execFileSync } from 'node:child_process';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { LineMcpError } from './errors.ts';
 
 export const label = 'io.github.stickerdaniel.line-mcp';
 
+// `../launchd` from both `src/launchd.ts` and the bundled `dist/cli.js`.
 const template = new URL(`../launchd/${label}.plist`, import.meta.url);
-export const cliPath = fileURLToPath(new URL('./cli.ts', import.meta.url));
 
 /** Variables the daemon needs to see the same state root and ports as `install`. */
 const forwarded = ['LINE_MCP_HOME', 'LINE_MCP_LOCK_PORT', 'LINE_MCP_PORT'];
@@ -36,7 +35,7 @@ function xml(value: string): string {
 		.replaceAll('"', '&quot;');
 }
 
-/** The LaunchAgent for this checkout: absolute Node path, this CLI, private logs. */
+/** The LaunchAgent for this installation: absolute Node path, the CLI entry, private logs. */
 export function renderPlist(input: {
 	node: string;
 	cli: string;

@@ -7,7 +7,6 @@ import { mapError } from './errors.ts';
 import {
 	type AgentPaths,
 	agentLoaded,
-	cliPath,
 	isCellarPath,
 	label,
 	nodeVersion,
@@ -34,6 +33,8 @@ export async function doctor(input: {
 	root: string;
 	paths: AgentPaths;
 	env: NodeJS.ProcessEnv;
+	/** The CLI entry `install` writes into the LaunchAgent. */
+	cli: string;
 	/** The Node `install` would write; selected like `install` when absent. */
 	node?: string;
 	nodeVersion?: string;
@@ -119,7 +120,7 @@ export async function doctor(input: {
 		}
 	}
 
-	const expected = renderPlist({ node, cli: cliPath, log: input.paths.log, env: input.env });
+	const expected = renderPlist({ node, cli: input.cli, log: input.paths.log, env: input.env });
 	const installed = existsSync(input.paths.plist)
 		? readFileSync(input.paths.plist, 'utf-8')
 		: undefined;
@@ -130,8 +131,8 @@ export async function doctor(input: {
 			installed === undefined
 				? `${input.paths.plist} missing; run line-mcp install`
 				: installed === expected
-					? `${input.paths.plist} matches this checkout`
-					: `${input.paths.plist} differs from this checkout; run line-mcp install`
+					? `${input.paths.plist} matches this installation`
+					: `${input.paths.plist} differs from this installation; run line-mcp install`
 	});
 	try {
 		const loaded = await agentLoaded(input.env);

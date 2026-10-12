@@ -16,6 +16,7 @@ export type ErrorCode =
 	| 'launchctl_failed'
 	| 'qr_expired'
 	| 'invalid_node'
+	| 'npx_cache'
 	| 'mcp_port_in_use'
 	| 'mcp_port_failed'
 	| 'invalid_argument'

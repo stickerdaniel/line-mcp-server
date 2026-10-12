@@ -13,8 +13,8 @@ Status: in development. See [`docs/architecture.md`](docs/architecture.md) for t
 
 - macOS. The daemon runs as a per-user LaunchAgent.
 - [Node](https://nodejs.org) 24.18 or later
-- [Bun](https://bun.sh) to install dependencies
-- [uv](https://docs.astral.sh/uv/) for the CLI (`uvx`)
+- [Bun](https://bun.sh) to install from a clone and for development
+- [uv](https://docs.astral.sh/uv/) for the generated CLI and skill (`uvx`)
 - The LINE app on your phone, logged in to the account
 
 ## Install

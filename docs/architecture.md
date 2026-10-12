@@ -11,7 +11,7 @@ line-mcp works with one personal LINE account:
 
 ## Runtime
 
-Node 24.18 or later runs the TypeScript sources directly through type stripping; there is no build step. Bun manages packages. Tests run with Vitest and never contact LINE.
+Node 24.18 or later runs the TypeScript sources directly through type stripping. The npm package ships one bundle, `dist/cli.js`, built with Bun from `src/` and the JSR packages; npm installs the other dependencies. Bun manages packages. Tests run with Vitest and never contact LINE.
 
 ## Principles
 

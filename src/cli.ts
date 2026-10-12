@@ -2,6 +2,7 @@
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import qrcode from 'qrcode-terminal';
 import { archiveStatus } from './archive.ts';
@@ -13,7 +14,6 @@ import {
 	agentPaths,
 	bootoutCommand,
 	bootstrapCommand,
-	cliPath,
 	type Command,
 	describe,
 	isCellarPath,
@@ -36,6 +36,13 @@ const usage = `Usage: line-mcp <command>
   uninstall  Stop and remove the LaunchAgent; keeps the archive [--dry-run] [--purge]
   doctor     Check the local setup without contacting LINE`;
 
+/**
+ * The real path of this file: `src/cli.ts` in a clone, `dist/cli.js` in the
+ * npm package. Node resolves the global bin symlink for the entry module, so
+ * the LaunchAgent and `doctor` name the file itself.
+ */
+const cliPath = fileURLToPath(import.meta.url);
+
 async function main(command: string | undefined, args: string[]): Promise<number> {
 	switch (command) {
 		case 'login':
@@ -52,6 +59,11 @@ async function main(command: string | undefined, args: string[]): Promise<number
 			return await runUninstall(args);
 		case 'doctor':
 			return await runDoctor();
+		case 'help':
+		case '--help':
+		case '-h':
+			console.log(usage);
+			return 0;
 		default:
 			console.error(usage);
 			return 2;
@@ -178,6 +190,13 @@ async function runInstall(args: string[]): Promise<number> {
 		options: { 'dry-run': { type: 'boolean' }, node: { type: 'string' } }
 	});
 	const dryRun = values['dry-run'] === true;
+	// npm may clear its npx cache at any time, and the LaunchAgent's CLI with it.
+	if (cliPath.includes('/_npx/')) {
+		const reason =
+			'line-mcp runs from the npx cache; run npm i -g line-mcp-server, then line-mcp install';
+		if (!dryRun) throw new LineMcpError('npx_cache', reason);
+		console.error(`warning: install refuses this location: ${reason}`);
+	}
 	const paths = agentPaths();
 	const node = selectNode({ override: values.node ?? process.env.LINE_MCP_NODE });
 	if (isCellarPath(node.path)) {
@@ -235,7 +254,12 @@ async function runUninstall(args: string[]): Promise<number> {
 }
 
 async function runDoctor(): Promise<number> {
-	const checks = await doctor({ root: stateRoot(), paths: agentPaths(), env: process.env });
+	const checks = await doctor({
+		root: stateRoot(),
+		paths: agentPaths(),
+		env: process.env,
+		cli: cliPath
+	});
 	for (const check of checks) {
 		const level = check.ok ? (check.warning ? 'warn' : 'ok  ') : 'FAIL';
 		console.log(`${level} ${check.name}: ${check.detail}`);
