@@ -6,9 +6,106 @@ A Node 24 daemon, started by launchd, logs in to LINE as a secondary Android dev
 
 Status: in development. See [`docs/architecture.md`](docs/architecture.md) for the architecture.
 
+> [!WARNING]
+> line-mcp is an unofficial client, not affiliated with or endorsed by LINE. It speaks LINE's private protocol through [LINEJS](https://github.com/evex-dev/linejs). Using it may break LINE's terms of use, and LINE may restrict or ban an account that uses it. Use it at your own risk.
+
+## Requirements
+
+- macOS. The daemon runs as a per-user LaunchAgent.
+- [Node](https://nodejs.org) 24.18 or later
+- [Bun](https://bun.sh) to install dependencies
+- [uv](https://docs.astral.sh/uv/) for the CLI (`uvx`)
+- The LINE app on your phone, logged in to the account
+
+## Install
+
+From a clone of this repository:
+
+```bash
+git clone https://github.com/stickerdaniel/line-mcp-server.git
+cd line-mcp-server
+bun install
+node src/cli.ts login
+node src/cli.ts install
+node src/cli.ts doctor
+```
+
+`login` shows a QR code. Scan it with LINE on your phone and enter the PIN it prints. line-mcp joins the account as a secondary device; the phone stays the primary one. `install` writes the LaunchAgent and starts the daemon, which syncs from then on and starts again after a reboot. `doctor` checks the setup without contacting LINE.
+
+Messages and docs write `line-mcp <command>`; from the clone root that is `node src/cli.ts <command>`. If LINE ends the session, the daemon keeps serving the local archive, shows a macOS notification, and waits for another `login`.
+
+## State
+
+| What        | Where                                                           |
+| ----------- | --------------------------------------------------------------- |
+| Archive     | `~/Library/Application Support/line-mcp/line.db` (`0600`)       |
+| Attachments | `~/Library/Application Support/line-mcp/attachments`            |
+| Logs        | `~/Library/Logs/line-mcp/daemon.log`, without message content   |
+| LaunchAgent | `~/Library/LaunchAgents/io.github.stickerdaniel.line-mcp.plist` |
+
+`LINE_MCP_HOME` moves the state directory; set it before `install`, which passes it on to the LaunchAgent.
+
+## Upgrade
+
+```bash
+git pull
+bun install
+node src/cli.ts install
+```
+
+`install` rewrites the LaunchAgent and restarts the daemon. The archive and the session stay.
+
+## Uninstall
+
+```bash
+node src/cli.ts uninstall          # stops the daemon, keeps the archive
+node src/cli.ts uninstall --purge  # also deletes the state directory
+```
+
+To revoke the session itself, log the device out in LINE's device list on your phone.
+
+## MCP endpoint
+
+The daemon serves Streamable HTTP at `http://127.0.0.1:47822/mcp`, stateless, for as long as it runs. `LINE_MCP_PORT` changes the port (set it before `install`, which passes it on to the LaunchAgent); it must differ from the lock port 47821 (`LINE_MCP_LOCK_PORT`).
+
+Read tools: `status`, `list_chats`, `read_messages`, `search_messages`, `list_changes`, `get_attachment`, `get_announcements`, `get_profile`. Every result reports `stale` and the last sync times. Times come as `utc` and as `local`, an ISO 8601 time with its offset in the daemon's system time zone, which `status` reports as `time_zone`.
+
+### Claude Code
+
+```bash
+claude mcp add --transport http --scope user line http://127.0.0.1:47822/mcp
+```
+
+### Codex
+
+In `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.line]
+url = "http://127.0.0.1:47822/mcp"
+# Attachment downloads can take longer than the 60 s default.
+tool_timeout_sec = 180
+```
+
+`codex mcp add line --url http://127.0.0.1:47822/mcp` writes the same entry.
+
+### T3 Code
+
+T3 Code runs Claude Code and Codex, which read the configuration above. Nothing else is needed.
+
+### CLI and skill
+
+`skills/line-mcp/scripts/line_cli.py` calls every tool. From the clone root:
+
+```bash
+uvx --from fastmcp==4.1.0 python skills/line-mcp/scripts/line_cli.py call-tool search_messages --query 晚餐
+```
+
+`skills/line-mcp/SKILL.md` describes those commands for agents; link or copy the `skills/line-mcp` directory into an agent's skills directory. The skill finds its script next to SKILL.md, so it works from any location. Both files are generated: after changing a tool, run `scripts/gen-cli.sh` (needs `uvx`). It serves the tools from a throwaway archive, never the real one.
+
 ## Trust boundary
 
-Every local client that can connect to the loopback listener can call every tool, including sending messages. There is no per-user isolation and no confirmation step.
+Every local client that can connect to the loopback listener can call every tool, including sending messages. There is no per-user isolation and no confirmation step. The listener binds `127.0.0.1` only, refuses any request with an `Origin` header (every browser request) and any `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, and sends no CORS headers, so web pages cannot reach it. There is no bearer token.
 
 ## Development
 
@@ -16,3 +113,9 @@ Every local client that can connect to the loopback listener can call every tool
 bun install
 bun run verify
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+
+## License
+
+[Apache-2.0](LICENSE)

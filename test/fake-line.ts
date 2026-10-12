@@ -33,13 +33,19 @@ export interface FakeUpstream {
 	createClient: (storage: BaseStorage) => BaseClient;
 }
 
-/** Answers RPCs at the LINEJS request layer, below the session guards. */
-export function fakeUpstream(handlers: Record<string, Handler>): FakeUpstream {
+/**
+ * Answers RPCs at the LINEJS request layer, below the session guards. Plain
+ * HTTP requests (media) go to `fetch`, which refuses them by default.
+ */
+export function fakeUpstream(
+	handlers: Record<string, Handler>,
+	fetch: (request: Request) => Promise<Response> = refuseFetch
+): FakeUpstream {
 	const calls: string[] = [];
 	return {
 		calls,
 		createClient: (storage) => {
-			const base = new BaseClient({ device: 'ANDROIDSECONDARY', storage, fetch: refuseFetch });
+			const base = new BaseClient({ device: 'ANDROIDSECONDARY', storage, fetch });
 			base.request.request = (async (value: NestedArray, method: string) => {
 				calls.push(method);
 				const handler = handlers[method];

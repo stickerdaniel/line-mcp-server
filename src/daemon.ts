@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { join } from 'node:path';
 import {
 	type ArchiveStatus,
 	archiveStatus,
@@ -7,10 +8,13 @@ import {
 	type HealthRecord,
 	listGaps,
 	readHealth,
+	upsertParticipant,
 	writeState
 } from './archive.ts';
 import { transaction } from './db.ts';
-import { mapError } from './errors.ts';
+import { LineMcpError, mapError } from './errors.ts';
+import { type McpServer, startMcpServer } from './mcp/server.ts';
+import { stateRoot } from './paths.ts';
 import { type Log, openSession, type Session, type SessionOptions, stderrLog } from './session.ts';
 import { backfillRound, discoverChats, pendingBackfill } from './sync/backfill.ts';
 import {
@@ -61,10 +65,14 @@ export interface DaemonOptions extends SessionOptions {
 	talkHeldMs?: number;
 	discoveryIntervalMs?: number;
 	keyRetryIntervalMs?: number;
+	/** MCP port; `LINE_MCP_PORT` or 47822 by default, 0 for any free port, false for none. */
+	mcpPort?: number | false;
 }
 
 export interface Daemon {
 	readonly session: Session;
+	/** The MCP listener, unless the daemon runs without one. */
+	readonly mcp: McpServer | undefined;
 	health(): Health;
 	/** Cached reads stay available in every state; `stale` says whether to trust them as current. */
 	status(): ArchiveStatus;
@@ -101,6 +109,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 	};
 	const session = await openSession({ ...options, log: sessionLog });
 	const { db } = session;
+	// The own chat (Keep Memo) is named after the profile the session restored.
+	const ownName = session.base.profile?.displayName;
+	try {
+		if (ownName) upsertParticipant(db, 'talk', session.account.mid, ownName, now());
+	} catch {
+		// Only a label; the loops meet a failing archive soon enough.
+	}
 
 	const offline = { talk: false, square: false, worker: false };
 	const catchingUp = { talk: true, square: true };
@@ -141,6 +156,35 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 		now
 	};
 	const pool = new Pool(2);
+	const status = () => {
+		update();
+		return archiveStatus(db, current);
+	};
+
+	// The MCP listener starts before the loops and stops first. A port that
+	// cannot be bound ends startup like a held lock: no fallback port.
+	let mcp: McpServer | undefined;
+	if (options.mcpPort !== false) {
+		try {
+			mcp = await startMcpServer(
+				{
+					db,
+					base: session.base,
+					selfMid: session.account.mid,
+					pool,
+					attachments: join(options.root ?? stateRoot(), 'attachments'),
+					status,
+					log
+				},
+				options.mcpPort === undefined ? {} : { port: options.mcpPort }
+			);
+		} catch (error) {
+			await session.close();
+			throw error;
+		}
+		log({ event: 'mcp_listening', port: mcp.port });
+	}
+
 	const loopOptions = (name: keyof typeof offline): LoopOptions => ({
 		name,
 		signal: controller.signal,
@@ -228,21 +272,31 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 	let stopped: Promise<void> | undefined;
 	return {
 		session,
+		mcp,
 		health: () => {
 			update();
 			return current!;
 		},
-		status: () => {
-			update();
-			return archiveStatus(db, current);
-		},
+		status,
 		loops,
+		// Nothing reaches LINE once ownership is released: the loops stop, the
+		// MCP listener closes and cancels its calls, and the pool fails every
+		// waiter (MCP and sync alike) before anything queued can dispatch. The
+		// session then refuses any call a task still running would make.
 		stop: () =>
 			(stopped ??= (async () => {
 				controller.abort();
-				// A blocking `sync` cannot be cancelled; do not wait for it past a grace period.
+				const closing = mcp?.close();
+				const drained = pool.close(
+					new LineMcpError('shutting_down', 'The daemon is shutting down')
+				);
+				// A blocking `sync` or an RPC in flight cannot be cancelled; do not
+				// wait for it past a grace period.
 				const grace = new AbortController();
-				await Promise.race([loops, timerSleep(2000, grace.signal)]);
+				await Promise.race([
+					Promise.allSettled([loops, closing, drained]),
+					timerSleep(2000, grace.signal)
+				]);
 				grace.abort();
 				await session.close();
 			})())

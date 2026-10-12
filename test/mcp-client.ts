@@ -1,0 +1,172 @@
+// A minimal Streamable HTTP client for tests: raw node:http requests, so a
+// test controls every header (Host, Origin) a real client would send.
+import { request } from 'node:http';
+import { join } from 'node:path';
+import { afterEach } from 'vitest';
+import { archiveStatus } from '../src/archive.ts';
+import { startMcpServer, type McpServer } from '../src/mcp/server.ts';
+import { openSession, type LogEntry, type Session } from '../src/session.ts';
+import { Pool } from '../src/sync/loop.ts';
+import {
+	type FakeUpstream,
+	fakeUpstream,
+	freePort,
+	type Handler,
+	seedLive,
+	selfMid,
+	tempRoot
+} from './fake-line.ts';
+
+const open: { server: McpServer; session: Session }[] = [];
+afterEach(async () => {
+	for (const { server, session } of open.splice(0)) {
+		await server.close();
+		await session.close();
+	}
+});
+
+export interface Served {
+	root: string;
+	session: Session;
+	server: McpServer;
+	upstream: FakeUpstream;
+	logs: LogEntry[];
+}
+
+/** The MCP server on a free port over a real session on a temporary state root. */
+export async function serve(
+	handlers: Record<string, Handler> = {},
+	fetch?: (request: Request) => Promise<Response>,
+	options: { maxAttachmentBytes?: number; pool?: Pool } = {}
+): Promise<Served> {
+	const root = tempRoot();
+	seedLive(root, selfMid, { authToken: 'token' });
+	const upstream = fakeUpstream({ getProfile: () => ({ mid: selfMid }), ...handlers }, fetch);
+	const session = await openSession({
+		root,
+		lockPort: await freePort(),
+		createClient: upstream.createClient,
+		log: () => {}
+	});
+	const logs: LogEntry[] = [];
+	const server = await startMcpServer(
+		{
+			db: session.db,
+			base: session.base,
+			selfMid,
+			pool: new Pool(2),
+			attachments: join(root, 'attachments'),
+			...options,
+			status: () => archiveStatus(session.db),
+			log: (entry) => void logs.push(entry)
+		},
+		{ port: 0 }
+	);
+	open.push({ server, session });
+	// Setup calls are not what a test asserts on.
+	upstream.calls.length = 0;
+	return { root, session, server, upstream, logs };
+}
+
+export interface HttpResult {
+	status: number;
+	headers: Record<string, string | string[] | undefined>;
+	body: string;
+}
+
+export function post(
+	port: number,
+	body: unknown,
+	headers: Record<string, string> = {},
+	method = 'POST'
+): Promise<HttpResult> {
+	return new Promise((resolve, reject) => {
+		const req = request(
+			{
+				host: '127.0.0.1',
+				port,
+				path: '/mcp',
+				// A fresh connection each time, so a closed listener shows as refused.
+				agent: false,
+				method,
+				headers: {
+					'content-type': 'application/json',
+					accept: 'application/json, text/event-stream',
+					...headers
+				}
+			},
+			(res) => {
+				let text = '';
+				res.setEncoding('utf-8');
+				res.on('data', (chunk: string) => (text += chunk));
+				res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, body: text }));
+			}
+		);
+		req.on('error', reject);
+		req.end(method === 'POST' ? JSON.stringify(body) : undefined);
+	});
+}
+
+/** The JSON-RPC message of a response, sent as JSON or as one SSE event. */
+export function message(result: HttpResult): Record<string, unknown> {
+	const data = result.body
+		.split('\n')
+		.filter((line) => line.startsWith('data: '))
+		.map((line) => line.slice(6))
+		.filter(Boolean)
+		.at(-1);
+	return JSON.parse(data ?? result.body) as Record<string, unknown>;
+}
+
+export interface ToolCall {
+	isError: boolean;
+	/** The structured result, or the parsed error text. */
+	data: Record<string, unknown>;
+	text: string;
+}
+
+let nextId = 1;
+
+export async function callTool(
+	port: number,
+	name: string,
+	args: Record<string, unknown> = {}
+): Promise<ToolCall> {
+	const response = message(
+		await post(port, {
+			jsonrpc: '2.0',
+			id: nextId++,
+			method: 'tools/call',
+			params: { name, arguments: args }
+		})
+	);
+	if (response.error) throw new Error(`tools/call ${name}: ${JSON.stringify(response.error)}`);
+	const result = response.result as {
+		isError?: boolean;
+		structuredContent?: Record<string, unknown>;
+		content: { type: string; text: string }[];
+	};
+	const text = result.content.map((block) => block.text).join('');
+	return {
+		isError: result.isError === true,
+		data: result.structuredContent ?? (JSON.parse(text) as Record<string, unknown>),
+		text
+	};
+}
+
+export async function listTools(port: number) {
+	const response = message(
+		await post(port, { jsonrpc: '2.0', id: nextId++, method: 'tools/list' })
+	);
+	return (response.result as { tools: Tool[] }).tools;
+}
+
+export interface Tool {
+	name: string;
+	inputSchema: {
+		type: 'object';
+		properties?: Record<string, { type?: string; anyOf?: unknown[] }>;
+		required?: string[];
+	};
+	annotations?: Record<string, unknown>;
+}

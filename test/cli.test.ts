@@ -91,7 +91,7 @@ async function uninstall(bootout: number) {
 
 describe('install and uninstall', () => {
 	it('prints the LaunchAgent and launchctl commands on a dry run and changes nothing', async () => {
-		const result = await runCli(['install', '--dry-run']);
+		const result = await runCli(['install', '--dry-run'], tempRoot(), { LINE_MCP_PORT: '47900' });
 
 		expect(result.code).toBe(0);
 		expect(result.launched).toBe(false);
@@ -106,6 +106,7 @@ describe('install and uninstall', () => {
 			'<key>ThrottleInterval</key>\n\t<integer>30</integer>',
 			'<key>Umask</key>\n\t<integer>63</integer>',
 			`<key>LINE_MCP_HOME</key>\n\t\t<string>${result.state}</string>`,
+			'<key>LINE_MCP_PORT</key>\n\t\t<string>47900</string>',
 			join(result.home, 'Library', 'Logs', 'line-mcp', 'daemon.log')
 		]) {
 			expect(plist).toContain(setting);

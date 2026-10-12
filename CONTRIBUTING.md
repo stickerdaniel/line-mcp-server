@@ -15,6 +15,16 @@ bun run verify
 
 Use synthetic fixtures only: made-up MIDs, IDs, names and message text. Never commit anything taken from a real account, including tokens, keys, envelopes, archive rows, logs or screenshots.
 
+## Generated CLI and skill
+
+`skills/line-mcp/SKILL.md` and `skills/line-mcp/scripts/line_cli.py` are generated from the MCP tool schemas. Do not edit them by hand. After changing a tool, its description, or the skill text in `scripts/gen-cli.sh`, run:
+
+```bash
+scripts/gen-cli.sh
+```
+
+It needs `uvx` and serves the tools from a throwaway archive, never the real one. `bun run verify` fails when the CLI and the tool schemas disagree.
+
 ## Live checks
 
 A change to session, sync or tool code may need a check against a real account. Run it only when the user asks for it, and only in the connected account's own chat, unless the user names another recipient and action.

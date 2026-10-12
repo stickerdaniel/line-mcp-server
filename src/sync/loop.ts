@@ -74,25 +74,73 @@ export function isTransient(error: unknown, operation: string): boolean {
 export class Pool {
 	readonly size: number;
 	#active = 0;
-	readonly #waiting: (() => void)[] = [];
+	/** Insertion-ordered, so slots go out first come, first served. */
+	readonly #waiting = new Set<{ start: () => void; fail: (reason: unknown) => void }>();
+	#closed: { reason: unknown } | undefined;
+	readonly #idle: (() => void)[] = [];
 
 	constructor(size = 2) {
 		this.size = size;
 	}
 
-	async run<T>(task: () => Promise<T>): Promise<T> {
-		if (this.#active < this.size) {
-			this.#active++;
-		} else {
-			await new Promise<void>((resolve) => this.#waiting.push(resolve));
-		}
+	/**
+	 * Runs `task` once a slot is free. A waiter whose `signal` aborts leaves the
+	 * queue at once and rejects with the signal's reason; a running task is not
+	 * interrupted.
+	 */
+	async run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+		await this.#acquire(signal);
 		try {
 			return await task();
 		} finally {
-			const next = this.#waiting.shift();
-			if (next) next();
-			else this.#active--;
+			this.#release();
 		}
+	}
+
+	/**
+	 * Refuses further work: every waiter and every later `run` rejects with
+	 * `reason`. Resolves once no task is running any more.
+	 */
+	close(reason: unknown): Promise<void> {
+		this.#closed ??= { reason };
+		for (const waiter of this.#waiting) waiter.fail(this.#closed.reason);
+		if (this.#active === 0) return Promise.resolve();
+		return new Promise((resolve) => this.#idle.push(resolve));
+	}
+
+	#acquire(signal: AbortSignal | undefined): Promise<void> {
+		if (this.#closed) return Promise.reject(this.#closed.reason);
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		if (this.#active < this.size) {
+			this.#active++;
+			return Promise.resolve();
+		}
+		return new Promise((resolve, reject) => {
+			const leave = () => {
+				this.#waiting.delete(waiter);
+				signal?.removeEventListener('abort', abort);
+			};
+			const waiter = {
+				start: () => {
+					leave();
+					resolve();
+				},
+				fail: (reason: unknown) => {
+					leave();
+					reject(reason);
+				}
+			};
+			const abort = () => waiter.fail(signal!.reason);
+			signal?.addEventListener('abort', abort, { once: true });
+			this.#waiting.add(waiter);
+		});
+	}
+
+	#release(): void {
+		const [next] = this.#waiting;
+		if (next) return next.start();
+		this.#active--;
+		if (this.#active === 0) for (const resolve of this.#idle.splice(0)) resolve();
 	}
 }
 

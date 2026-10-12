@@ -51,6 +51,7 @@ export interface Session {
 	 * every further upstream dispatch is refused, cached reads stay available.
 	 */
 	storageFailed(): void;
+	/** Refuses every further upstream dispatch, closes the archive and releases the lock. */
 	close(): Promise<void>;
 }
 
@@ -111,6 +112,9 @@ export async function openSession(options: SessionOptions = {}): Promise<Session
 			state: () => control.state,
 			storageFailed: control.storageFailed,
 			close: async () => {
+				// The guards refuse before the lock goes: a task still running when
+				// ownership is released cannot reach LINE any more.
+				control.close();
 				live.close();
 				await lock.release();
 			}
@@ -223,6 +227,7 @@ function copyRows(from: DatabaseSync, to: DatabaseSync, mode: 'replace' | 'merge
 
 class Control {
 	state: SessionState = 'online';
+	#closed = false;
 	readonly #log: Log;
 	readonly #persistNeedsLogin: () => void;
 
@@ -239,8 +244,16 @@ class Control {
 		this.#log(entry);
 	};
 
+	/** Final: from now on nothing dispatches, whatever the state. */
+	close(): void {
+		this.#closed = true;
+	}
+
 	/** Throws while the state forbids upstream work. */
 	assertOnline(): void {
+		if (this.#closed) {
+			throw new LineMcpError('shutting_down', 'The session is closed; upstream work is stopped');
+		}
 		if (this.state === 'storage_error') {
 			throw new LineMcpError('storage_error', 'Session storage failed; upstream work is stopped');
 		}

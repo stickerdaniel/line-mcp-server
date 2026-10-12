@@ -114,6 +114,26 @@ describe('session guards', () => {
 		expect(upstream.calls).toHaveLength(sent);
 		expect(readAccount(session.db)?.authState).toBe('needs_login');
 	});
+
+	it('refuses every upstream call and media request once closed', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const upstream = fakeUpstream({ getProfile: profile });
+		const session = await openSession({
+			root,
+			lockPort: await freePort(),
+			createClient: upstream.createClient,
+			log: () => {}
+		});
+		await session.close();
+		upstream.calls.length = 0;
+
+		await expect(session.base.talk.getProfile()).rejects.toMatchObject({ code: 'shutting_down' });
+		await expect(session.base.fetch('https://obs.line-apps.com/r/talk/m/1')).rejects.toMatchObject({
+			code: 'shutting_down'
+		});
+		expect(upstream.calls).toEqual([]);
+	});
 });
 
 describe('error mapper', () => {

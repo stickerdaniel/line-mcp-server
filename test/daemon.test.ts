@@ -1,5 +1,6 @@
+import { createServer, type AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { openGap, readMessages, searchMessages, writeState } from '../src/archive.ts';
+import { openGap, readMessages, searchMessages, upsertChat, writeState } from '../src/archive.ts';
 import { type Daemon, type DaemonOptions, startDaemon } from '../src/daemon.ts';
 import { openDatabase, readAccount } from '../src/db.ts';
 import { historyStepMs, type Sleep } from '../src/sync/loop.ts';
@@ -14,6 +15,7 @@ import {
 	tempRoot,
 	within
 } from './fake-line.ts';
+import { callTool, post } from './mcp-client.ts';
 import { receive, textMessage } from './sync-fixture.ts';
 
 const daemons: Daemon[] = [];
@@ -53,6 +55,7 @@ async function start(
 		sleep: fastSleep,
 		square: { idleMs: 3 },
 		workerIdleMs: 3,
+		mcpPort: 0,
 		...extra
 	});
 	daemons.push(daemon);
@@ -378,6 +381,91 @@ describe('daemon', () => {
 		} finally {
 			release();
 		}
+	});
+
+	it('serves MCP while it runs and frees the port when it stops', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const { daemon } = await start(root, { sync: () => ({}) }, { notify: () => {} });
+		const port = daemon.mcp!.port;
+
+		await until(() => daemon.health() === 'online', 'online');
+		expect((await callTool(port, 'status')).data).toMatchObject({ health: 'online', stale: false });
+		await daemon.stop();
+
+		await expect(post(port, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).rejects.toThrow(
+			/ECONNREFUSED/
+		);
+	});
+
+	it('fails startup and releases the lock when the MCP port is taken', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const occupant = createServer();
+		await new Promise<void>((resolve) => occupant.listen(0, '127.0.0.1', resolve));
+		const taken = (occupant.address() as AddressInfo).port;
+		const lockPort = await freePort();
+		try {
+			await expect(
+				start(root, { sync: () => ({}) }, { notify: () => {}, lockPort, mcpPort: taken })
+			).rejects.toMatchObject({ code: 'mcp_port_in_use' });
+		} finally {
+			occupant.close();
+		}
+
+		const { daemon } = await start(root, { sync: () => ({}) }, { notify: () => {}, lockPort });
+		expect(daemon.session.state()).toBe('online');
+	});
+
+	it('dispatches nothing queued, from MCP or the worker, once it stops', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+		let lookups = 0;
+		const { daemon, upstream } = await start(
+			root,
+			{
+				sync: () => ({}),
+				getContactsV2: async () => {
+					lookups += 1;
+					await gate;
+					return { contacts: {} };
+				}
+			},
+			// Discovery every round keeps the worker queueing for the pool.
+			{ notify: () => {}, discoveryIntervalMs: 0 }
+		);
+		const port = daemon.mcp!.port;
+		const calls = Array.from({ length: 20 }, () =>
+			callTool(port, 'get_profile', { id: otherMid }).catch(() => 'closed')
+		);
+		await until(() => lookups === 2, 'both pool slots held');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		const sent = upstream.calls.length;
+		const stopping = daemon.stop();
+		release();
+		await within(1000, stopping, 'stop');
+		expect(await Promise.all(calls)).toHaveLength(20);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(upstream.calls.slice(sent)).toEqual([]);
+		expect(lookups).toBe(2);
+	});
+
+	it('names the own chat after the profile it restored', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const { daemon } = await start(
+			root,
+			{ sync: () => ({}), getProfile: () => ({ mid: selfMid, displayName: '丹尼爾' }) },
+			{ notify: () => {} }
+		);
+		upsertChat(daemon.session.db, { service: 'talk', chatId: selfMid, type: 'user' });
+
+		const listed = await callTool(daemon.mcp!.port, 'list_chats');
+		expect(listed.data.chats).toEqual([
+			expect.objectContaining({ chat_id: selfMid, name: '丹尼爾' })
+		]);
 	});
 
 	it('reports online once both loops are caught up', async () => {

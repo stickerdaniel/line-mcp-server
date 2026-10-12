@@ -93,7 +93,10 @@ const migrations = [
 		status TEXT NOT NULL CHECK (status IN ('open', 'reconciled', 'incomplete')),
 		opened_at INTEGER NOT NULL,
 		closed_at INTEGER
-	) STRICT;`
+	) STRICT;`,
+	// Read order of one chat: send time (a tombstone without one sorts as 0),
+	// then row id, so keyset pages never skip or repeat a row.
+	`CREATE INDEX message_chat_order ON message (service, chat_id, coalesce(sent_at, 0), id);`
 ];
 
 export const schemaVersion = migrations.length;
