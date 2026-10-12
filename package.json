@@ -42,6 +42,9 @@
 	"dependencies": {
 		"@evex/linejs": "npm:@jsr/evex__linejs@3.5.0",
 		"@evex/linejs-types": "npm:@jsr/evex__linejs-types@3.5.0",
-		"qrcode-terminal": "0.12.0"
+		"@modelcontextprotocol/node": "2.1.1",
+		"@prefecthq/fastmcp-ts": "1.7.3",
+		"qrcode-terminal": "0.12.0",
+		"zod": "4.6.6"
 	}
 }

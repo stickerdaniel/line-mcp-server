@@ -15,7 +15,17 @@ export type ErrorCode =
 	| 'missing_key'
 	| 'launchctl_failed'
 	| 'qr_expired'
-	| 'invalid_node';
+	| 'invalid_node'
+	| 'mcp_port_in_use'
+	| 'mcp_port_failed'
+	| 'invalid_argument'
+	| 'invalid_cursor'
+	| 'not_found'
+	| 'message_unsent'
+	| 'no_attachment'
+	| 'attachment_too_large'
+	| 'cancelled'
+	| 'shutting_down';
 
 /**
  * An error raised by line-mcp itself. Its message is fixed text written in this

@@ -6,6 +6,7 @@ line-mcp works with one personal LINE account:
 - Decrypt end-to-end encrypted messages with the keys LINE transfers at login.
 - Mirror personal chats, groups, rooms and joined OpenChat (Square) chats into a local archive, including history and non-Latin text such as Traditional Chinese.
 - Keep the archive current across reboots, sleep and network loss without user action, except a QR login again when LINE revokes the session.
+- Serve the archive to coding agents (Claude Code, Codex, T3 Code) as one MCP server, with a CLI and an agent skill generated from it.
 
 ## Runtime
 
@@ -18,17 +19,20 @@ Node 24.18 or later runs the TypeScript sources directly through type stripping;
 - MIDs and tokens are opaque strings, stored unchanged. Integer message IDs and revisions are decimal strings, never JavaScript numbers.
 - Logs and tool results never carry tokens, keys, raw envelopes or message text outside a tool's own result data.
 
-Source paths in this document are relative to the pinned dependency checkouts: LINEJS (`@evex/linejs`) `packages/linejs/` at v3.5.0.
+Source paths in this document are relative to the pinned dependency checkouts: LINEJS (`@evex/linejs`) `packages/linejs/` at v3.5.0 and Prefect FastMCP TS (`@prefecthq/fastmcp-ts`) `src/` at 1.7.3.
 
 ## Overview
 
 ```text
 LINE servers
-   |  talk.sync / Square events / history (one session)
+   |  talk.sync / Square events / history / media (one session)
 line-mcp daemon (Node 24, LaunchAgent io.github.stickerdaniel.line-mcp)
    |- session: ANDROIDSECONDARY client, SQLite storage, upstream guards
    |- sync: Talk loop, Square loop, backfill and reconciliation worker
-   '- archive: ~/Library/Application Support/line-mcp/line.db
+   |- archive: ~/Library/Application Support/line-mcp/line.db
+   '- MCP: http://127.0.0.1:47822/mcp (Streamable HTTP, stateless, no CORS)
+        ^ loopback, native clients only
+Claude Code / Codex / T3 Code          generated Python CLI and agent skill
 ```
 
 ## State
@@ -69,7 +73,7 @@ The client logs in as `ANDROIDSECONDARY` through the V3 secure QR path (`base/co
 
 **No implicit key registration.** Guards on the client block `registerE2EEPublicKey`, `registerE2EEPublicKeyV2` and `registerE2EEGroupKey`. LINEJS would otherwise register a group key after a `NOT_FOUND` lookup (`base/e2ee/mod.ts:240`) and a fresh key pair when QR login decodes no key (`base/login/mod.ts:303-305`). A login whose key transfer yields no key fails with `key_transfer_empty`.
 
-**Read state.** The guards also block `sendChatChecked`, `markAsRead` and `markThreadsAsRead`, so nothing line-mcp does marks a message as read.
+**Read state.** The guards also block `sendChatChecked`, `markAsRead` and `markThreadsAsRead`, so nothing line-mcp does marks a message as read, and no tool offers to.
 
 **Exact key generations.** Before decrypting, the adapter checks that the exact key generations an envelope names (self key, peer key or group key) are available locally or from LINE. Older peer generations come from `getE2EEPublicKey`, since LINEJS asks `negotiateE2EEPublicKey`, which knows only the current key. LINEJS silently substitutes another self key for a missing DM key (`base/e2ee/mod.ts:903-906`) and the latest group key for a missing group generation (`base/e2ee/mod.ts:209-226`), which then fails as a generic authentication error. So a message whose keys are missing is `missing_key` without a decryption attempt, and `invalid` is kept for messages whose keys were verified present.
 
@@ -83,7 +87,7 @@ One allowlisted mapper sits between upstream failures and both logs and results:
 
 ## Daemon and LaunchAgent
 
-`line-mcp install` writes the per-user LaunchAgent `io.github.stickerdaniel.line-mcp` to `~/Library/LaunchAgents` from `launchd/io.github.stickerdaniel.line-mcp.plist` and bootstraps it: `RunAtLoad`, `KeepAlive`, `ThrottleInterval` 30, `Umask` 63, logs in `~/Library/Logs/line-mcp` (`0700`). `LINE_MCP_HOME` and `LINE_MCP_LOCK_PORT` pass on to the agent. The agent runs an absolute Node path: an override from `--node` or `LINE_MCP_NODE`, which must be an executable Node 24.18 or later, otherwise Homebrew's stable `opt/node@24` link rather than a versioned Cellar path that the next `brew upgrade` removes, otherwise the running Node.
+`line-mcp install` writes the per-user LaunchAgent `io.github.stickerdaniel.line-mcp` to `~/Library/LaunchAgents` from `launchd/io.github.stickerdaniel.line-mcp.plist` and bootstraps it: `RunAtLoad`, `KeepAlive`, `ThrottleInterval` 30, `Umask` 63, logs in `~/Library/Logs/line-mcp` (`0700`). `LINE_MCP_HOME`, `LINE_MCP_LOCK_PORT` and `LINE_MCP_PORT` pass on to the agent. The agent runs an absolute Node path: an override from `--node` or `LINE_MCP_NODE`, which must be an executable Node 24.18 or later, otherwise Homebrew's stable `opt/node@24` link rather than a versioned Cellar path that the next `brew upgrade` removes, otherwise the running Node.
 
 `line-mcp uninstall` boots the agent out and removes the plist; the archive stays unless `--purge` is given, which deletes the state root once it can take the lock. `bootout` counts an agent that is not loaded as done and fails on every other launchctl error. `line-mcp login` boots the agent out before it takes the lock and bootstraps it again afterwards. `line-mcp doctor` checks the local setup without contacting LINE: Node, FTS5, permissions, schema, account, sync health, whether the installed plist matches this checkout, whether launchd has the agent loaded, and whether a process holds the lock port.
 
@@ -91,7 +95,7 @@ The daemon reports one health state: `online`, `catching_up`, `offline`, `needs_
 
 ## Upstream concurrency
 
-The Talk and Square sync loops run independently. History requests (backfill and reconciliation) share a bounded pool of 2, and token refresh is serialized. Transient failures back off exponentially with jitter, from 1 s to 5 min. An empty or immediately returning call waits at least 1 s before the next one. Backfill rounds are at least 3 s apart, and OpenChat history requests for one chat or thread share one 3 s slot (see OpenChat sync). Talk reconciliation pages a gap back without pausing, at most five pages.
+The Talk and Square sync loops run independently. History requests (backfill and reconciliation) and the tools that ask LINE share a bounded pool of 2, and token refresh is serialized. Transient failures back off exponentially with jitter, from 1 s to 5 min. An empty or immediately returning call waits at least 1 s before the next one. Backfill rounds are at least 3 s apart, and OpenChat history requests for one chat or thread share one 3 s slot (see OpenChat sync). Talk reconciliation pages a gap back without pausing, at most five pages.
 
 ## Transactional sync and cursors
 
@@ -130,6 +134,36 @@ Every insert or change takes a fresh `seq` from one counter. Reading changes aft
 ## Search
 
 Queries of three or more characters use the FTS5 `trigram` index, which handles Chinese text. Shorter queries cannot match a trigram index, so they scan with `instr`, limited to one chat or to the most recent messages.
+
+## MCP transport and trust boundary
+
+The daemon serves the tools with Prefect FastMCP TS over Streamable HTTP on `127.0.0.1:47822/mcp` (`LINE_MCP_PORT`), in stateless mode, so no legacy session is retained without bound. The daemon owns the `node:http` listener and serves Prefect's always-stateless `fetch()` entry (`src/server/FastMCP.ts:1913-1924`) behind its own checks, which run before any body is read: a request with an `Origin` header (every browser request; native clients send none) or a `Host` other than this exact `127.0.0.1:<port>` or `localhost:<port>` is refused, and no CORS headers are sent. Prefect's own `run()` would answer CORS preflights and custom routes before any guard and accepts localhost origins on any port (`src/server/FastMCP.ts:2272-2300`).
+
+There is no bearer token. Every local client that can connect to the loopback listener can call every tool, and there is no per-user isolation. The README states this boundary.
+
+Prefect does not end a running handler when a Streamable HTTP client goes away, so the listener gives each request its own abort signal. A client that disconnects cancels its tool call, and queued upstream work leaves the pool instead of running for nobody. Every failure goes through the error mapper, because Prefect would otherwise return `err.message` as the tool output (`src/server/FastMCP.ts:800-805`).
+
+## Freshness and paging
+
+Every tool result is an object envelope that reports `health`, `stale` and the last Talk and Square sync times. `stale` is true unless the daemon is `online` or `catching_up`. When the session is lost, the archive tools keep answering from the local copy.
+
+Pages hold 50 items by default and at most 200. A continuation is an opaque cursor bound to the tool and a fingerprint of its filters, so a cursor replayed with other filters is refused rather than paging a different result. A page also ends early at about 64 KiB of items, with a continuation. `read_messages` pages by keyset over send time and row ID, so pages never skip or repeat a message, and `around_message_id` centres a page on one message. `list_changes` returns changes after a `seq` in `seq` order, as described under Tombstones and changes.
+
+## Time
+
+Every time is an object with `utc` and `local`, both ISO 8601 at millisecond precision. `local` carries the numeric offset of the daemon's system time zone at that instant, for example `2026-10-12T10:15:00.000+05:45`, so both sides of a daylight saving change stay distinct. The zone is read on every call, so a changed `TZ` applies without a restart. `status` reports the zone as `time_zone`.
+
+## Read tools
+
+The archive tools (`status`, `list_chats`, `read_messages`, `search_messages`, `list_changes`) read only the local copy. `get_attachment`, `get_announcements` and `get_profile` ask LINE through the shared pool. `get_attachment` decrypts only messages whose exact key generations were verified, refuses unsent messages, and streams a download of at most 100 MiB into a private cache (`0700`) under the state directory.
+
+## Privacy
+
+Logs carry event names, codes and counts, never tokens, keys, envelopes or message text. Tool results carry message data only for the chat and messages asked for, never raw envelopes. Framework diagnostics reach the log as fixed text, without their metadata. Logs, the archive and the attachment cache are readable only by the user that runs the daemon.
+
+## Generated CLI and skill
+
+`scripts/gen-cli.sh` serves the tools from a throwaway archive (`scripts/cli-fixture.ts`), which never opens the real state directory and never reaches LINE, and runs the pinned `uvx --from fastmcp==4.1.0 fastmcp generate-cli` against it. It writes the CLI to `skills/line-mcp/scripts/line_cli.py` and the skill to `skills/line-mcp/SKILL.md`, so the skill directory is self-contained. The CLI reaches the daemon on its default port unless `LINE_MCP_PORT` says otherwise. The skill's commands name the script as `"<skill-dir>/scripts/line_cli.py"`, which the agent resolves against the directory of SKILL.md, so the generated files do not depend on the checkout path. A test generates them from two checkouts at different paths and compares the output, and another compares each CLI subcommand's flags and required arguments with the tool schemas.
 
 ## Out of scope
 

@@ -219,11 +219,14 @@ export interface MessageView {
 	decryptState: string;
 	unsent: boolean;
 	seq: number;
+	/** Archive row id: the tiebreak of the read order, never a LINE ID. */
+	rowId: number;
 }
 
 // The envelope is never part of a view: tool results carry no raw envelopes.
 const viewColumns = `m.service, m.chat_id, m.message_id, m.thread_id, m.sender, m.sent_at,
-	m.edited_at, m.content_type, m.text, m.reply_to, m.mentions, m.decrypt_state, m.unsent, m.seq`;
+	m.edited_at, m.content_type, m.text, m.reply_to, m.mentions, m.decrypt_state, m.unsent, m.seq,
+	m.id`;
 
 const nullable = (value: unknown) => (value === null ? null : String(value));
 const time = (value: unknown) => (value === null ? null : Number(value));
@@ -243,26 +246,83 @@ function view(row: Record<string, unknown>): MessageView {
 		mentions: nullable(row.mentions),
 		decryptState: String(row.decrypt_state),
 		unsent: row.unsent === 1,
-		seq: Number(row.seq)
+		seq: Number(row.seq),
+		rowId: Number(row.id)
 	};
 }
 
-/** Newest first. Tombstones appear with their metadata only. */
+/**
+ * A message's place in the read order: send time (0 when unknown), then row
+ * id. Keyset pages continue strictly before or after one.
+ */
+export interface Position {
+	sentAt: number;
+	rowId: number;
+}
+
+export function positionOf(message: MessageView): Position {
+	return { sentAt: message.sentAt ?? 0, rowId: message.rowId };
+}
+
+const orderKey = 'coalesce(m.sent_at, 0)';
+
+function keyset(position: Position | undefined, direction: '<' | '>', params: SQLInputValue[]) {
+	if (!position) return '';
+	params.push(position.sentAt, position.sentAt, position.rowId);
+	return `AND (${orderKey} ${direction} ? OR (${orderKey} = ? AND m.id ${direction} ?))`;
+}
+
+/**
+ * One chat (or one thread of it). Newest first, continuing before `before`;
+ * with `after`, oldest first from just after it. Tombstones appear with their
+ * metadata only.
+ */
 export function readMessages(
 	db: DatabaseSync,
-	options: { service: Service; chatId: string; threadId?: string; limit?: number }
+	options: {
+		service: Service;
+		chatId: string;
+		threadId?: string;
+		limit?: number;
+		before?: Position;
+		after?: Position;
+	}
 ): MessageView[] {
-	const thread = options.threadId === undefined ? '' : 'AND m.thread_id = ?';
 	const params: SQLInputValue[] = [options.service, options.chatId];
+	const thread = options.threadId === undefined ? '' : 'AND m.thread_id = ?';
 	if (options.threadId !== undefined) params.push(options.threadId);
+	const newer = options.after !== undefined;
+	const page = newer ? keyset(options.after, '>', params) : keyset(options.before, '<', params);
+	const order = newer ? 'ASC' : 'DESC';
 	return db
 		.prepare(
 			`SELECT ${viewColumns} FROM message m
-			WHERE m.service = ? AND m.chat_id = ? ${thread}
-			ORDER BY m.sent_at DESC, m.id DESC LIMIT ?`
+			WHERE m.service = ? AND m.chat_id = ? ${thread} ${page}
+			ORDER BY ${orderKey} ${order}, m.id ${order} LIMIT ?`
 		)
 		.all(...params, options.limit ?? 50)
 		.map(view);
+}
+
+/** One message by its LINE ID in a chat, tombstones included. */
+export function findMessage(
+	db: DatabaseSync,
+	key: { service: Service; chatId: string; messageId: string }
+): MessageView | undefined {
+	const row = db
+		.prepare(
+			`SELECT ${viewColumns} FROM message m
+			WHERE m.service = ? AND m.chat_id = ? AND m.message_id = ?`
+		)
+		.get(key.service, key.chatId, key.messageId);
+	return row ? view(row) : undefined;
+}
+
+/** The retained envelope of one row, for media download; never part of a tool result. */
+export function readEnvelope(db: DatabaseSync, rowId: number): string | undefined {
+	const row = db.prepare('SELECT envelope FROM message WHERE id = ?').get(rowId) as
+		{ envelope: string } | undefined;
+	return row?.envelope;
 }
 
 /** How many recent messages a short query scans when no chat narrows it. */
@@ -276,11 +336,17 @@ export interface SearchResult {
 /**
  * FTS5 trigram for queries of three or more characters. The trigram index
  * cannot match shorter queries, so those scan with `instr`, limited to one chat
- * or to the most recent messages.
+ * or to the most recent messages. Newest first, continuing before `before`.
  */
 export function searchMessages(
 	db: DatabaseSync,
-	options: { query: string; service?: Service; chatId?: string; limit?: number }
+	options: {
+		query: string;
+		service?: Service;
+		chatId?: string;
+		limit?: number;
+		before?: Position;
+	}
 ): SearchResult {
 	const limit = options.limit ?? 50;
 	const scope: string[] = ['m.unsent = 0'];
@@ -293,15 +359,17 @@ export function searchMessages(
 		scope.push('m.chat_id = ?');
 		params.push(options.chatId);
 	}
+	const pageParams: SQLInputValue[] = [];
+	const page = keyset(options.before, '<', pageParams);
 	if ([...options.query].length >= 3) {
 		const phrase = `"${options.query.replaceAll('"', '""')}"`;
 		const rows = db
 			.prepare(
 				`SELECT ${viewColumns} FROM message_fts f JOIN message m ON m.id = f.rowid
-				WHERE message_fts MATCH ? AND ${scope.join(' AND ')}
-				ORDER BY m.sent_at DESC, m.id DESC LIMIT ?`
+				WHERE message_fts MATCH ? AND ${scope.join(' AND ')} ${page}
+				ORDER BY ${orderKey} DESC, m.id DESC LIMIT ?`
 			)
-			.all(phrase, ...params, limit);
+			.all(phrase, ...params, ...pageParams, limit);
 		return { mode: 'fts', messages: rows.map(view) };
 	}
 	if (!options.query) return { mode: 'scan', messages: [] };
@@ -314,13 +382,14 @@ export function searchMessages(
 				SELECT m.* FROM message m WHERE ${scope.join(' AND ')}
 				ORDER BY m.sent_at DESC, m.id DESC ${window}
 			) m
-			WHERE instr(m.text, ?) > 0
-			ORDER BY m.sent_at DESC, m.id DESC LIMIT ?`
+			WHERE instr(m.text, ?) > 0 ${page}
+			ORDER BY ${orderKey} DESC, m.id DESC LIMIT ?`
 		)
 		.all(
 			...params,
 			...(options.chatId === undefined ? [shortQueryWindow] : []),
 			options.query,
+			...pageParams,
 			limit
 		);
 	return { mode: 'scan', messages: rows.map(view) };

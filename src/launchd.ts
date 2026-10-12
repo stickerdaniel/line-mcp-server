@@ -10,8 +10,8 @@ export const label = 'io.github.stickerdaniel.line-mcp';
 const template = new URL(`../launchd/${label}.plist`, import.meta.url);
 export const cliPath = fileURLToPath(new URL('./cli.ts', import.meta.url));
 
-/** Variables the daemon needs to see the same state root and lock port as `install`. */
-const forwarded = ['LINE_MCP_HOME', 'LINE_MCP_LOCK_PORT'];
+/** Variables the daemon needs to see the same state root and ports as `install`. */
+const forwarded = ['LINE_MCP_HOME', 'LINE_MCP_LOCK_PORT', 'LINE_MCP_PORT'];
 
 export interface AgentPaths {
 	plist: string;

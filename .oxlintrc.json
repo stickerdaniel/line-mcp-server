@@ -8,5 +8,5 @@
 		"no-unused-vars": "error",
 		"no-console": "off"
 	},
-	"ignorePatterns": ["cli/", "scratch/"]
+	"ignorePatterns": ["scratch/"]
 }
