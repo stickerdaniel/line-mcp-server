@@ -11,6 +11,8 @@ bun run verify
 
 `verify` runs formatting, lint, the type check and the tests, the same steps as CI. It needs Node 24.18 or later and Bun. The tests never contact LINE: each one runs against a fake upstream and its own temporary state root.
 
+`bun run build` writes the npm package's `dist/cli.js`. `scripts/smoke-pack.sh` packs the package, installs it into a temporary prefix and runs `test/cli.test.ts` against the installed `line-mcp`, like the `package` CI job.
+
 ## Test data
 
 Use synthetic fixtures only: made-up MIDs, IDs, names and message text. Never commit anything taken from a real account, including tokens, keys, envelopes, archive rows, logs or screenshots.

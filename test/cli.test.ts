@@ -1,10 +1,12 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import {
 	chmodSync,
+	cpSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	symlinkSync,
 	writeFileSync
 } from 'node:fs';
@@ -12,11 +14,36 @@ import { userInfo } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { healthKey, writeState } from '../src/archive.ts';
+import { openDatabase, setAuthState } from '../src/db.ts';
 import { selectNode } from '../src/launchd.ts';
 import { databasePath } from '../src/paths.ts';
-import { freePort, seedLive, selfMid, tempRoot } from './fake-line.ts';
+import { freePort, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
+import { callTool, type ToolCall } from './mcp-client.ts';
 
-const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+/**
+ * The CLI under test: the sources, or an installed `line-mcp` bin named by
+ * `LINE_MCP_TEST_CLI` (scripts/smoke-pack.sh). `cli` is its real path, which
+ * `install` writes into the LaunchAgent.
+ */
+const entry =
+	process.env.LINE_MCP_TEST_CLI || fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+const cli = realpathSync(entry);
+
+/**
+ * A copy of the CLI's package under an npx cache path, sharing its
+ * `node_modules`. Node runs an entry from its real path, so only a copy runs
+ * from there. Not below `node_modules`: Node strips no types there.
+ */
+function npxCopy(): string {
+	const pkg = dirname(dirname(cli));
+	const copy = join(tempRoot(), '_npx', '0a1b2c3d4e5f', 'line-mcp-server');
+	for (const part of [relative(pkg, dirname(cli)), 'launchd', 'package.json']) {
+		cpSync(join(pkg, part), join(copy, part), { recursive: true });
+	}
+	symlinkSync(join(pkg, 'node_modules'), join(copy, 'node_modules'));
+	return join(copy, relative(pkg, cli));
+}
 
 /** A link to the running Node at `<dir>/node`, standing in for a Homebrew layout. */
 function nodeAt(dir: string): string {
@@ -42,7 +69,8 @@ async function runCli(
 	args: string[],
 	home = tempRoot(),
 	env: NodeJS.ProcessEnv = {},
-	exits: Record<string, number> = {}
+	exits: Record<string, number> = {},
+	script = entry
 ) {
 	const state = join(home, 'state');
 	const calls = join(home, 'launchctl-calls');
@@ -56,7 +84,7 @@ async function runCli(
 	const run = await new Promise<Run>((resolve) => {
 		execFile(
 			process.execPath,
-			[cli, ...args],
+			[script, ...args],
 			{
 				env: {
 					...process.env,
@@ -78,11 +106,13 @@ async function runCli(
 }
 
 const agent = `gui/${userInfo().uid}/io.github.stickerdaniel.line-mcp`;
+const plistIn = (home: string) =>
+	join(home, 'Library', 'LaunchAgents', 'io.github.stickerdaniel.line-mcp.plist');
 
 /** `uninstall` over an installed plist, with launchctl's `bootout` exiting `bootout`. */
 async function uninstall(bootout: number) {
 	const home = tempRoot();
-	const plist = join(home, 'Library', 'LaunchAgents', 'io.github.stickerdaniel.line-mcp.plist');
+	const plist = plistIn(home);
 	mkdirSync(dirname(plist), { recursive: true });
 	writeFileSync(plist, '');
 	const result = await runCli(['uninstall'], home, {}, { bootout });
@@ -118,6 +148,43 @@ describe('install and uninstall', () => {
 		expect(plist).toMatch(
 			/would run: \S+ bootstrap gui\/\d+ \S+\/Library\/LaunchAgents\/io\.github\.stickerdaniel\.line-mcp\.plist/
 		);
+	});
+
+	it('installs the real CLI file when started through a global bin symlink', async () => {
+		const bin = join(tempRoot(), 'bin', 'line-mcp');
+		mkdirSync(dirname(bin));
+		symlinkSync(entry, bin);
+
+		const result = await runCli(['install'], tempRoot(), {}, {}, bin);
+
+		expect(result.code).toBe(0);
+		expect(readFileSync(plistIn(result.home), 'utf-8')).toContain(
+			`<string>${cli}</string>\n\t\t<string>daemon</string>`
+		);
+		expect(result.calls).toEqual([
+			`bootout ${agent}`,
+			`bootstrap gui/${userInfo().uid} ${plistIn(result.home)}`
+		]);
+	});
+
+	it('refuses to install from the npx cache, which npm may delete', async () => {
+		const install = await runCli(['install'], tempRoot(), {}, {}, npxCopy());
+
+		expect(install.code).toBe(1);
+		expect(install.stderr).toContain('npm i -g line-mcp-server');
+		expect(install.launched).toBe(false);
+		expect(readdirSync(install.home)).toEqual(['launchctl']);
+	});
+
+	it('still shows the LaunchAgent on a dry run from the npx cache, with the same advice', async () => {
+		const copy = npxCopy();
+
+		const dryRun = await runCli(['install', '--dry-run'], tempRoot(), {}, {}, copy);
+
+		expect(dryRun.code).toBe(0);
+		expect(dryRun.stderr).toContain('npm i -g line-mcp-server');
+		expect(dryRun.stdout).toContain(`<string>${realpathSync(copy)}</string>`);
+		expect(dryRun.launched).toBe(false);
 	});
 
 	// One CLI process per case: two in one test can outlast the default timeout on a loaded machine.
@@ -243,3 +310,64 @@ describe('install and uninstall', () => {
 		expect(result.stdout).toContain(`warn node_path: ${node} is a versioned Cellar path`);
 	});
 });
+
+describe('commands', () => {
+	it('prints the usage on --help and exits 0', async () => {
+		const result = await runCli(['--help']);
+
+		expect(result.code).toBe(0);
+		expect(result.stdout).toContain('Usage: line-mcp <command>');
+	});
+
+	// The timeout covers the 10 s start deadline in serving() plus the 5 s exit wait.
+	it('serves a cache-only archive over MCP and stops on SIGTERM', async () => {
+		const home = tempRoot();
+		const state = join(home, 'state');
+		seedLive(state, selfMid, { authToken: 'token' });
+		// LINE ended the session before: the daemon starts without calling LINE,
+		// and the unchanged health raises no macOS notification.
+		const db = openDatabase(state);
+		setAuthState(db, 'needs_login');
+		writeState(db, healthKey, { state: 'needs_login', since: Date.now() });
+		db.close();
+		const port = await freePort();
+		const daemon = spawn(process.execPath, [entry, 'daemon'], {
+			env: {
+				...process.env,
+				HOME: home,
+				LINE_MCP_HOME: state,
+				LINE_MCP_LOCK_PORT: String(await freePort()),
+				LINE_MCP_PORT: String(port)
+			},
+			stdio: 'ignore'
+		});
+		const exited = new Promise<number | null>((resolve) => daemon.once('exit', resolve));
+
+		let status: ToolCall;
+		try {
+			status = await serving(port);
+		} finally {
+			daemon.kill('SIGTERM');
+		}
+
+		expect(status.data).toMatchObject({
+			health: 'needs_login',
+			stale: true,
+			account: { mid: selfMid, auth_state: 'needs_login' }
+		});
+		expect(await within(5000, exited, 'the daemon to exit')).toBe(0);
+	}, 20_000);
+});
+
+/** `status` from the daemon on `port` once it listens; gives up after 10 s. */
+async function serving(port: number): Promise<ToolCall> {
+	const deadline = Date.now() + 10_000;
+	for (;;) {
+		try {
+			return await callTool(port, 'status');
+		} catch (error) {
+			if (Date.now() > deadline) throw error;
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	}
+}
