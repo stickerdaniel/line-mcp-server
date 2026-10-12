@@ -100,7 +100,7 @@ The daemon reports one health state: `online`, `catching_up`, `offline`, `needs_
 
 ## Upstream concurrency
 
-The Talk and Square sync loops run independently. History requests (backfill and reconciliation) and every tool request to LINE (profiles, announcements, media and mutations) share a bounded pool of 2, and token refresh is serialized. Transient failures back off exponentially with jitter, from 1 s to 5 min. An empty or immediately returning call waits at least 1 s before the next one. Backfill rounds are at least 3 s apart, and OpenChat history requests for one chat or thread share one 3 s slot (see OpenChat sync). Talk reconciliation pages a gap back without pausing, at most five pages.
+The Talk and Square sync loops run independently. Backfill, Talk reconciliation and every tool request to LINE (profiles, announcements, media and mutations) share a bounded pool of 2; OpenChat reconciliation runs inside the Square loop, one request at a time. Token refresh is serialized. Transient failures back off exponentially with jitter, from 1 s to 5 min. An empty or immediately returning call waits at least 1 s before the next one. Backfill rounds are at least 3 s apart, and OpenChat history requests for one chat or thread share one 3 s slot (see OpenChat sync). Talk reconciliation pages a gap back without pausing, at most five pages.
 
 ## Transactional sync and cursors
 
