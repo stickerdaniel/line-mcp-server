@@ -120,34 +120,42 @@ describe('install and uninstall', () => {
 		);
 	});
 
-	it('writes a validated Node override from --node or LINE_MCP_NODE into the LaunchAgent', async () => {
-		const node = nodeAt(join(tempRoot(), 'bin'));
+	// One CLI process per case: two in one test can outlast the default timeout on a loaded machine.
+	it.each(['--node', 'LINE_MCP_NODE'])(
+		'writes a validated Node override from %s into the LaunchAgent',
+		async (source) => {
+			const node = nodeAt(join(tempRoot(), 'bin'));
 
-		const flag = await runCli(['install', '--dry-run', '--node', node]);
-		const env = await runCli(['install', '--dry-run'], tempRoot(), { LINE_MCP_NODE: node });
+			const result =
+				source === '--node'
+					? await runCli(['install', '--dry-run', '--node', node])
+					: await runCli(['install', '--dry-run'], tempRoot(), { LINE_MCP_NODE: node });
 
-		for (const result of [flag, env]) {
 			expect(result.code).toBe(0);
 			expect(result.stdout).toContain(
 				`<key>ProgramArguments</key>\n\t<array>\n\t\t<string>${node}</string>`
 			);
 		}
-	});
+	);
 
-	it('refuses a Node override that is relative or not executable', async () => {
-		const notExecutable = join(tempRoot(), 'node');
-		writeFileSync(notExecutable, '');
+	it.each([
 		// A working Node, but relative: launchd would resolve it against another directory.
-		const relativeNode = relative(process.cwd(), nodeAt(join(tempRoot(), 'bin')));
+		['relative', () => relative(process.cwd(), nodeAt(join(tempRoot(), 'bin')))],
+		[
+			'not executable',
+			() => {
+				const path = join(tempRoot(), 'node');
+				writeFileSync(path, '');
+				return path;
+			}
+		]
+	])('refuses a Node override that is %s', async (_kind, override) => {
+		const result = await runCli(['install', '--dry-run', '--node', override()]);
 
-		for (const override of [relativeNode, notExecutable]) {
-			const result = await runCli(['install', '--dry-run', '--node', override]);
-
-			expect(result.code).toBe(1);
-			expect(result.stderr).toContain('invalid_node');
-			expect(result.stdout).not.toContain('would write');
-			expect(result.launched).toBe(false);
-		}
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain('invalid_node');
+		expect(result.stdout).not.toContain('would write');
+		expect(result.launched).toBe(false);
 	});
 
 	it('uses the Homebrew opt link for a Node running from a versioned Cellar path', () => {
@@ -161,18 +169,19 @@ describe('install and uninstall', () => {
 		});
 	});
 
-	it('keeps the archive on uninstall and only names it with --purge on a dry run', async () => {
+	it.each([
+		[[], 'kept the archive in'],
+		[['--purge'], 'would delete']
+	])('changes nothing on an uninstall dry run with %j', async (flags, line) => {
 		const home = tempRoot();
 		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
 
-		const keep = await runCli(['uninstall', '--dry-run'], home);
-		const purge = await runCli(['uninstall', '--dry-run', '--purge'], home);
+		const result = await runCli(['uninstall', '--dry-run', ...flags], home);
 
-		expect([keep.code, purge.code]).toEqual([0, 0]);
-		expect(keep.stdout).toContain(`kept the archive in ${keep.state}`);
-		expect(purge.stdout).toContain(`would delete ${purge.state}`);
-		expect(keep.launched || purge.launched).toBe(false);
-		expect(existsSync(databasePath(keep.state))).toBe(true);
+		expect(result.code).toBe(0);
+		expect(result.stdout).toContain(`${line} ${result.state}`);
+		expect(result.launched).toBe(false);
+		expect(existsSync(databasePath(result.state))).toBe(true);
 	});
 
 	it('runs doctor offline and reports the missing LaunchAgent', async () => {
@@ -188,7 +197,6 @@ describe('install and uninstall', () => {
 		expect(result.calls).toEqual([`print ${agent}`]);
 	});
 
-	// One CLI process per case keeps each test well inside the default timeout.
 	it.each([
 		[0, 'ok   launch_agent_loaded: io.github.stickerdaniel.line-mcp is loaded'],
 		[113, 'FAIL launch_agent_loaded: io.github.stickerdaniel.line-mcp is not loaded'],
