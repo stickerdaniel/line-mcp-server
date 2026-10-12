@@ -1,0 +1,16 @@
+{
+	"name": "line-mcp-server",
+	"owner": {
+		"name": "stickerdaniel"
+	},
+	"metadata": {
+		"description": "The line-mcp plugin: the local LINE MCP server and its skill."
+	},
+	"plugins": [
+		{
+			"name": "line-mcp-server",
+			"source": "./plugins/line-mcp-server",
+			"description": "Read, search and answer the chats of your LINE account from a local line-mcp daemon."
+		}
+	]
+}
