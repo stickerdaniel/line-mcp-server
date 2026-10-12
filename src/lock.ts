@@ -1,4 +1,4 @@
-import { createServer } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { LineMcpError } from './errors.ts';
 
 /** Fixed loopback port whose exclusive bind marks the owner of the LINE session. */
@@ -12,6 +12,18 @@ export function lockPort(env: NodeJS.ProcessEnv = process.env): number {
 		throw new Error('LINE_MCP_LOCK_PORT must be a TCP port number');
 	}
 	return port;
+}
+
+/** Connects to the lock port without binding it, so a check never competes for ownership. */
+export function lockInUse(port: number = lockPort()): Promise<boolean> {
+	return new Promise((resolve) => {
+		const socket = connect({ host: '127.0.0.1', port });
+		socket.once('connect', () => {
+			socket.destroy();
+			resolve(true);
+		});
+		socket.once('error', () => resolve(false));
+	});
 }
 
 export interface OwnershipLock {

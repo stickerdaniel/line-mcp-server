@@ -13,7 +13,9 @@ export type ErrorCode =
 	| 'read_state_blocked'
 	| 'key_transfer_empty'
 	| 'missing_key'
-	| 'qr_expired';
+	| 'launchctl_failed'
+	| 'qr_expired'
+	| 'invalid_node';
 
 /**
  * An error raised by line-mcp itself. Its message is fixed text written in this

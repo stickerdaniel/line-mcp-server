@@ -16,8 +16,87 @@ const migrations = [
 		auth_state TEXT NOT NULL CHECK (auth_state IN ('active', 'needs_login')),
 		auth_changed_at TEXT NOT NULL,
 		bound_at TEXT NOT NULL
+	) STRICT;`,
+	// Archive. Integer LINE IDs and revisions are TEXT (decimal strings); times
+	// are UTC milliseconds. `seq` comes from the single `change_counter` row.
+	`CREATE TABLE sync_state (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at INTEGER NOT NULL
+	) STRICT;
+	CREATE TABLE change_counter (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		value INTEGER NOT NULL
+	) STRICT;
+	INSERT INTO change_counter (id, value) VALUES (1, 0);
+	CREATE TABLE chat (
+		service TEXT NOT NULL CHECK (service IN ('talk', 'square')),
+		chat_id TEXT NOT NULL,
+		type TEXT NOT NULL,
+		name TEXT,
+		member_count INTEGER,
+		last_activity_at INTEGER,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (service, chat_id)
+	) STRICT;
+	CREATE TABLE participant (
+		service TEXT NOT NULL CHECK (service IN ('talk', 'square')),
+		participant_id TEXT NOT NULL,
+		display_name TEXT,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (service, participant_id)
+	) STRICT;
+	CREATE TABLE message (
+		id INTEGER PRIMARY KEY,
+		service TEXT NOT NULL CHECK (service IN ('talk', 'square')),
+		chat_id TEXT NOT NULL,
+		message_id TEXT NOT NULL,
+		thread_id TEXT,
+		sender TEXT,
+		sent_at INTEGER,
+		edited_at INTEGER,
+		content_type TEXT,
+		text TEXT,
+		reply_to TEXT,
+		mentions TEXT,
+		envelope TEXT NOT NULL,
+		decrypt_state TEXT NOT NULL CHECK (decrypt_state IN ('ok', 'missing_key', 'invalid')),
+		missing_key TEXT,
+		unsent INTEGER NOT NULL DEFAULT 0 CHECK (unsent IN (0, 1)),
+		seq INTEGER NOT NULL UNIQUE,
+		UNIQUE (service, chat_id, message_id)
+	) STRICT;
+	CREATE INDEX message_by_id ON message (service, message_id);
+	CREATE INDEX message_by_time ON message (service, chat_id, sent_at, message_id);
+	CREATE INDEX message_recent ON message (sent_at, id);
+	CREATE INDEX message_missing_key ON message (decrypt_state) WHERE decrypt_state = 'missing_key';
+	CREATE VIRTUAL TABLE message_fts USING fts5 (
+		text, content = 'message', content_rowid = 'id', tokenize = 'trigram'
+	);
+	CREATE TRIGGER message_fts_insert AFTER INSERT ON message WHEN new.text IS NOT NULL BEGIN
+		INSERT INTO message_fts (rowid, text) VALUES (new.id, new.text);
+	END;
+	CREATE TRIGGER message_fts_delete AFTER DELETE ON message WHEN old.text IS NOT NULL BEGIN
+		INSERT INTO message_fts (message_fts, rowid, text) VALUES ('delete', old.id, old.text);
+	END;
+	CREATE TRIGGER message_fts_update AFTER UPDATE OF text ON message BEGIN
+		INSERT INTO message_fts (message_fts, rowid, text)
+			SELECT 'delete', old.id, old.text WHERE old.text IS NOT NULL;
+		INSERT INTO message_fts (rowid, text) SELECT new.id, new.text WHERE new.text IS NOT NULL;
+	END;
+	CREATE TABLE coverage_gap (
+		id INTEGER PRIMARY KEY,
+		service TEXT NOT NULL CHECK (service IN ('talk', 'square')),
+		scope TEXT NOT NULL,
+		reason TEXT NOT NULL,
+		detail TEXT NOT NULL,
+		status TEXT NOT NULL CHECK (status IN ('open', 'reconciled', 'incomplete')),
+		opened_at INTEGER NOT NULL,
+		closed_at INTEGER
 	) STRICT;`
 ];
+
+export const schemaVersion = migrations.length;
 
 /** Opens the archive with a private directory (0700) and private files (0600). */
 export function openDatabase(root: string): DatabaseSync {
