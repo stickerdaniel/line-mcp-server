@@ -1,0 +1,13 @@
+{
+	"name": "line-mcp-server",
+	"version": "0.0.0",
+	"description": "Read, search and answer the chats of your LINE account from a local line-mcp daemon. Install and log in the daemon first; the plugin only connects to it.",
+	"author": {
+		"name": "stickerdaniel",
+		"url": "https://github.com/stickerdaniel"
+	},
+	"homepage": "https://github.com/stickerdaniel/line-mcp-server",
+	"repository": "https://github.com/stickerdaniel/line-mcp-server",
+	"license": "Apache-2.0",
+	"keywords": ["line", "mcp", "chat"]
+}

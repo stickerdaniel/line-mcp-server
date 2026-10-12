@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerates skills/line-mcp/SKILL.md and skills/line-mcp/scripts/line_cli.py
+# Regenerates the skill in plugins/line-mcp-server/skills/line-mcp (SKILL.md and scripts/line_cli.py)
 # from the MCP tool schemas. The tools are served from a throwaway archive
 # (scripts/cli-fixture.ts) that never opens the real state root and never
 # reaches LINE. The output does not depend on where the checkout lives: the
@@ -10,7 +10,7 @@ fastmcp_pin=4.1.0
 default_port=47822
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
-skill=$repo/skills/line-mcp
+skill=$repo/plugins/line-mcp-server/skills/line-mcp
 
 if ! command -v uvx >/dev/null; then
 	echo 'gen-cli: uvx not found; install uv (https://docs.astral.sh/uv/)' >&2
@@ -89,5 +89,5 @@ Each of these commands needs \\\`--idempotency-key\\\`:
 mkdir -p "$skill/scripts"
 mv "$work/line_cli.py" "$skill/scripts/line_cli.py"
 mv "$work/SKILL.md" "$skill/SKILL.md"
-(cd "$repo" && node_modules/.bin/prettier --log-level warn --write skills/line-mcp/SKILL.md)
-echo "wrote skills/line-mcp/SKILL.md and skills/line-mcp/scripts/line_cli.py"
+(cd "$repo" && node_modules/.bin/prettier --log-level warn --write plugins/line-mcp-server/skills/line-mcp/SKILL.md)
+echo "wrote plugins/line-mcp-server/skills/line-mcp/SKILL.md and plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py"

@@ -1,0 +1,9 @@
+{
+	"mcpServers": {
+		"line": {
+			"type": "http",
+			"url": "http://127.0.0.1:47822/mcp",
+			"tool_timeout_sec": 180
+		}
+	}
+}

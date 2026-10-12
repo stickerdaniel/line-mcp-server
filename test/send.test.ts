@@ -1096,7 +1096,9 @@ describe('crash', () => {
 	);
 });
 
-const cli = fileURLToPath(new URL('../skills/line-mcp/scripts/line_cli.py', import.meta.url));
+const cli = fileURLToPath(
+	new URL('../plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py', import.meta.url)
+);
 const uvx = ['--offline', '--from', 'fastmcp==4.1.0', 'python'];
 /** The generated CLI runs where uv has the pinned fastmcp cached; CI has no uv. */
 const cliReady = await new Promise<boolean>((resolve) => {

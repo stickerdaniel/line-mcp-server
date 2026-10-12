@@ -15,7 +15,7 @@ interface Flag {
 /** Each `call-tool` subcommand of the generated CLI with its flags, as cyclopts derives them. */
 function cliCommands(): Map<string, Flag[]> {
 	const source = readFileSync(
-		new URL('../skills/line-mcp/scripts/line_cli.py', import.meta.url),
+		new URL('../plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py', import.meta.url),
 		'utf-8'
 	);
 	const commands = new Map<string, Flag[]>();

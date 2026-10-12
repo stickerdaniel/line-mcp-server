@@ -72,15 +72,16 @@ Read tools: `status`, `list_chats`, `read_messages`, `search_messages`, `list_ch
 
 Mutating tools: `send_message`, `react`, `unsend`. Each call needs an `idempotency_key`; a retry with the same key and arguments never acts twice. A result with state `unknown` means LINE may have acted, and line-mcp never resends it on its own.
 
-### Claude Code
+### Codex plugin
+
+The plugin connects Codex to the daemon and adds the line-mcp skill:
 
 ```bash
-claude mcp add --transport http --scope user line http://127.0.0.1:47822/mcp
+codex plugin marketplace add stickerdaniel/line-mcp-server
+codex plugin add line-mcp-server@line-mcp-server
 ```
 
-### Codex
-
-In `~/.codex/config.toml`:
+Without the plugin, add the server to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.line]
@@ -89,7 +90,22 @@ url = "http://127.0.0.1:47822/mcp"
 tool_timeout_sec = 180
 ```
 
-`codex mcp add line --url http://127.0.0.1:47822/mcp` writes the same entry.
+### Claude Code plugin
+
+The same plugin works in Claude Code:
+
+```bash
+claude plugin marketplace add stickerdaniel/line-mcp-server
+claude plugin install line-mcp-server@line-mcp-server
+```
+
+Without the plugin:
+
+```bash
+claude mcp add --transport http --scope user line http://127.0.0.1:47822/mcp
+```
+
+The plugins only connect to the daemon. Install and log it in first (see Install). With a different `LINE_MCP_PORT`, configure the server by hand instead.
 
 ### T3 Code
 
@@ -97,13 +113,13 @@ T3 Code runs Claude Code and Codex, which read the configuration above. Nothing 
 
 ### CLI and skill
 
-`skills/line-mcp/scripts/line_cli.py` calls every tool. From the clone root:
+`plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py` calls every tool. From the clone root:
 
 ```bash
-uvx --from fastmcp==4.1.0 python skills/line-mcp/scripts/line_cli.py call-tool search_messages --query 晚餐
+uvx --from fastmcp==4.1.0 python plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py call-tool search_messages --query 晚餐
 ```
 
-`skills/line-mcp/SKILL.md` describes those commands for agents; link or copy the `skills/line-mcp` directory into an agent's skills directory. The skill finds its script next to SKILL.md, so it works from any location. Both files are generated: after changing a tool, run `scripts/gen-cli.sh` (needs `uvx`). It serves the tools from a throwaway archive, never the real one.
+`plugins/line-mcp-server/skills/line-mcp/SKILL.md` describes those commands for agents. The plugins install it; otherwise link or copy that directory into an agent's skills directory. The skill finds its script next to SKILL.md, so it works from any location. Both files are generated: after changing a tool, run `scripts/gen-cli.sh` (needs `uvx`). It serves the tools from a throwaway archive, never the real one.
 
 ## Trust boundary
 

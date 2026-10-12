@@ -66,7 +66,7 @@ function generate(dir: string, bin: string): Promise<{ skill: string; cli: strin
 			{ cwd: tempRoot(), env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } },
 			(error, _stdout, stderr) => {
 				if (error) return reject(new Error(stderr));
-				const skill = join(dir, 'skills', 'line-mcp');
+				const skill = join(dir, 'plugins', 'line-mcp-server', 'skills', 'line-mcp');
 				resolve({
 					skill: readFileSync(join(skill, 'SKILL.md'), 'utf-8'),
 					cli: readFileSync(join(skill, 'scripts', 'line_cli.py'), 'utf-8')
