@@ -275,11 +275,11 @@ async function runDoctor(): Promise<number> {
 	return checks.every((check) => check.ok) ? 0 : 1;
 }
 
-// A reader that stops early (`line-mcp list-chats | head`) closes the pipe; the
-// rest of the output has no reader, so stop quietly instead of crashing.
+// A reader that stops early (`line-mcp list-chats | head`) closes the pipe. The
+// rest of the output has no reader; the command still finishes and exits with
+// its own code.
 process.stdout.on('error', (error: NodeJS.ErrnoException) => {
 	if (error.code !== 'EPIPE') throw error;
-	process.exit(0);
 });
 
 const [command, ...args] = process.argv.slice(2);
