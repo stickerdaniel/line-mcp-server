@@ -172,7 +172,7 @@ Every time is an object with `utc` and `local`, both ISO 8601 at millisecond pre
 
 ## Read tools
 
-The archive tools (`status`, `list_chats`, `read_messages`, `search_messages`, `list_changes`) read only the local copy. `get_attachment`, `get_announcements` and `get_profile` ask LINE through the shared pool. `get_attachment` decrypts only messages whose exact key generations were verified, refuses unsent messages, and streams a download of at most 100 MiB into a private cache (`0700`) under the state directory.
+The archive tools (`status`, `list_chats`, `read_messages`, `search_messages`, `list_changes`) read only the local copy. `get_attachment`, `get_announcements` and `get_profile` ask LINE through the shared pool. `get_attachment` decrypts only messages whose exact key generations were verified, refuses unsent messages, and streams a download of at most 100 MiB into a private cache (`0700`) under the state directory. An E2EE file keeps its name inside the encrypted payload, so `get_attachment` decrypts the payload in the pool to report it, with or without a download; that costs at most the read-only key lookups, and a failed lookup leaves the name out.
 
 ## Privacy
 

@@ -1,15 +1,17 @@
 import { Buffer } from 'node:buffer';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { InternalError } from '@evex/linejs/base';
 import type { Message } from '@evex/linejs-types';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
-import { upsertChat, upsertParticipant } from '../src/archive.ts';
+import { archiveStatus, upsertChat, upsertParticipant } from '../src/archive.ts';
 import { transaction } from '../src/db.ts';
-import { writeAll } from '../src/mcp/tools/upstream.ts';
+import { getAttachment, writeAll } from '../src/mcp/tools/upstream.ts';
+import { Outbox } from '../src/outbox.ts';
 import { sizeCap } from '../src/queries.ts';
 import type { SqliteStorage } from '../src/storage.ts';
 import { Pool } from '../src/sync/loop.ts';
@@ -19,7 +21,15 @@ import {
 	encodeEnvelope,
 	type MessageRow
 } from '../src/sync/normalize.ts';
-import { groupMid, keyPair, otherMid, selfMid, storedKey } from './fake-line.ts';
+import {
+	groupMid,
+	type KeyPair,
+	keyPair,
+	otherMid,
+	selfMid,
+	storedKey,
+	talkError
+} from './fake-line.ts';
 import { callTool, message, post, serve } from './mcp-client.ts';
 
 // Local times below are Berlin's, whatever zone the machine running the tests has.
@@ -1287,5 +1297,124 @@ describe('upstream tools', () => {
 			'/r/talk/emi/oid53'
 		]);
 		expect(readdirSync(`${root}/attachments`)).toHaveLength(2);
+	});
+
+	it('names an E2EE file from its payload, with or without a download', async () => {
+		const peer = keyPair(5);
+		const self = keyPair(2);
+		const pdf = Buffer.from('%PDF-1.7\n', 'latin1');
+		const pool = new WatchedPool(1);
+		let lookup: (() => Promise<unknown>) | undefined;
+		const { server, session, upstream, logs, root } = await serve(
+			{ getE2EEPublicKey: () => lookup?.() ?? Promise.reject(talkError('INTERNAL_ERROR')) },
+			async () => new Response(encryptedPdf),
+			{ pool }
+		);
+		const client = session.base;
+		const storage = client.storage as SqliteStorage;
+		storage.setSync('e2eeKeys:2', storedKey(self));
+		storage.setSync(`e2eePublicKeys:${otherMid}:5`, peer.pubKey.toString('base64'));
+		const { keyMaterial, encryptedData: encryptedPdf } =
+			await client.e2ee.encryptByKeyMaterial(pdf);
+		const file = (id: string, sender: KeyPair, decryptState: 'ok' | 'missing_key' = 'ok') => {
+			const shared = Buffer.from(client.e2ee.generateSharedSecret(sender.privKey, self.pubKey));
+			const envelope = {
+				id,
+				from: otherMid,
+				to: selfMid,
+				toType: 'USER',
+				contentType: 'FILE',
+				contentMetadata: { e2eeVersion: '2', OID: `oid${id}`, SID: 'emf', FILE_SIZE: '9' },
+				chunks: client.e2ee.encryptE2EEMessageByData(
+					sender.keyId,
+					2,
+					shared,
+					2,
+					{ keyMaterial, fileName: 'Q3 報告.pdf' },
+					selfMid,
+					otherMid,
+					14
+				)
+			} as unknown as Message;
+			return row(id, base, '', {
+				text: null,
+				contentType: 'FILE',
+				envelope: encodeEnvelope(envelope),
+				decryptState
+			});
+		};
+		// Sender keys 7 and 8 are not stored; LINE fails 7 and answers 8 late.
+		const late = keyPair(8);
+		store(
+			session.db,
+			file('71', peer),
+			file('72', peer, 'missing_key'),
+			file('73', keyPair(7)),
+			file('74', late)
+		);
+		const attachment = async (id: string, download = false) =>
+			(
+				await callTool(server.port, 'get_attachment', {
+					service: 'talk',
+					chat_id: otherMid,
+					message_id: id,
+					...(download ? { download } : {})
+				})
+			).data;
+
+		// The name lookup waits for a pool slot like any upstream work.
+		let release: (() => void) | undefined;
+		const busy = pool.run(() => new Promise<void>((resolve) => (release = resolve)));
+		await vi.waitFor(() => expect(pool.waiting).toBe(0));
+		const pending = attachment('71');
+		await vi.waitFor(() => expect(pool.waiting).toBe(1));
+		release?.();
+		await busy;
+		expect(await pending).toMatchObject({
+			attachment: { file_name: 'Q3 報告.pdf', e2ee: true },
+			path: null
+		});
+		const saved = await attachment('71', true);
+		expect(saved).toMatchObject({ attachment: { file_name: 'Q3 報告.pdf' }, cached: false });
+		expect(saved.path).toMatch(/\/talk-71-[0-9a-f]{24}\.pdf$/);
+		expect(await attachment('71', true)).toMatchObject({
+			attachment: { file_name: 'Q3 報告.pdf' },
+			path: saved.path,
+			cached: true
+		});
+		expect(upstream.calls).toEqual([]);
+
+		// Unverified keys are never tried; a failed key lookup leaves the name out.
+		expect(await attachment('72')).toMatchObject({ attachment: { file_name: null } });
+		expect(upstream.calls).toEqual([]);
+		expect(await attachment('73')).toMatchObject({ attachment: { file_name: null }, path: null });
+		expect(upstream.calls).toEqual(['getE2EEPublicKey']);
+		expect(logs).toContainEqual(
+			expect.objectContaining({ event: 'attachment_name_skipped', operation: 'get_attachment' })
+		);
+
+		// A caller that goes away during the key lookup gets no result.
+		let answer: ((key: unknown) => void) | undefined;
+		lookup = () => new Promise((resolve) => (answer = resolve));
+		const cancel = new AbortController();
+		const context = {
+			db: session.db,
+			base: session.base,
+			selfMid,
+			pool,
+			attachments: join(root, 'attachments'),
+			status: () => archiveStatus(session.db),
+			log: () => {},
+			outbox: new Outbox(session.db, { log: () => {} })
+		};
+		const call = getAttachment.run(
+			{ service: 'talk', chat_id: otherMid, message_id: '74' },
+			context,
+			cancel.signal
+		);
+		await vi.waitFor(() => expect(answer).toBeDefined());
+		cancel.abort(new Error('the caller went away'));
+		answer?.({ version: 1, keyId: 8, keyData: late.pubKey });
+		await expect(call).rejects.toThrow('the caller went away');
 	});
 });
