@@ -126,6 +126,12 @@ Threads (`line_types.ts:14535`) are stored as messages with a `thread_id`. `Squa
 
 Each chat has a backfill cursor. Talk chats page with `getPreviousMessagesV2WithRequest` (`base/service/talk/mod.ts:1648`), which returns `endMessageId` itself with the older messages, so only messages strictly before the cursor count and a page with nothing older completes the chat. Square chats and threads page backward as above. Talk chats are discovered from every page of `getMessageBoxes` unioned with `getAllChatMids`. Each page commits with its new cursor, and a stop reason is recorded per chat.
 
+## Names
+
+Sender and chat names come from the `participant` table. They are current labels: a rename takes no `seq`, so `list_changes` does not announce it. Each Talk discovery pass (at startup, every 6 hours, and at most every 10 minutes after Talk reports a chat change) looks up one-to-one peers, the group members `getChats` lists and archived senders still unnamed, which covers rooms and members who left, through `getContactsV2` in batches of 100. A contact's `displayNameOverridden` or `displayName` replaces the stored name.
+
+OpenChat names come from each message event's `senderDisplayName`. After each discovery pass, archived OpenChat senders still unnamed are looked up with `getSquareMembers` in batches of 50, and such a name is written only while the member is still unnamed at commit, so an event name that arrived meanwhile wins. A refused, partial or empty answer never erases a name; a refusal is logged by its code.
+
 ## Retained envelopes
 
 Every message row keeps a lossless envelope (`contentMetadata`, `chunks` as base64, `contentType`), because encrypted media download needs the original `chunks` (`base/obs/mod.ts:459-468`). `decrypt_state` is `ok`, `missing_key` or `invalid`, as described under E2EE key boundaries. `missing_key` rows are tried again when new key generations arrive, and a retry never brings back unsent content.

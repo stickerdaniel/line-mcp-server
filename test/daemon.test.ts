@@ -2,7 +2,8 @@ import { createServer, type AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { openGap, readMessages, searchMessages, upsertChat, writeState } from '../src/archive.ts';
 import { type Daemon, type DaemonOptions, startDaemon } from '../src/daemon.ts';
-import { openDatabase, readAccount } from '../src/db.ts';
+import { openDatabase, readAccount, transaction } from '../src/db.ts';
+import { applyChanges } from '../src/sync/normalize.ts';
 import { historyStepMs, type Sleep } from '../src/sync/loop.ts';
 import {
 	fakeUpstream,
@@ -70,6 +71,35 @@ async function until(condition: () => boolean, what: string): Promise<void> {
 		})(),
 		what
 	);
+}
+
+/** Archives one OpenChat message whose sender no event named. */
+function archiveUnnamedSquareSender(root: string): void {
+	const db = openDatabase(root);
+	const row = { messageId: '1', text: 'hello', sentAt: 1 };
+	transaction(db, () =>
+		applyChanges(db, [
+			{
+				kind: 'message',
+				row: {
+					service: 'square',
+					chatId: `m${'5'.repeat(32)}`,
+					chatType: 'square',
+					...row,
+					threadId: null,
+					sender: `p${'6'.repeat(32)}`,
+					editedAt: null,
+					contentType: 'NONE',
+					replyTo: null,
+					mentions: null,
+					envelope: JSON.stringify(row),
+					decryptState: 'ok',
+					missingKey: null
+				}
+			}
+		])
+	);
+	db.close();
 }
 
 describe('daemon', () => {
@@ -280,6 +310,50 @@ describe('daemon', () => {
 		await until(() => daemon.status().backfill.complete === 1, 'backfill to complete');
 
 		expect(waits).toContain(historyStepMs);
+	});
+
+	it('keeps backfilling while OpenChat name lookups fail', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		archiveUnnamedSquareSender(root);
+		const message = textMessage('800000000000000003', 'history');
+		const { daemon } = await start(
+			root,
+			{
+				sync: () => ({}),
+				getMessageBoxes: () => ({
+					messageBoxes: [{ id: otherMid, midType: 'USER' }],
+					hasNext: false
+				}),
+				getContactsV2: () => ({ contacts: {} }),
+				getSquareMembers: () => {
+					throw new Error('timed out');
+				},
+				getRecentMessagesV2: () => [message],
+				getPreviousMessagesV2WithRequest: () => [message]
+			},
+			{ notify: () => {}, backfillPageMs: 0 }
+		);
+
+		await until(() => daemon.status().backfill.complete === 1, 'backfill to complete');
+	});
+
+	it('stops for good when the archive fails during an OpenChat name lookup', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		archiveUnnamedSquareSender(root);
+		const { daemon } = await start(
+			root,
+			{
+				sync: () => ({}),
+				getSquareMembers: () => {
+					throw Object.assign(new Error('disk I/O error'), { code: 'ERR_SQLITE_ERROR' });
+				}
+			},
+			{ notify: () => {} }
+		);
+
+		await until(() => daemon.session.state() === 'storage_error', 'storage_error');
 	});
 
 	it('comes back for a backfill whose history slot is busy within historyStepMs', async () => {

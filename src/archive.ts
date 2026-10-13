@@ -59,17 +59,23 @@ export function upsertChat(db: DatabaseSync, chat: ChatInfo, now = Date.now()): 
 	);
 }
 
+/**
+ * Inserts or renames a participant. With `onlyUnnamed`, a stored name wins, so
+ * a fallback lookup never replaces a name an event delivered meanwhile.
+ */
 export function upsertParticipant(
 	db: DatabaseSync,
 	service: Service,
 	id: string,
 	displayName: string,
-	now = Date.now()
+	now = Date.now(),
+	options: { onlyUnnamed?: boolean } = {}
 ): void {
 	db.prepare(
 		`INSERT INTO participant (service, participant_id, display_name, updated_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT (service, participant_id) DO UPDATE SET
-			display_name = excluded.display_name, updated_at = excluded.updated_at`
+			display_name = excluded.display_name, updated_at = excluded.updated_at
+		${options.onlyUnnamed ? 'WHERE participant.display_name IS NULL' : ''}`
 	).run(service, id, displayName, now);
 }
 

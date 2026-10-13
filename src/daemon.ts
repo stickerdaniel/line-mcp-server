@@ -16,9 +16,15 @@ import { LineMcpError, mapError } from './errors.ts';
 import { type McpServer, startMcpServer } from './mcp/server.ts';
 import { stateRoot } from './paths.ts';
 import { type Log, openSession, type Session, type SessionOptions, stderrLog } from './session.ts';
-import { backfillRound, discoverChats, pendingBackfill } from './sync/backfill.ts';
+import {
+	backfillRound,
+	discoverChats,
+	nameSquareSenders,
+	pendingBackfill
+} from './sync/backfill.ts';
 import {
 	historyStepMs,
+	isStorageFailure,
 	isTransient,
 	type LoopOptions,
 	Pool,
@@ -82,11 +88,6 @@ export interface Daemon {
 }
 
 const noop = () => {};
-
-/** Any SQLite failure while a loop reads or writes the archive (full disk, I/O, corruption). */
-function isStorageFailure(error: unknown): boolean {
-	return (error as { code?: unknown })?.code === 'ERR_SQLITE_ERROR';
-}
 
 /**
  * Starts the daemon: the session in its fixed startup order (lock, database,
@@ -230,6 +231,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 			await phase('discovery', () => discoverChats(context, pool));
 			discoveredAt = now();
 			discoveryDue = false;
+			// Discovery names Talk senders; this names OpenChat senders no event named.
+			await phase('square_names', () => nameSquareSenders(context, pool));
 		}
 		if (listGaps(db, { service: 'talk', status: 'open' }).length > 0) {
 			await phase('reconcile', () => reconcileTalkGaps(context, pool));
