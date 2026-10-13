@@ -13,25 +13,20 @@ Status: in development. See [`docs/architecture.md`](docs/architecture.md) for t
 
 - macOS. The daemon runs as a per-user LaunchAgent.
 - [Node](https://nodejs.org) 24.18 or later
-- [Bun](https://bun.sh) to install from a clone and for development
 - The LINE app on your phone, logged in to the account
 
 ## Install
 
-From a clone of this repository:
-
 ```bash
-git clone https://github.com/stickerdaniel/line-mcp-server.git
-cd line-mcp-server
-bun install
-node src/cli.ts login
-node src/cli.ts install
-node src/cli.ts doctor
+npm i -g line-mcp-server
+line-mcp login
+line-mcp install
+line-mcp doctor
 ```
 
 `login` shows a QR code. Scan it with LINE on your phone and enter the PIN it prints. line-mcp joins the account as a secondary device; the phone stays the primary one. `install` writes the LaunchAgent and starts the daemon, which syncs from then on and starts again after a reboot. `doctor` checks the setup without contacting LINE.
 
-Messages and docs write `line-mcp <command>`; from the clone root that is `node src/cli.ts <command>`. If LINE ends the session, the daemon keeps serving the local archive, shows a macOS notification, and waits for another `login`.
+If LINE ends the session, the daemon keeps serving the local archive, shows a macOS notification, and waits for another `login`.
 
 ## State
 
@@ -47,9 +42,8 @@ Messages and docs write `line-mcp <command>`; from the clone root that is `node 
 ## Upgrade
 
 ```bash
-git pull
-bun install
-node src/cli.ts install
+npm i -g line-mcp-server@latest
+line-mcp install
 ```
 
 `install` rewrites the LaunchAgent and restarts the daemon. The archive and the session stay.
@@ -57,8 +51,9 @@ node src/cli.ts install
 ## Uninstall
 
 ```bash
-node src/cli.ts uninstall          # stops the daemon, keeps the archive
-node src/cli.ts uninstall --purge  # also deletes the state directory
+line-mcp uninstall          # stops the daemon, keeps the archive
+line-mcp uninstall --purge  # also deletes the state directory
+npm rm -g line-mcp-server
 ```
 
 To revoke the session itself, log the device out in LINE's device list on your phone.
@@ -120,7 +115,7 @@ line-mcp search-messages --query 晚餐
 
 Commands and flags are the tool and field names in kebab case; the `status` tool is `sync-status`, since `line-mcp status` reports the local setup without the daemon. `line-mcp help` lists the commands and `line-mcp <command> --help` a command's flags. A result is JSON on stdout. An error is JSON on stderr with exit code 1, or 2 for a usage error.
 
-`plugins/line-mcp-server/skills/line-mcp/SKILL.md` teaches agents these commands. The plugins install it; otherwise link or copy that directory into an agent's skills directory. The skill runs `line-mcp` from PATH; from a clone, `bun run build && npm link` puts it there.
+`plugins/line-mcp-server/skills/line-mcp/SKILL.md` teaches agents these commands. The plugins install it; otherwise link or copy that directory into an agent's skills directory. The skill runs `line-mcp` from PATH, where the npm install puts it.
 
 ## Trust boundary
 
