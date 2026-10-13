@@ -10,6 +10,7 @@ import {
 	symlinkSync,
 	writeFileSync
 } from 'node:fs';
+import { createServer } from 'node:net';
 import { userInfo } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -312,6 +313,25 @@ describe('commands', { timeout: 15_000 }, () => {
 
 		expect(result.code).toBe(0);
 		expect(result.stdout).toContain('Usage: line-mcp <command>');
+	});
+
+	it('logs a failed daemon start with its time', async () => {
+		const holder = createServer();
+		const port = await freePort();
+		await new Promise<void>((resolve) => holder.listen(port, '127.0.0.1', resolve));
+		let result: Awaited<ReturnType<typeof runCli>>;
+		try {
+			result = await runCli(['daemon'], tempRoot(), { LINE_MCP_LOCK_PORT: String(port) });
+		} finally {
+			holder.close();
+		}
+
+		expect(result.code).toBe(1);
+		const lines = result.stderr.trimEnd().split('\n');
+		expect(lines).toHaveLength(1);
+		const line = JSON.parse(lines[0]!) as { time: string };
+		expect(line).toMatchObject({ event: 'daemon_failed', code: 'lock_held', operation: 'daemon' });
+		expect(line.time).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 	});
 
 	// The timeout covers the 10 s start deadline in serving() plus the 5 s exit wait.
