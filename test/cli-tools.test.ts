@@ -125,8 +125,8 @@ describe('tool commands', { timeout: 30_000 }, () => {
 	});
 
 	it('keeps its own exit code when the reader is gone before any output', async () => {
-		// `head -c 0` exits at once; with no daemon the command fails without stdout output.
-		const run = await pipedCli(await freePort(), 'sync-status', 'head -c 0');
+		// `true` exits at once; with no daemon the command fails without stdout output.
+		const run = await pipedCli(await freePort(), 'sync-status', 'true');
 
 		expect(run.code).toBe(1);
 		expect(run.stderr).not.toContain('EPIPE');
