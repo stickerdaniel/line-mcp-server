@@ -11,21 +11,24 @@ bun run verify
 
 `verify` runs formatting, lint, the type check and the tests, the same steps as CI. It needs Node 24.18 or later and Bun. The tests never contact LINE: each one runs against a fake upstream and its own temporary state root.
 
-`bun run build` writes the npm package's `dist/cli.js`. `scripts/smoke-pack.sh` packs the package, installs it into a temporary prefix and runs `test/cli.test.ts` against the installed `line-mcp`, like the `package` CI job.
+`bun run build` writes the npm package's `dist/cli.js`. `scripts/smoke-pack.sh` packs the package, installs it into a temporary prefix and runs `test/cli.test.ts` and `test/cli-tools.test.ts` against the installed `line-mcp`, like the `package` CI job.
+
+The skill runs `line-mcp` from PATH. To put this checkout's build there:
+
+```bash
+bun run build
+npm link
+```
+
+The link runs `dist/cli.js`, so run `bun run build` again after a change.
 
 ## Test data
 
 Use synthetic fixtures only: made-up MIDs, IDs, names and message text. Never commit anything taken from a real account, including tokens, keys, envelopes, archive rows, logs or screenshots.
 
-## Generated CLI and skill
+## CLI and skill
 
-`plugins/line-mcp-server/skills/line-mcp/SKILL.md` and `plugins/line-mcp-server/skills/line-mcp/scripts/line_cli.py` are generated from the MCP tool schemas. Do not edit them by hand. After changing a tool, its description, or the skill text in `scripts/gen-cli.sh`, run:
-
-```bash
-scripts/gen-cli.sh
-```
-
-It needs `uvx` and serves the tools from a throwaway archive, never the real one. `bun run verify` fails when the CLI and the tool schemas disagree.
+The `line-mcp` tool commands and their flags come from the MCP tool schemas at runtime, so a tool change needs no CLI change. `plugins/line-mcp-server/skills/line-mcp/SKILL.md` is written by hand: when you add, rename or remove a tool, update its command list.
 
 ## Live checks
 

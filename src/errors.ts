@@ -19,6 +19,8 @@ export type ErrorCode =
 	| 'npx_cache'
 	| 'mcp_port_in_use'
 	| 'mcp_port_failed'
+	| 'daemon_unreachable'
+	| 'request_failed'
 	| 'invalid_argument'
 	| 'invalid_cursor'
 	| 'not_found'

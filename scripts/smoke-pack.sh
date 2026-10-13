@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Installs the npm package as a user would and runs test/cli.test.ts against
-# its `line-mcp` bin, including the daemon serving a cache-only archive.
+# Installs the npm package as a user would and runs test/cli.test.ts and
+# test/cli-tools.test.ts against its `line-mcp` bin, including the daemon
+# serving a cache-only archive and the tool commands calling a test server.
 # Usage: scripts/smoke-pack.sh [tarball]; without one it packs this checkout.
 # Everything runs under a temporary HOME, npm prefix and state root, with an
 # empty npm config (no JSR registry), free ports and a launchctl stub; the real
@@ -44,6 +45,13 @@ if [[ $real != */node_modules/line-mcp-server/dist/cli.js ]]; then
 	exit 1
 fi
 "$bin" --help >/dev/null
+# No daemon listens on LINE_MCP_PORT: the packed tool command must say so and exit 1.
+code=0
+"$bin" sync-status 2>"$work/unreachable" || code=$?
+if [[ $code -ne 1 ]] || ! grep -q '"code":"daemon_unreachable"' "$work/unreachable"; then
+	echo "smoke-pack: sync-status without a daemon exited $code: $(cat "$work/unreachable")" >&2
+	exit 1
+fi
 
 cd "$repo"
-LINE_MCP_TEST_CLI=$bin node_modules/.bin/vitest --run test/cli.test.ts
+LINE_MCP_TEST_CLI=$bin node_modules/.bin/vitest --run test/cli.test.ts test/cli-tools.test.ts

@@ -1,7 +1,10 @@
 // A minimal Streamable HTTP client for tests: raw node:http requests, so a
 // test controls every header (Host, Origin) a real client would send.
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { request } from 'node:http';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach } from 'vitest';
 import { archiveStatus } from '../src/archive.ts';
 import { startMcpServer, type McpServer } from '../src/mcp/server.ts';
@@ -181,3 +184,42 @@ export interface Tool {
 	};
 	annotations?: Record<string, unknown>;
 }
+
+/**
+ * The CLI under test: the sources, or an installed `line-mcp` bin named by
+ * `LINE_MCP_TEST_CLI` (scripts/smoke-pack.sh).
+ */
+export const cliEntry =
+	process.env.LINE_MCP_TEST_CLI || fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+
+export interface CliRun {
+	code: number | null;
+	stdout: string;
+	stderr: string;
+}
+
+/**
+ * Starts a `line-mcp` command against the MCP server on `port`, with a
+ * temporary state root; `done` resolves once it exited and closed its output.
+ */
+export function startCli(port: number, args: string[], cwd?: string) {
+	const child = spawn(process.execPath, [cliEntry, ...args], {
+		cwd,
+		env: { ...process.env, LINE_MCP_HOME: tempRoot(), LINE_MCP_PORT: String(port) },
+		stdio: ['ignore', 'pipe', 'pipe']
+	});
+	let stdout = '';
+	let stderr = '';
+	child.stdout.setEncoding('utf-8').on('data', (chunk: string) => (stdout += chunk));
+	child.stderr.setEncoding('utf-8').on('data', (chunk: string) => (stderr += chunk));
+	const done = once(child, 'close').then(([code]): CliRun => ({
+		code: code as number | null,
+		stdout,
+		stderr
+	}));
+	return { child, done };
+}
+
+/** Runs a `line-mcp` command against the MCP server on `port` to its end. */
+export const runCli = (port: number, args: string[], cwd?: string) =>
+	startCli(port, args, cwd).done;
