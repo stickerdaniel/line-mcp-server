@@ -90,7 +90,7 @@ One allowlisted mapper sits between upstream failures and both logs and results:
 
 `fetchSquareChatEvents` goes through the generated Thrift request, because the handwritten wrapper drops `continuationToken`, `subscriptionId`, `inclusive` and `fetchType` (`base/service/square/mod.ts:127-144`). LINE answers `getJoinedSquareChats` with `NOT_IMPLEMENTED` for this device type, so joined chats come from the account's own `fetchMyEvents` membership history, and `getSquareChat` confirms each one. A joined square without a confirmed chat is reported as uncovered rather than dropped.
 
-The account has a separate member MID in each square. Discovery records every own member `getSquareChat` reports for a confirmed chat (`squareChatMember.squareMemberMid`) in `square_self_member`, and keeps earlier ones, since LINE may hand out a new member on rejoin. An OpenChat message is `from_self` when its sender is one of the chat's own members; while the chat has none, `from_self` is `null`, never borrowed from another square.
+The account has a separate member MID in each square. Discovery records every own member `getSquareChat` reports for a confirmed chat (`squareChatMember.squareMemberMid`) in `square_self_member`, and keeps earlier ones, since LINE may hand out a new member on rejoin. An OpenChat message is `from_self` when its sender is one of the chat's own members. While the chat has none, `from_self` is left out as unknown, never borrowed from another square. A message without a sender, in Talk too, has no `from_self` either.
 
 ## Daemon and LaunchAgent
 
@@ -162,13 +162,15 @@ Prefect does not end a running handler when a Streamable HTTP client goes away, 
 
 ## Freshness and paging
 
-Every tool result is an object envelope that reports `health`, `stale` and the last Talk and Square sync times. `stale` is true unless the daemon is `online` or `catching_up`. When the session is lost, the archive tools keep answering from the local copy.
+Every tool result is an object envelope that reports `health`, `stale` and the last Talk and Square sync times; a service that never synced has no time. `stale` is true unless the daemon is `online` or `catching_up`. When the session is lost, the archive tools keep answering from the local copy.
+
+Message and chat items leave out a field without a value: `unsent` appears only when true, `decrypt_state` only when not `ok`, `from_self` only when known and `mentions` only when there are some. A message in a `read_messages` page or in a search hit's context leaves out the service and chat that the page or the hit names. Page fields (cursors, `has_newer`, `has_more`, `size_capped`, `scanned_through`) always appear, null and false included.
 
 Pages hold 50 items by default and at most 200. A continuation is an opaque cursor bound to the tool and a fingerprint of its filters, so a cursor replayed with other filters is refused rather than paging a different result. A page also ends early at about 64 KiB of items, with a continuation. `read_messages` pages by keyset over send time and row ID, so pages never skip or repeat a message, and `around_message_id` centres a page on one message. `list_changes` returns changes after a `seq` in `seq` order, as described under Tombstones and changes.
 
 ## Time
 
-Every time is an object with `utc` and `local`, both ISO 8601 at millisecond precision. `local` carries the numeric offset of the daemon's system time zone at that instant, for example `2026-10-12T10:15:00.000+05:45`, so both sides of a daylight saving change stay distinct. The zone is read on every call, so a changed `TZ` applies without a restart. `status` reports the zone as `time_zone`.
+Every time is one ISO 8601 string at millisecond precision with the numeric offset of the daemon's system time zone at that instant, for example `2026-10-12T10:15:00.000+05:45`. The offset makes it one exact instant, so both sides of a daylight saving change stay distinct, and `search_messages` accepts it unchanged as `since` or `until`. The zone is read on every call, so a changed `TZ` applies without a restart. `status` reports the zone as `time_zone`.
 
 ## Read tools
 

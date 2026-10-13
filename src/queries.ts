@@ -16,58 +16,70 @@ import {
 import { LineMcpError } from './errors.ts';
 
 // The read side of the MCP tools: pages over the archive with display names,
-// opaque keyset cursors, UTC and local times and a size cap per result.
+// opaque keyset cursors, times with the daemon's offset and a size cap per result.
 
 export const defaultLimit = 50;
 export const maxLimit = 200;
 /** Item bytes one result carries; a fuller page ends early with a continuation. */
 export const sizeCap = 64 * 1024;
 
-export interface Time {
-	utc: string;
-	local: string;
-}
-
 const pad = (value: number, width = 2) => String(value).padStart(width, '0');
 
 /**
- * UTC milliseconds as ISO 8601 in UTC and in the daemon's system time zone with
- * its numeric offset, for example `2026-10-12T10:15:00.000+05:45`. The zone is
- * read on every call, so a changed `TZ` applies without a restart.
+ * UTC milliseconds as ISO 8601 at millisecond precision in the daemon's system
+ * time zone with its numeric offset, for example `2026-10-12T10:15:00.000+05:45`,
+ * so the string names one instant. The zone is read on every call, so a changed
+ * `TZ` applies without a restart.
  */
-export function renderTime(ms: number | null | undefined): Time | null {
+export function renderTime(ms: number | null | undefined): string | null {
 	if (ms === null || ms === undefined || !Number.isFinite(ms) || ms <= 0) return null;
 	const date = new Date(ms);
 	const offset = -date.getTimezoneOffset();
 	const sign = offset < 0 ? '-' : '+';
-	const local =
+	return (
 		`${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
 		`T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}` +
 		`.${pad(date.getMilliseconds(), 3)}` +
-		`${sign}${pad(Math.trunc(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`;
-	return { utc: date.toISOString(), local };
+		`${sign}${pad(Math.trunc(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`
+	);
 }
 
-/** The IANA time zone that `local` times are rendered in right now. */
+/** The IANA time zone that times are rendered in right now. */
 export function timeZone(): string {
 	return Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
+/** The fields of `T` that may be null become optional and never null. */
+type Present<T> = { [K in keyof T as null extends T[K] ? never : K]: T[K] } & {
+	[K in keyof T as null extends T[K] ? K : never]?: Exclude<T[K], null>;
+};
+
+/**
+ * `fields` without the ones whose value is null. Items leave an empty field
+ * out rather than repeat null on every message; key order stays.
+ */
+function present<T extends object>(fields: T): Present<T> {
+	return Object.fromEntries(
+		Object.entries(fields).filter(([, value]) => value !== null)
+	) as Present<T>;
 }
 
 /** What every result reports about freshness (architecture, Freshness and paging). */
 export interface Freshness {
 	health: string;
 	stale: boolean;
-	synced_at: { talk: Time | null; square: Time | null };
+	/** Left out for a service that never synced. */
+	synced_at: { talk?: string; square?: string };
 }
 
 export function freshness(status: ArchiveStatus): Freshness {
 	return {
 		health: status.health,
 		stale: status.stale,
-		synced_at: {
+		synced_at: present({
 			talk: renderTime(status.talkSyncedAt),
 			square: renderTime(status.squareSyncedAt)
-		}
+		})
 	};
 }
 
@@ -134,13 +146,14 @@ export function withinCap<T>(items: T[], cap = sizeCap): { kept: T[]; capped: bo
 
 const byteSize = (item: unknown) => Buffer.byteLength(JSON.stringify(item));
 
+/** A chat as tools show it; a field the archive has no value for is left out. */
 export interface ChatItem {
 	service: Service;
 	chat_id: string;
 	type: string;
-	name: string | null;
-	member_count: number | null;
-	last_activity_at: Time | null;
+	name?: string;
+	member_count?: number;
+	last_activity_at?: string;
 }
 
 // A one-to-one chat has no name of its own; the peer's display name stands in.
@@ -158,11 +171,13 @@ function chatItem(row: Record<string, unknown>): ChatItem {
 		service: row.service as Service,
 		chat_id: String(row.chat_id),
 		type: String(row.type),
-		name: row.name === null ? null : String(row.name),
-		member_count: row.member_count === null ? null : Number(row.member_count),
-		last_activity_at: renderTime(
-			row.last_activity_at === null ? null : Number(row.last_activity_at)
-		)
+		...present({
+			name: row.name === null ? null : String(row.name),
+			member_count: row.member_count === null ? null : Number(row.member_count),
+			last_activity_at: renderTime(
+				row.last_activity_at === null ? null : Number(row.last_activity_at)
+			)
+		})
 	};
 }
 
@@ -231,25 +246,38 @@ export function listChatsPage(
 	};
 }
 
+/**
+ * A message as `read_messages` shows it within its chat. A field without a
+ * value is left out: `unsent` appears only when true and `decrypt_state` only
+ * when not `ok`.
+ */
 export interface MessageItem {
+	message_id: string;
+	thread_id?: string;
+	sender_id?: string;
+	sender_name?: string;
+	/**
+	 * Left out when unknown: no sender, or an OpenChat chat whose own member
+	 * discovery has not confirmed yet.
+	 */
+	from_self?: boolean;
+	sent_at?: string;
+	edited_at?: string;
+	/** LINE's content type; left out only for a tombstone of a message never archived. */
+	content_type?: string;
+	text?: string;
+	reply_to?: string;
+	mentions?: string[];
+	decrypt_state?: string;
+	unsent?: true;
+	seq: number;
+}
+
+/** A message outside a page of its own chat, so it names the chat. */
+export interface ChatMessageItem extends MessageItem {
 	service: Service;
 	chat_id: string;
-	chat_name?: string | null;
-	message_id: string;
-	thread_id: string | null;
-	sender_id: string | null;
-	sender_name: string | null;
-	/** Null for an OpenChat chat whose own member discovery has not confirmed yet. */
-	from_self: boolean | null;
-	sent_at: Time | null;
-	edited_at: Time | null;
-	content_type: string | null;
-	text: string | null;
-	reply_to: string | null;
-	mentions: string[] | null;
-	decrypt_state: string;
-	unsent: boolean;
-	seq: number;
+	chat_name?: string;
 }
 
 /** MIDs a LINE `MENTION` metadata value names; `all` for a mention of everyone. */
@@ -311,38 +339,46 @@ class Names {
 	}
 }
 
-/** The account has one MID in Talk and its own member MIDs in each Square chat. */
+/**
+ * The account has one MID in Talk and its own member MIDs in each Square chat.
+ * Null when that cannot be told: no sender, or no own member confirmed yet.
+ */
 function fromSelf(names: Names, selfMid: string, message: MessageView): boolean | null {
+	if (message.sender === null) return null;
 	if (message.service === 'talk') return message.sender === selfMid;
 	const own = names.selfMembers(message.chatId);
-	return own.size === 0 || message.sender === null ? null : own.has(message.sender);
+	return own.size === 0 ? null : own.has(message.sender);
 }
 
-function messageItem(
-	names: Names,
-	selfMid: string,
-	message: MessageView,
-	withChat: boolean
-): MessageItem {
+function messageItem(names: Names, selfMid: string, message: MessageView): MessageItem {
+	return {
+		message_id: message.messageId,
+		...present({
+			thread_id: message.threadId,
+			sender_id: message.sender,
+			sender_name: names.person(message.service, message.sender),
+			from_self: fromSelf(names, selfMid, message),
+			sent_at: renderTime(message.sentAt),
+			edited_at: renderTime(message.editedAt),
+			content_type: message.contentType,
+			// The archive clears an unsent message's text; a tombstone never shows any.
+			text: message.unsent ? null : message.text,
+			reply_to: message.replyTo,
+			mentions: message.unsent ? null : mentioned(message.mentions),
+			decrypt_state: message.decryptState === 'ok' ? null : message.decryptState,
+			unsent: message.unsent || null
+		}),
+		seq: message.seq
+	};
+}
+
+/** A message item that also names its service, chat and the chat's display name. */
+function chatMessageItem(names: Names, selfMid: string, message: MessageView): ChatMessageItem {
 	return {
 		service: message.service,
 		chat_id: message.chatId,
-		...(withChat ? { chat_name: names.chat(message.service, message.chatId) } : {}),
-		message_id: message.messageId,
-		thread_id: message.threadId,
-		sender_id: message.sender,
-		sender_name: names.person(message.service, message.sender),
-		from_self: fromSelf(names, selfMid, message),
-		sent_at: renderTime(message.sentAt),
-		edited_at: renderTime(message.editedAt),
-		content_type: message.contentType,
-		// The archive clears an unsent message's text; a tombstone never shows any.
-		text: message.unsent ? null : message.text,
-		reply_to: message.replyTo,
-		mentions: message.unsent ? null : mentioned(message.mentions),
-		decrypt_state: message.decryptState,
-		unsent: message.unsent,
-		seq: message.seq
+		...present({ chat_name: names.chat(message.service, message.chatId) }),
+		...messageItem(names, selfMid, message)
 	};
 }
 
@@ -351,8 +387,8 @@ export function describeMessage(
 	db: DatabaseSync,
 	selfMid: string,
 	message: MessageView
-): MessageItem {
-	return messageItem(new Names(db), selfMid, message, true);
+): ChatMessageItem {
+	return chatMessageItem(new Names(db), selfMid, message);
 }
 
 /** A participant's archived display name. */
@@ -407,7 +443,7 @@ export function readMessagesPage(
 		...(options.threadId !== undefined ? { threadId: options.threadId } : {})
 	};
 	const names = new Names(db);
-	const item = (message: MessageView) => messageItem(names, selfMid, message, false);
+	const item = (message: MessageView) => messageItem(names, selfMid, message);
 	const cursor = (direction: 'older' | 'newer', message: MessageView | undefined) =>
 		message
 			? encodeCursor('read_messages', scope, [direction, ...encodePosition(positionOf(message))])
@@ -497,7 +533,7 @@ export function readMessagesPage(
 }
 
 /** A search hit; with context, the messages around it as `read_messages` shows them. */
-export interface SearchHit extends MessageItem {
+export interface SearchHit extends ChatMessageItem {
 	/** Up to `context` messages just before the hit in its chat or thread, oldest first. */
 	context_before?: MessageItem[];
 	/** Up to `context` messages just after the hit in its chat or thread, oldest first. */
@@ -510,7 +546,7 @@ export interface SearchPage {
 	query: string;
 	mode: 'fts' | 'scan';
 	/** Scan only: the send time this page searched back to, while next_cursor continues further. */
-	scanned_through: Time | null;
+	scanned_through: string | null;
 	/** Newest first. */
 	messages: SearchHit[];
 	next_cursor: string | null;
@@ -610,7 +646,7 @@ function searchHit(
 	message: MessageView,
 	context: number
 ): SearchHit {
-	const hit = messageItem(names, selfMid, message, true);
+	const hit = chatMessageItem(names, selfMid, message);
 	if (context === 0) return hit;
 	const around = {
 		service: message.service,
@@ -619,7 +655,7 @@ function searchHit(
 		limit: context
 	};
 	const at = positionOf(message);
-	const item = (entry: MessageView) => messageItem(names, selfMid, entry, false);
+	const item = (entry: MessageView) => messageItem(names, selfMid, entry);
 	return {
 		...hit,
 		context_before: readMessages(db, { ...around, before: at })
@@ -649,7 +685,7 @@ function shedContext(hit: SearchHit, budget: number): number {
 
 export interface ChangePage {
 	/** In `seq` order; a message changed again later reappears with its new `seq`. */
-	changes: MessageItem[];
+	changes: ChatMessageItem[];
 	/** Pass as `after_seq` to continue; unchanged when nothing new arrived. */
 	next_after_seq: number;
 	has_more: boolean;
@@ -671,7 +707,7 @@ export function listChangesPage(
 	const rows = listChanges(db, { afterSeq: options.afterSeq, limit: limit + 1 });
 	const names = new Names(db);
 	const { kept, capped } = withinCap(
-		rows.slice(0, limit).map((message) => messageItem(names, selfMid, message, true))
+		rows.slice(0, limit).map((message) => chatMessageItem(names, selfMid, message))
 	);
 	const { value: latest } = db.prepare('SELECT value FROM change_counter WHERE id = 1').get() as {
 		value: number;

@@ -404,7 +404,7 @@ describe('read_messages', () => {
 		expect(seen).toEqual(Array.from({ length: 40 }, (_, index) => String(800 + index)));
 	});
 
-	it('shows names from the archive, Chinese text unchanged, and freshness in UTC and local time', async () => {
+	it('shows names from the archive, Chinese text unchanged, and times in the local zone', async () => {
 		const { server, session } = await serve();
 		const { db } = session;
 		transaction(db, () => {
@@ -430,17 +430,14 @@ describe('read_messages', () => {
 		});
 		expect(read.data).toMatchObject({
 			stale: true,
-			synced_at: {
-				talk: { utc: '2026-10-12T04:30:00.000Z', local: '2026-10-12T06:30:00.000+02:00' },
-				square: null
-			},
+			synced_at: { talk: '2026-10-12T06:30:00.000+02:00' },
 			chat: { name: '王小明' },
 			messages: [
 				{
 					text: '今天晚上吃什麼？🍜',
 					sender_name: '王小明',
 					from_self: false,
-					sent_at: { utc: '2026-10-12T04:30:00.000Z', local: '2026-10-12T06:30:00.000+02:00' }
+					sent_at: '2026-10-12T06:30:00.000+02:00'
 				},
 				{ text: '好', from_self: true }
 			]
@@ -610,8 +607,10 @@ describe('search_messages', () => {
 
 		expect(pages.map((page) => ids(page.messages))).toEqual([['new', 'edge'], [], ['old']]);
 		expect(
-			pages.map((page) => (page.scanned_through as { utc: string } | null)?.utc ?? null)
-		).toEqual([new Date(top - 50_000).toISOString(), new Date(top - 100_000).toISOString(), null]);
+			pages.map((page) =>
+				page.scanned_through === null ? null : Date.parse(page.scanned_through as string)
+			)
+		).toEqual([top - 50_000, top - 100_000, null]);
 	});
 
 	it('pages results with a cursor, each once, and never shows unsent text', async () => {
@@ -774,7 +773,8 @@ describe('search_messages', () => {
 			{ message_id: 't3', context_before: shownAs('t1', 't2'), context_after: shownAs('t4') },
 			{ message_id: 'm1', context_before: [], context_after: shownAs('m2', 'm3') }
 		]);
-		expect(shown.get('m3')).toMatchObject({ unsent: true, text: null });
+		expect(shown.get('m3')).toMatchObject({ unsent: true });
+		expect(shown.get('m3')).not.toHaveProperty('text');
 		const plain = await callTool(server.port, 'search_messages', { query: '關鍵字' });
 		expect(Object.keys((plain.data.messages as object[])[0]!)).not.toContain('context_before');
 	});
@@ -892,8 +892,8 @@ describe('list_changes', () => {
 
 		const seen: [string, string | null, number][] = [];
 		const take = (changes: unknown) => {
-			for (const entry of changes as { message_id: string; text: string | null; seq: number }[]) {
-				seen.push([entry.message_id, entry.text, entry.seq]);
+			for (const entry of changes as { message_id: string; text?: string; seq: number }[]) {
+				seen.push([entry.message_id, entry.text ?? null, entry.seq]);
 			}
 		};
 		let page = (await callTool(server.port, 'list_changes', { limit: 2 })).data;
@@ -927,6 +927,161 @@ describe('list_changes', () => {
 		const idle = await callTool(server.port, 'list_changes', { after_seq: page.next_after_seq });
 		expect(idle.data).toMatchObject({ changes: [], has_more: false });
 		expect(idle.data.next_after_seq).toBe(page.next_after_seq);
+	});
+});
+
+/** Every key and value inside `value`, depth first, with the object that holds it. */
+function* walk(value: unknown): Generator<[string, unknown, object]> {
+	if (typeof value !== 'object' || value === null) return;
+	for (const [key, entry] of Object.entries(value)) {
+		yield [key, entry, value];
+		yield* walk(entry);
+	}
+}
+
+const time = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/;
+
+describe('result shape', () => {
+	it('gives each time as one string with the local offset and leaves empty item fields out', async () => {
+		const { server, session } = await serve();
+		const { db } = session;
+		const mention = JSON.stringify({ MENTIONEES: [{ S: '0', E: '3', M: selfMid }] });
+		transaction(db, () => {
+			upsertParticipant(db, 'talk', otherMid, '王小明');
+			db.prepare(
+				`INSERT INTO sync_state (key, value, updated_at) VALUES ('talk:syncedAt', ?, 0)`
+			).run(String(base + 9));
+		});
+		store(
+			db,
+			row('1', base, '晚餐吃 plain'),
+			row('2', base + 1, '晚餐吃 edited', { sender: selfMid, editedAt: base + 5 }),
+			row('3', base + 2, '晚餐吃 @me', { mentions: mention }),
+			row('4', base + 3, '', { text: null, decryptState: 'missing_key' }),
+			row('5', base + 4, '晚餐吃 gone'),
+			{ ...squareRow('6', 5, thread), text: '晚餐吃 thread' }
+		);
+		apply(db, { kind: 'unsend', service: 'talk', chatId: otherMid, messageId: '5' });
+		const sentAt: Record<string, number> = {
+			'1': base,
+			'2': base + 1,
+			'3': base + 2,
+			'4': base + 3,
+			'5': base + 4,
+			'6': base + 5 * 60_000
+		};
+
+		const call = async (name: string, args: Record<string, unknown> = {}) =>
+			(await callTool(server.port, name, args)).data;
+		const read = await call('read_messages', { service: 'talk', chat_id: otherMid });
+		const search = await call('search_messages', { query: '晚餐吃', context: 1 });
+		const scan = await call('search_messages', { query: 'e', limit: 1 });
+		const changes = await call('list_changes');
+		const chats = await call('list_chats');
+		const results = [read, search, scan, changes, chats, await call('status')];
+
+		for (const result of results) {
+			for (const [key, value, holder] of walk(result)) {
+				expect(holder).not.toHaveProperty('utc');
+				expect(holder).not.toHaveProperty('local');
+				const isTime =
+					(key.endsWith('_at') && key !== 'synced_at') ||
+					key === 'scanned_through' ||
+					holder === result.synced_at;
+				if (isTime) {
+					if (value !== null) expect(value).toMatch(time);
+				}
+				if (key === 'sent_at') {
+					expect(Date.parse(value as string)).toBe(
+						sentAt[(holder as { message_id: string }).message_id]
+					);
+				}
+			}
+		}
+		expect(read.synced_at).toEqual({ talk: '2026-10-12T06:30:00.009+02:00' });
+		expect(Date.parse(scan.scanned_through as string)).toBe(sentAt['6']);
+		expect(read.messages).toEqual([
+			{
+				message_id: '1',
+				sender_id: otherMid,
+				sender_name: '王小明',
+				from_self: false,
+				sent_at: '2026-10-12T06:30:00.000+02:00',
+				content_type: 'NONE',
+				text: '晚餐吃 plain',
+				seq: expect.any(Number)
+			},
+			expect.objectContaining({
+				message_id: '2',
+				from_self: true,
+				edited_at: '2026-10-12T06:30:00.005+02:00'
+			}),
+			expect.objectContaining({ message_id: '3', mentions: [selfMid] }),
+			expect.objectContaining({ message_id: '4', decrypt_state: 'missing_key' }),
+			expect.objectContaining({ message_id: '5', unsent: true })
+		]);
+		const flagged = (key: string) =>
+			(read.messages as Record<string, unknown>[])
+				.filter((item) => key in item)
+				.map((item) => item.message_id);
+		expect([flagged('unsent'), flagged('decrypt_state'), flagged('mentions')]).toEqual([
+			['5'],
+			['4'],
+			['3']
+		]);
+
+		// Items carry no null; a page's own fields keep theirs.
+		const items = [
+			read.chat,
+			...(read.messages as object[]),
+			...(search.messages as object[]),
+			...(changes.changes as object[]),
+			...(chats.chats as object[])
+		];
+		for (const [key, value] of walk(items)) expect([key, value]).not.toEqual([key, null]);
+		expect(read).toMatchObject({ thread_id: null, older_cursor: null, has_newer: false });
+		expect(search).toMatchObject({ next_cursor: null, scanned_through: null });
+
+		// Within its own chat, a message does not repeat the chat; elsewhere it names it.
+		const contexts = (
+			search.messages as { context_before: object[]; context_after: object[] }[]
+		).flatMap((hit) => [...hit.context_before, ...hit.context_after]);
+		expect(contexts.length).toBeGreaterThan(0);
+		for (const entry of [...(read.messages as object[]), ...contexts]) {
+			for (const key of ['service', 'chat_id', 'chat_name']) expect(entry).not.toHaveProperty(key);
+		}
+		for (const entry of [...(search.messages as object[]), ...(changes.changes as object[])]) {
+			expect(entry).toMatchObject({ service: expect.any(String), chat_id: expect.any(String) });
+		}
+		expect(search.messages).toContainEqual(
+			expect.objectContaining({ message_id: '1', chat_name: '王小明' })
+		);
+	});
+
+	it('continues cursors issued before items were trimmed', async () => {
+		const { server, session } = await serve();
+		store(
+			session.db,
+			...['1', '2', '3', '4', '5'].map((id, index) => row(id, base + index, `晚餐吃 ${id}`))
+		);
+		// Recorded from 330e1c9: each continues from message 3 (sent at base + 2).
+		const older =
+			'eyJrIjoicmVhZF9tZXNzYWdlcyIsInMiOiJYVHBzbE5jOEVKY1UiLCJwIjpbIm9sZGVyIiwxNzkxNzc5NDAwMDAyLDNdfQ';
+		const newer =
+			'eyJrIjoicmVhZF9tZXNzYWdlcyIsInMiOiJYVHBzbE5jOEVKY1UiLCJwIjpbIm5ld2VyIiwxNzkxNzc5NDAwMDAyLDNdfQ';
+		const search =
+			'eyJrIjoic2VhcmNoX21lc3NhZ2VzIiwicyI6IjdzbDk1WlRBNFlVQSIsInAiOlsxNzkxNzc5NDAwMDAyLDNdfQ';
+		const read = async (cursor: string) =>
+			(await callTool(server.port, 'read_messages', { service: 'talk', chat_id: otherMid, cursor }))
+				.data.messages;
+
+		expect(ids(await read(older))).toEqual(['1', '2']);
+		expect(ids(await read(newer))).toEqual(['4', '5']);
+		const hits = await callTool(server.port, 'search_messages', {
+			query: '晚餐吃',
+			cursor: search
+		});
+		expect(ids(hits.data.messages)).toEqual(['2', '1']);
 	});
 });
 
@@ -1022,7 +1177,7 @@ describe('upstream tools', () => {
 				seq: '9007199254740993',
 				text: '週五聚餐',
 				creator_name: '小明（存檔）',
-				created_at: { utc: '2026-10-12T04:30:00.000Z', local: '2026-10-12T06:30:00.000+02:00' }
+				created_at: '2026-10-12T06:30:00.000+02:00'
 			})
 		]);
 		expect(
