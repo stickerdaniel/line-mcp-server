@@ -10,7 +10,7 @@ import {
 } from '../archive.ts';
 import { transaction } from '../db.ts';
 import { mapError } from '../errors.ts';
-import { isTransient, type Pool, type SyncContext } from './loop.ts';
+import { isStorageFailure, isTransient, type Pool, type SyncContext } from './loop.ts';
 import {
 	applyChanges,
 	enumName,
@@ -265,10 +265,42 @@ function chatType(midType: unknown, chatId: string): string {
 	return chatId.startsWith('c') ? 'group' : chatId.startsWith('r') ? 'room' : 'user';
 }
 
+/** A name lookup LINE refuses is logged by code and skipped; a transient failure ends the pass. */
+async function optionalLookup<T>(
+	context: SyncContext,
+	pool: Pool,
+	operation: string,
+	request: () => Promise<T>
+): Promise<T | undefined> {
+	try {
+		return await pool.run(request);
+	} catch (error) {
+		if (isTransient(error, operation)) throw error;
+		context.log({ event: 'discovery_names_skipped', ...mapError(error, operation) });
+		return undefined;
+	}
+}
+
+/** Archived senders of `service` without a stored name, the account itself excluded. */
+function unnamedSenders(context: SyncContext, service: Service): string[] {
+	return context.db
+		.prepare(
+			`SELECT DISTINCT m.sender FROM message m
+			LEFT JOIN participant p ON p.service = m.service AND p.participant_id = m.sender
+			WHERE m.service = ? AND m.sender IS NOT NULL AND p.display_name IS NULL`
+		)
+		.all(service)
+		.map((row) => String(row.sender))
+		.filter((mid) => mid !== context.selfMid);
+}
+
 /**
  * Talk discovery: `getMessageBoxes` (every page) unioned with the member
  * chats of `getAllChatMids`, named through `getChats` and `getContactsV2`.
- * New chats get a backfill cursor. Square discovery is the Square loop's sweep.
+ * New chats get a backfill cursor. Contacts name DM peers, group members and
+ * archived senders still unnamed (rooms, departed members); a contact name
+ * replaces the stored one, a missing one keeps it. Square discovery is the
+ * Square loop's sweep.
  */
 export async function discoverChats(context: SyncContext, pool: Pool): Promise<DiscoveredChat[]> {
 	const { base, db } = context;
@@ -308,36 +340,33 @@ export async function discoverChats(context: SyncContext, pool: Pool): Promise<D
 		if (!chats.has(mid)) chats.set(mid, { type: chatType(undefined, mid) });
 	}
 
-	// Names are optional: a chunk LINE refuses keeps its chats unnamed.
-	const optional = async <T>(operation: string, request: () => Promise<T>) => {
-		try {
-			return await pool.run(request);
-		} catch (error) {
-			if (isTransient(error, operation)) throw error;
-			context.log({ event: 'discovery_names_skipped', ...mapError(error, operation) });
-			return undefined;
-		}
-	};
+	// Names are optional: a chunk LINE refuses keeps its chats and people as they are.
 	const names = new Map<string, { name?: string; memberCount?: number }>();
+	const members = new Set<string>();
 	const groups = [...chats].filter(([, chat]) => chat.type !== 'user').map(([id]) => id);
 	for (let index = 0; index < groups.length; index += 50) {
 		const chunk = groups.slice(index, index + 50);
-		const response = await optional('getChats', () =>
+		const response = await optionalLookup(context, pool, 'getChats', () =>
 			base.talk.getChats({ chatMids: chunk, withMembers: true, withInvitees: false })
 		);
 		for (const chat of response?.chats ?? []) {
-			const members = chat.extra?.groupExtra?.memberMids;
+			const memberMids = chat.extra?.groupExtra?.memberMids;
 			names.set(chat.chatMid, {
 				name: chat.chatName || undefined,
-				memberCount: members ? Object.keys(members).length : undefined
+				memberCount: memberMids ? Object.keys(memberMids).length : undefined
 			});
+			for (const mid of Object.keys(memberMids ?? {})) members.add(mid);
 		}
 	}
 	const users = [...chats].filter(([, chat]) => chat.type === 'user').map(([id]) => id);
+	const others = new Set([...members, ...unnamedSenders(context, 'talk')]);
+	others.delete(context.selfMid);
+	// User chats include the account's own chat (Keep Memo), named by its contact.
+	const targets = [...new Set([...users, ...others])];
 	const contacts = new Map<string, string>();
-	for (let index = 0; index < users.length; index += 100) {
-		const chunk = users.slice(index, index + 100);
-		const response = await optional('getContactsV2', () =>
+	for (let index = 0; index < targets.length; index += 100) {
+		const chunk = targets.slice(index, index + 100);
+		const response = await optionalLookup(context, pool, 'getContactsV2', () =>
 			base.talk.getContactsV2({ mids: chunk })
 		);
 		for (const [mid, entry] of Object.entries(response?.contacts ?? {})) {
@@ -367,9 +396,61 @@ export async function discoverChats(context: SyncContext, pool: Pool): Promise<D
 		}
 		for (const [mid, name] of contacts) upsertParticipant(db, 'talk', mid, name, now);
 	});
+	context.log({
+		event: 'sender_names',
+		service: 'talk',
+		targets: targets.length,
+		named: contacts.size
+	});
 	return [...chats].map(([chatId, chat]) => ({
 		service: 'talk' as const,
 		chatId,
 		lastActivityAt: chat.lastActivityAt
 	}));
+}
+
+/** MIDs per `getSquareMembers` request. LINEJS sets no limit and LINE's is unknown, so it stays small. */
+export const squareMemberBatch = 50;
+
+/**
+ * Names archived OpenChat senders that no event named, through
+ * `getSquareMembers`; runs after discovery. Event names stay preferred: a
+ * lookup name is written only while the member is still unnamed at commit,
+ * and a refused or empty answer keeps what is stored. It never throws for a
+ * failed lookup, so OpenChat names cannot hold up the worker.
+ */
+export async function nameSquareSenders(context: SyncContext, pool: Pool): Promise<void> {
+	const { base, db } = context;
+	const targets = unnamedSenders(context, 'square');
+	const found = new Map<string, string>();
+	for (let index = 0; index < targets.length; index += squareMemberBatch) {
+		const chunk = targets.slice(index, index + squareMemberBatch);
+		let response;
+		try {
+			response = await pool.run(() => base.square.getSquareMembers({ request: { mids: chunk } }));
+		} catch (error) {
+			// A local archive failure, as during token recovery, stops the worker as anywhere else.
+			if (isStorageFailure(error)) throw error;
+			context.log({ event: 'discovery_names_skipped', ...mapError(error, 'getSquareMembers') });
+			// A refused batch is skipped. Any other failure ends the pass without
+			// holding up the worker; the next discovery pass tries again.
+			if (isTransient(error, 'getSquareMembers')) break;
+			continue;
+		}
+		for (const [mid, member] of Object.entries(response?.members ?? {})) {
+			if (member?.displayName) found.set(mid, member.displayName);
+		}
+	}
+	transaction(db, () => {
+		const now = context.now();
+		for (const [mid, name] of found) {
+			upsertParticipant(db, 'square', mid, name, now, { onlyUnnamed: true });
+		}
+	});
+	context.log({
+		event: 'sender_names',
+		service: 'square',
+		targets: targets.length,
+		named: found.size
+	});
 }

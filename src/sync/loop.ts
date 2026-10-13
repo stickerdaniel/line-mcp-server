@@ -62,6 +62,11 @@ const transientCodes = new Set([
  * session wrapper rethrows the raw LINE error after it enters `needs_login`,
  * and the work resumes after the next login.
  */
+/** Any SQLite failure while a loop reads or writes the archive (full disk, I/O, corruption). */
+export function isStorageFailure(error: unknown): boolean {
+	return (error as { code?: unknown })?.code === 'ERR_SQLITE_ERROR';
+}
+
 export function isTransient(error: unknown, operation: string): boolean {
 	return transientCodes.has(mapError(error, operation).code) || isTerminalAuthError(error);
 }

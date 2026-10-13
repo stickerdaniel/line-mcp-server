@@ -119,7 +119,9 @@ const migrations = [
 		updated_at INTEGER NOT NULL
 	) STRICT;
 	CREATE INDEX outbox_message ON outbox (service, chat_id, message_id) WHERE message_id IS NOT NULL;
-	CREATE INDEX outbox_in_flight ON outbox (state) WHERE state = 'in_flight';`
+	CREATE INDEX outbox_in_flight ON outbox (state) WHERE state = 'in_flight';`,
+	// Discovery looks up every archived sender still unnamed (architecture, Names).
+	`CREATE INDEX message_sender ON message (service, sender);`
 ];
 
 export const schemaVersion = migrations.length;
