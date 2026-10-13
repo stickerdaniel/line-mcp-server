@@ -161,7 +161,7 @@ export function decimal(value: number | bigint | string): string {
 
 async function square(base: BaseClient, chosen: string | undefined) {
 	const joined = await listJoinedSquareChats(base);
-	const chat = chosen ?? joined.chats[0]?.squareChatMid;
+	const chat = chosen ?? joined.chats[0]?.chat.squareChatMid;
 	const summary: Record<string, unknown> = {
 		joinedChats: joined.chats.length,
 		uncoveredSquares: joined.uncoveredSquares.map(({ mid }) => mid),

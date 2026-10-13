@@ -239,7 +239,7 @@ export interface MessageItem {
 	thread_id: string | null;
 	sender_id: string | null;
 	sender_name: string | null;
-	/** Known for Talk; Square members have a per-square identity. */
+	/** Null for an OpenChat chat whose own member discovery has not confirmed yet. */
 	from_self: boolean | null;
 	sent_at: Time | null;
 	edited_at: Time | null;
@@ -266,11 +266,15 @@ function mentioned(raw: string | null): string[] | null {
 	}
 }
 
-/** Resolves display names from the archive's chat and participant tables, once per page. */
+/**
+ * Resolves display names and the account's own OpenChat members from the
+ * archive's chat and participant tables, once per page.
+ */
 class Names {
 	readonly #db: DatabaseSync;
 	readonly #chats = new Map<string, string | null>();
 	readonly #people = new Map<string, string | null>();
+	readonly #selfMembers = new Map<string, Set<string>>();
 
 	constructor(db: DatabaseSync) {
 		this.#db = db;
@@ -294,6 +298,24 @@ class Names {
 		}
 		return this.#people.get(key)!;
 	}
+
+	/** Every own member MID discovery confirmed in a Square chat; empty until it confirms one. */
+	selfMembers(chatId: string): Set<string> {
+		if (!this.#selfMembers.has(chatId)) {
+			const rows = this.#db
+				.prepare('SELECT member_id FROM square_self_member WHERE chat_id = ?')
+				.all(chatId);
+			this.#selfMembers.set(chatId, new Set(rows.map((row) => String(row.member_id))));
+		}
+		return this.#selfMembers.get(chatId)!;
+	}
+}
+
+/** The account has one MID in Talk and its own member MIDs in each Square chat. */
+function fromSelf(names: Names, selfMid: string, message: MessageView): boolean | null {
+	if (message.service === 'talk') return message.sender === selfMid;
+	const own = names.selfMembers(message.chatId);
+	return own.size === 0 || message.sender === null ? null : own.has(message.sender);
 }
 
 function messageItem(
@@ -310,7 +332,7 @@ function messageItem(
 		thread_id: message.threadId,
 		sender_id: message.sender,
 		sender_name: names.person(message.service, message.sender),
-		from_self: message.service === 'talk' ? message.sender === selfMid : null,
+		from_self: fromSelf(names, selfMid, message),
 		sent_at: renderTime(message.sentAt),
 		edited_at: renderTime(message.editedAt),
 		content_type: message.contentType,

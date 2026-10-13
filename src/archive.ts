@@ -60,6 +60,22 @@ export function upsertChat(db: DatabaseSync, chat: ChatInfo, now = Date.now()): 
 }
 
 /**
+ * Records an own member MID `getSquareChat` confirmed in a Square chat. Earlier
+ * members stay, so the account's older messages keep counting as its own.
+ */
+export function addSquareSelfMember(
+	db: DatabaseSync,
+	chatId: string,
+	memberId: string,
+	now = Date.now()
+): void {
+	db.prepare(
+		`INSERT INTO square_self_member (chat_id, member_id, confirmed_at) VALUES (?, ?, ?)
+		ON CONFLICT (chat_id, member_id) DO UPDATE SET confirmed_at = excluded.confirmed_at`
+	).run(chatId, memberId, now);
+}
+
+/**
  * Inserts or renames a participant. With `onlyUnnamed`, a stored name wins, so
  * a fallback lookup never replaces a name an event delivered meanwhile.
  */

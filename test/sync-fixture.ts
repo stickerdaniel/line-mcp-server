@@ -150,7 +150,7 @@ export function squareDiscovery(
 					squareMid: discoveredSquare,
 					name: 'Square'
 				},
-				squareChatMember: { membershipState: 'JOINED' }
+				squareChatMember: { membershipState: 'JOINED', squareMemberMid: discoveredSelf }
 			})
 		},
 		events: chats.map(

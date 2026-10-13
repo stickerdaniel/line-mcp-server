@@ -90,6 +90,8 @@ One allowlisted mapper sits between upstream failures and both logs and results:
 
 `fetchSquareChatEvents` goes through the generated Thrift request, because the handwritten wrapper drops `continuationToken`, `subscriptionId`, `inclusive` and `fetchType` (`base/service/square/mod.ts:127-144`). LINE answers `getJoinedSquareChats` with `NOT_IMPLEMENTED` for this device type, so joined chats come from the account's own `fetchMyEvents` membership history, and `getSquareChat` confirms each one. A joined square without a confirmed chat is reported as uncovered rather than dropped.
 
+The account has a separate member MID in each square. Discovery records every own member `getSquareChat` reports for a confirmed chat (`squareChatMember.squareMemberMid`) in `square_self_member`, and keeps earlier ones, since LINE may hand out a new member on rejoin. An OpenChat message is `from_self` when its sender is one of the chat's own members; while the chat has none, `from_self` is `null`, never borrowed from another square.
+
 ## Daemon and LaunchAgent
 
 `line-mcp install` writes the per-user LaunchAgent `io.github.stickerdaniel.line-mcp` to `~/Library/LaunchAgents` from `launchd/io.github.stickerdaniel.line-mcp.plist` and bootstraps it: `RunAtLoad`, `KeepAlive`, `ThrottleInterval` 30, `Umask` 63, logs in `~/Library/Logs/line-mcp` (`0700`). `LINE_MCP_HOME`, `LINE_MCP_LOCK_PORT` and `LINE_MCP_PORT` pass on to the agent. The agent runs an absolute Node path: an override from `--node` or `LINE_MCP_NODE`, which must be an executable Node 24.18 or later, otherwise Homebrew's stable `opt/node@24` link rather than a versioned Cellar path that the next `brew upgrade` removes, otherwise the running Node.
