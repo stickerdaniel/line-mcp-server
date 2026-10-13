@@ -7,6 +7,7 @@ import type {
 	FetchSquareChatEventsResponse,
 	Square,
 	SquareChat,
+	SquareChatStatusWithoutMessage,
 	SquareEvent
 } from '@evex/linejs-types';
 
@@ -50,6 +51,10 @@ export interface JoinedSquareChat {
 	chat: SquareChat;
 	/** The account's own member MID in the chat, unknown when `getSquareChat` omits it. */
 	selfMemberId: string | undefined;
+	/** The account's read position and LINE's unread count, when `getSquareChat` reports them. */
+	status: SquareChatStatusWithoutMessage | undefined;
+	/** When the `getSquareChat` request that reported `status` was sent. */
+	statusAt: number;
 }
 
 export interface JoinedSquareChats {
@@ -65,9 +70,13 @@ export interface JoinedSquareChats {
  * LINE answers `getJoinedSquareChats` with NOT_IMPLEMENTED for this device, so
  * the joined chats come from the account's own Square events: every chat the
  * account joined is a candidate unless a later event removed the account from
- * it, and `getSquareChat` then has the final word on membership.
+ * it, and `getSquareChat` then has the final word on membership. `now` times
+ * each `getSquareChat` request.
  */
-export async function listJoinedSquareChats(base: BaseClient): Promise<JoinedSquareChats> {
+export async function listJoinedSquareChats(
+	base: BaseClient,
+	now: () => number = Date.now
+): Promise<JoinedSquareChats> {
 	const squares = await drain((continuationToken) =>
 		base.square.getJoinedSquares({ limit: 100, continuationToken })
 	);
@@ -85,7 +94,7 @@ export async function listJoinedSquareChats(base: BaseClient): Promise<JoinedSqu
 
 	const chats: JoinedSquareChat[] = [];
 	for (const squareChatMid of candidates) {
-		const joined = await confirmedChat(base, squareChatMid);
+		const joined = await confirmedChat(base, squareChatMid, now);
 		if (joined) chats.push(joined);
 	}
 	const covered = new Set(chats.map(({ chat }) => chat.squareMid));
@@ -190,12 +199,21 @@ function membershipChange(
  */
 async function confirmedChat(
 	base: BaseClient,
-	squareChatMid: string
+	squareChatMid: string,
+	now: () => number
 ): Promise<JoinedSquareChat | undefined> {
 	try {
-		const { squareChat, squareChatMember } = await base.square.getSquareChat({ squareChatMid });
+		const statusAt = now();
+		const { squareChat, squareChatMember, squareChatStatus } = await base.square.getSquareChat({
+			squareChatMid
+		});
 		return squareChatMember?.membershipState === 'JOINED'
-			? { chat: squareChat, selfMemberId: squareChatMember.squareMemberMid || undefined }
+			? {
+					chat: squareChat,
+					selfMemberId: squareChatMember.squareMemberMid || undefined,
+					status: squareChatStatus?.otherStatus,
+					statusAt
+				}
 			: undefined;
 	} catch (error) {
 		const code = error instanceof InternalError ? error.data?.errorCode : undefined;

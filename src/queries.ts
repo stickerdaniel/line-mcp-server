@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import {
 	type ArchiveStatus,
+	canonicalId,
 	findMessage,
 	latestMessages,
 	listChanges,
@@ -12,7 +13,9 @@ import {
 	readMessages,
 	searchMessages,
 	searchTerms,
-	type Service
+	type Service,
+	unreadCounts,
+	unreadMessages
 } from './archive.ts';
 import { LineMcpError } from './errors.ts';
 
@@ -938,6 +941,211 @@ function shedContext(hit: SearchHit, budget: number): number {
 		size = byteSize(hit);
 	}
 	return size;
+}
+
+/**
+ * A chat in `list_unread`: its read position is known, with `unread_count`
+ * and the unread `messages` (or this page's part of them), or unknown, with
+ * `messages_unknown`. LINE's own count appears while it belongs to the
+ * current read position.
+ */
+export type UnreadChat = ChatItem & {
+	line_unread_count?: number;
+	line_unread_as_of?: string;
+	/** Set when the item continues a chat from the previous page. */
+	continued?: true;
+} & ({ messages_unknown: true } | { unread_count: number; messages: MessageItem[] });
+
+export interface UnreadPage {
+	chats: UnreadChat[];
+	next_cursor: string | null;
+	size_capped: boolean;
+}
+
+/** A chat's place in the `list_unread` order, and the message a page ended after inside it. */
+interface UnreadPosition {
+	boundary: number;
+	chatKey: string;
+	service: Service;
+	chatId: string;
+	lastId: string | null;
+}
+
+const isDecimal = (value: unknown): value is string =>
+	typeof value === 'string' && /^(?:0|[1-9]\d*)$/.test(value);
+
+/** Compares canonical decimal strings numerically: by length, then text. */
+const compareDecimal = (a: string, b: string) =>
+	a.length - b.length || (a < b ? -1 : a > b ? 1 : 0);
+
+/** The `list_unread` order: highest chat key first, then service, then chat ID. */
+function compareChats(
+	a: { chatKey: string; service: string; chatId: string },
+	b: { chatKey: string; service: string; chatId: string }
+): number {
+	return (
+		compareDecimal(b.chatKey, a.chatKey) ||
+		(a.service < b.service ? -1 : a.service > b.service ? 1 : 0) ||
+		(a.chatId < b.chatId ? -1 : a.chatId > b.chatId ? 1 : 0)
+	);
+}
+
+function decodeUnreadPosition(value: unknown): UnreadPosition {
+	const [boundary, chatKey, service, chatId, lastId] = Array.isArray(value)
+		? (value as unknown[])
+		: [];
+	if (
+		!isCount(boundary) ||
+		!isDecimal(chatKey) ||
+		(service !== 'talk' && service !== 'square') ||
+		typeof chatId !== 'string' ||
+		(lastId !== null && !isDecimal(lastId))
+	) {
+		throw invalidCursor();
+	}
+	return { boundary, chatKey, service, chatId, lastId };
+}
+
+/** Unread messages one query reads at a time while a page fills. */
+const unreadBatch = 100;
+
+/**
+ * Every unread message of the account in one result while it fits the size
+ * cap (architecture, Read state). The first page fixes a row boundary; rows
+ * added later never enter the traversal. Chats order by `chat_key`, the
+ * highest message ID among their rows at or below the boundary, which no
+ * later change moves, so reads, unsends and edits between pages only remove
+ * messages. Messages follow in numeric ID order. The cap counts each chat
+ * header and each message; a page may end inside a chat and the next one
+ * repeats its header with `continued`. A page's first chat with its first
+ * message is emitted even over the cap, so every page moves on.
+ */
+export function listUnreadPage(
+	db: DatabaseSync,
+	selfMid: string,
+	options: { service?: Service; cursor?: string }
+): UnreadPage {
+	const scope = { service: options.service ?? null };
+	const from = options.cursor
+		? decodeUnreadPosition(decodeCursor(options.cursor, 'list_unread', scope))
+		: undefined;
+	const latest = db.prepare('SELECT coalesce(max(id), 0) AS id FROM message').get() as {
+		id: number;
+	};
+	const boundary = from?.boundary ?? latest.id;
+	const unread = { boundary, selfMid };
+	const rows = db
+		.prepare(
+			`WITH k AS (
+				SELECT service, chat_id,
+					substr(max(printf('%04d', length(message_id)) || message_id), 5) AS chat_key
+				FROM message WHERE id <= :boundary AND ${canonicalId('message_id')}
+				GROUP BY service, chat_id
+			)
+			SELECT ${chatColumns}, coalesce(k.chat_key, '0') AS chat_key, r.marker, r.line_count,
+				r.count_marker, r.count_at
+			FROM ${chatJoin}
+			LEFT JOIN k ON k.service = c.service AND k.chat_id = c.chat_id
+			LEFT JOIN read_state r ON r.service = c.service AND r.chat_id = c.chat_id
+			WHERE :service IS NULL OR c.service = :service`
+		)
+		.all({ boundary, service: scope.service })
+		.map((row) => ({
+			row,
+			chatKey: String(row.chat_key),
+			service: row.service as Service,
+			chatId: String(row.chat_id)
+		}))
+		.filter((chat) => !from || compareChats(chat, from) >= 0)
+		.toSorted(compareChats);
+	const counts = unreadCounts(db, unread);
+	const names = new Names(db);
+	/** Unread messages of a chat after the message ID `after`, read in batches as the page needs them. */
+	function* unreadIn(chat: { service: Service; chatId: string }, after: string | undefined) {
+		for (;;) {
+			const batch = unreadMessages(db, chat, { ...unread, after, limit: unreadBatch });
+			yield* batch;
+			if (batch.length < unreadBatch) return;
+			after = batch.at(-1)!.messageId;
+		}
+	}
+
+	const chats: UnreadChat[] = [];
+	let used = 0;
+	let next: UnreadPosition | null = null;
+	/** The last chat this page emitted; a page that ends between chats continues after it. */
+	let previous: UnreadPosition | undefined;
+	/** Whether `bytes` more fit; the first unit of a page always does. */
+	const fits = (bytes: number) => chats.length === 0 || used + bytes <= sizeCap;
+
+	chats: for (const chat of rows) {
+		const continuing = from !== undefined && compareChats(chat, from) === 0;
+		if (continuing && from.lastId === null) continue;
+		const { row } = chat;
+		const reportable = row.line_count !== null && row.count_marker === row.marker;
+		const lineCount = reportable ? Number(row.line_count) : 0;
+		const unreadCount = counts.get(`${chat.service}\n${chat.chatId}`) ?? 0;
+		const position = (lastId: string | null): UnreadPosition => ({
+			boundary,
+			chatKey: chat.chatKey,
+			service: chat.service,
+			chatId: chat.chatId,
+			lastId
+		});
+		const line = present({
+			line_unread_count: reportable ? lineCount : null,
+			line_unread_as_of: reportable ? renderTime(Number(row.count_at)) : null,
+			continued: continuing || null
+		});
+		const known = row.marker !== null;
+		if (known && !continuing && unreadCount === 0 && lineCount === 0) continue;
+		const views = unreadIn(chat, continuing ? (from.lastId ?? undefined) : undefined);
+		const head = known ? views.next() : undefined;
+		// A continued chat whose remaining messages were read meanwhile has nothing more to show.
+		if (continuing && head?.done) continue;
+		const messages: MessageItem[] = [];
+		const header: UnreadChat = known
+			? { ...chatItem(row), unread_count: unreadCount, ...line, messages }
+			: { ...chatItem(row), messages_unknown: true, ...line };
+		const first = head && !head.done ? head.value : undefined;
+		const firstItem = first ? messageItem(names, selfMid, first) : undefined;
+		// A chat header travels with its first message, or alone when it has none.
+		const unit = byteSize(header) + (firstItem ? byteSize(firstItem) : 0);
+		if (!fits(unit)) {
+			next = previous!;
+			break;
+		}
+		chats.push(header);
+		used += unit;
+		previous = position(null);
+		if (!first || !firstItem) continue;
+		messages.push(firstItem);
+		let lastId = first.messageId;
+		for (const view of views) {
+			const item = messageItem(names, selfMid, view);
+			const bytes = byteSize(item);
+			if (!fits(bytes)) {
+				next = position(lastId);
+				break chats;
+			}
+			messages.push(item);
+			used += bytes;
+			lastId = view.messageId;
+		}
+	}
+	return {
+		chats,
+		next_cursor: next
+			? encodeCursor('list_unread', scope, [
+					next.boundary,
+					next.chatKey,
+					next.service,
+					next.chatId,
+					next.lastId
+				])
+			: null,
+		size_capped: next !== null
+	};
 }
 
 export interface ChangePage {

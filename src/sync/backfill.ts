@@ -10,6 +10,7 @@ import {
 } from '../archive.ts';
 import { transaction } from '../db.ts';
 import { mapError } from '../errors.ts';
+import { observeReported } from '../read-state.ts';
 import { isStorageFailure, isTransient, type Pool, type SyncContext } from './loop.ts';
 import {
 	applyChanges,
@@ -407,6 +408,56 @@ export async function discoverChats(context: SyncContext, pool: Pool): Promise<D
 		chatId,
 		lastActivityAt: chat.lastActivityAt
 	}));
+}
+
+/**
+ * Talk read state snapshot: every page of `getMessageBoxes` with unread
+ * counts, each box's read position and count stored as of its page's request
+ * time (`observeReported`). Each page commits on its own, so a failure keeps
+ * the pages before it. A box for a chat not yet archived adds the chat with
+ * its type; discovery names it later. No contact or name lookups.
+ */
+export async function snapshotTalkReadState(context: SyncContext, pool: Pool): Promise<void> {
+	const { base, db } = context;
+	const seen = new Set<string>();
+	let minChatId: string | undefined;
+	for (let page = 0; page < 100; page++) {
+		const at = context.now();
+		const list = await pool.run(() =>
+			base.talk.getMessageBoxes({
+				messageBoxListRequest: {
+					minChatId,
+					messageBoxCountLimit: 100,
+					lastMessagesPerMessageBoxCount: 0,
+					withUnreadCount: true,
+					activeOnly: false,
+					unreadOnly: false
+				},
+				syncReason: 'INTERNAL'
+			})
+		);
+		const fresh = (list?.messageBoxes ?? []).filter((box) => box?.id && !seen.has(box.id));
+		transaction(db, () => {
+			for (const box of fresh) {
+				seen.add(box.id);
+				const known = db
+					.prepare(`SELECT 1 FROM chat WHERE service = 'talk' AND chat_id = ?`)
+					.get(box.id);
+				if (!known) {
+					upsertChat(db, { service: 'talk', chatId: box.id, type: chatType(box.midType, box.id) });
+				}
+				observeReported(db, context.log, {
+					service: 'talk',
+					chatId: box.id,
+					marker: box.lastSeenMessageId,
+					count: box.unreadCount,
+					at
+				});
+			}
+		});
+		if (!list?.hasNext || fresh.length === 0) break;
+		minChatId = fresh.at(-1)!.id;
+	}
 }
 
 /** MIDs per `getSquareMembers` request. LINEJS sets no limit and LINE's is unknown, so it stays small. */

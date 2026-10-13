@@ -53,6 +53,7 @@ All state lives under `~/Library/Application Support/line-mcp` (`LINE_MCP_HOME` 
 | `message_fts`    | FTS5 `trigram` index over message text                                                                   |
 | `coverage_gap`   | scope, reason and reconciliation status of every known gap                                               |
 | `outbox`         | one row per idempotency key: frozen payload and its hash, state, correlation, timestamps                 |
+| `read_state`     | the account's read position per chat, and LINE's unread count with the position it was reported for      |
 
 ## Process and lock ownership
 
@@ -78,7 +79,7 @@ The client logs in as `ANDROIDSECONDARY` through the V3 secure QR path (`base/co
 
 **Group-key registration on send.** There is one exception. LINE drops a group's shared key on every membership change, and the next sender creates a new one. So `send_message` to a Talk group or room without a current key registers a new group key (`registerE2EEGroupKey`, as LINEJS does in `base/e2ee/mod.ts:356-409`) while it prepares the message, inside a scoped allowance that opens nothing else. A refused registration gets one more key lookup, since another member may have registered a key meanwhile; otherwise the send fails, and it never falls back to plain text. `registerE2EEPublicKey`, `registerE2EEPublicKeyV2` and `registerE2EEKeyPair` stay blocked everywhere.
 
-**Read state.** The guards also block `sendChatChecked`, `markAsRead`, `markChatsAsRead` and `markThreadsAsRead`, so nothing line-mcp does marks a message as read, and no tool offers to.
+**Read receipts.** The guards also block `sendChatChecked`, `markAsRead`, `markChatsAsRead` and `markThreadsAsRead`, so nothing line-mcp does marks a message as read, and no tool offers to.
 
 **Exact key generations.** Before decrypting, the adapter checks that the exact key generations an envelope names (self key, peer key or group key) are available locally or from LINE. Older peer generations come from `getE2EEPublicKey`, since LINEJS asks `negotiateE2EEPublicKey`, which knows only the current key. LINEJS silently substitutes another self key for a missing DM key (`base/e2ee/mod.ts:903-906`) and the latest group key for a missing group generation (`base/e2ee/mod.ts:209-226`), which then fails as a generic authentication error. So a message whose keys are missing is `missing_key` without a decryption attempt, and `invalid` is kept for messages whose keys were verified present.
 
@@ -191,7 +192,25 @@ Every time is one ISO 8601 string at millisecond precision with the numeric offs
 
 ## Read tools
 
-The archive tools (`status`, `list_chats`, `read_messages`, `search_messages`, `list_changes`) read only the local copy. `list_chats` gives each chat its newest message as `last_message`, the one `read_messages` shows last with threads included, found by one `message_chat_order` lookup per chat; its text is cut to 200 code points plus `…` with `text_truncated`, and the size cap counts it. `get_attachment`, `get_announcements` and `get_profile` ask LINE through the shared pool. `get_attachment` decrypts only messages whose exact key generations were verified, refuses unsent messages, and streams a download of at most 100 MiB into a private cache (`0700`) under the state directory. An E2EE file keeps its name inside the encrypted payload, so `get_attachment` decrypts the payload in the pool to report it, with or without a download; that costs at most the read-only key lookups, and a failed lookup leaves the name out.
+The archive tools (`status`, `list_chats`, `list_unread`, `read_messages`, `search_messages`, `list_changes`) read only the local copy. `list_chats` gives each chat its newest message as `last_message`, the one `read_messages` shows last with threads included, found by one `message_chat_order` lookup per chat; its text is cut to 200 code points plus `…` with `text_truncated`, and the size cap counts it. `get_attachment`, `get_announcements` and `get_profile` ask LINE through the shared pool. `get_attachment` decrypts only messages whose exact key generations were verified, refuses unsent messages, and streams a download of at most 100 MiB into a private cache (`0700`) under the state directory. An E2EE file keeps its name inside the encrypted payload, so `get_attachment` decrypts the payload in the pool to report it, with or without a download; that costs at most the read-only key lookups, and a failed lookup leaves the name out.
+
+## Read state
+
+`list_unread` lists the messages the account has not read, from the archive alone. It makes no request to LINE and marks nothing as read (see Read receipts). `read_state` keeps one row per chat: the account's read position, a message ID or NULL when unknown, and LINE's unread count with the position and time it was reported for.
+
+**Sources.** In Talk, a `SEND_CHAT_CHECKED` operation from `talk.sync` (`param1` the chat, `param2` the message ID) moves the position, committed with its batch and cursor. In OpenChat, a `NOTIFIED_UPDATE_SQUARE_CHAT_STATUS` event from `fetchMyEvents` moves it, committed with that stream's paging state; its count is not used. A chat's own history replays old status events, so chat drains never move a position. Snapshots report both position and count: `getMessageBoxes` with `withUnreadCount` (`lastSeenMessageId`, `unreadCount`) in Talk and each `getSquareChat` of the sweep (`otherStatus`) in OpenChat.
+
+**Forward only.** A position is a canonical decimal ID, compared by length, then text, never as a JavaScript number, and it only moves up: an older or replayed position changes nothing. A position of 0, empty or absent is unknown and never replaces a known one. Any other value that is not a canonical ID is ignored and logged by its kind. A count that is absent or negative is unknown; 0 is 0.
+
+**Counts.** Only snapshots carry LINE's count. It is stored with the snapshot's position and the time its request was sent, so the answer to an older request never replaces a newer count. A count is reported, as `line_unread_count` with `line_unread_as_of`, only while its position is the current one; a live read hides it until the next snapshot.
+
+**Cadence and recovery.** The Talk snapshot is a worker phase in the shared pool, due at start, every 10 minutes and after a Talk reset. Each page commits on its own with its request time; a failure keeps the committed pages and leaves the phase due. A box for a chat not yet archived adds the chat with its type. OpenChat uses the sweep of joined chats, one `getSquareChat` per chat: every 10 minutes, once after each daemon start whatever the persisted sweep time says, and after a `fetchMyEvents` stall. Queued work and failures can delay a due snapshot.
+
+**Failure direction.** A position can lag behind a read made elsewhere until the next live event or snapshot, which lists extra messages, never fewer. A chat without a known position is listed with `messages_unknown` and no messages, never guessed.
+
+**What is unread.** For a known position: messages in the main chat (OpenChat threads are out), not unsent, with an ID above the position, and not known to be the account's own (`from_self` as in OpenChat adapter). A message without a known sender stays. `unread_count` counts these in the archive and can differ from LINE's count.
+
+**Order and cursor.** The first page fixes a boundary, the highest message row id; later rows never enter the traversal. Chats order by `chat_key`, the highest message ID among all their rows at or below the boundary (read, own, unsent and thread rows included), then service and chat ID. Messages follow in numeric ID order, so two messages sent in the same millisecond can show in ID order. Rows at or below the boundary are never deleted and never change their ID, so no chat moves while a caller pages, and reads, unsends and edits between pages only remove messages. The size cap counts each chat header and each message. A page can end inside a chat; the next one repeats its header with `continued`. A page's first chat goes out with its first message even over the cap, so every page moves on. The cursor holds the boundary, the last chat's key, service and ID, and the last message ID when the page ended inside it, bound to the `service` filter.
 
 ## Privacy
 

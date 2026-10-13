@@ -20,7 +20,8 @@ import {
 	backfillRound,
 	discoverChats,
 	nameSquareSenders,
-	pendingBackfill
+	pendingBackfill,
+	snapshotTalkReadState
 } from './sync/backfill.ts';
 import {
 	historyStepMs,
@@ -209,20 +210,27 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
 	let discoveredAt = Number.NEGATIVE_INFINITY;
 	let keysRetriedAt = Number.NEGATIVE_INFINITY;
+	let readSnapshotAt = Number.NEGATIVE_INFINITY;
 	let discoveryDue = false;
 	let keysDue = true;
+	let readSnapshotDue = false;
 	/** A chat change seen in Talk triggers discovery at most this often. */
 	const rediscoveryMs = 10 * 60 * 1000;
 	const discoveryIntervalMs = options.discoveryIntervalMs ?? 6 * 60 * 60 * 1000;
 	const keyRetryIntervalMs = options.keyRetryIntervalMs ?? 15 * 60 * 1000;
+	/** How often the Talk read state snapshot becomes due. */
+	const readSnapshotIntervalMs = 10 * 60 * 1000;
 	// A phase LINE refuses for good is logged and retried on its own schedule;
-	// it must not keep the other phases, and backfill, from running.
-	const phase = async (name: string, body: () => Promise<unknown>) => {
+	// it must not keep the other phases, and backfill, from running. Resolves
+	// to whether the phase succeeded.
+	const phase = async (name: string, body: () => Promise<unknown>): Promise<boolean> => {
 		try {
 			await body();
+			return true;
 		} catch (error) {
 			if (isTransient(error, name)) throw error;
 			log({ event: 'worker_phase_failed', ...mapError(error, name) });
+			return false;
 		}
 	};
 	const worker = async (): Promise<number> => {
@@ -233,6 +241,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 			discoveryDue = false;
 			// Discovery names Talk senders; this names OpenChat senders no event named.
 			await phase('square_names', () => nameSquareSenders(context, pool));
+		}
+		// Due at start, every 10 minutes and after a Talk reset; a failed
+		// snapshot stays due for the next round.
+		if (readSnapshotDue || now() - readSnapshotAt >= readSnapshotIntervalMs) {
+			const started = now();
+			if (await phase('read_state', () => snapshotTalkReadState(context, pool))) {
+				readSnapshotAt = started;
+				readSnapshotDue = false;
+			}
 		}
 		if (listGaps(db, { service: 'talk', status: 'open' }).length > 0) {
 			await phase('reconcile', () => reconcileTalkGaps(context, pool));
@@ -257,6 +274,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 					catchingUp.talk = step.hasMore;
 					if (step.keysChanged) keysDue = true;
 					if (step.chats.length > 0) discoveryDue = true;
+					// A reset can skip read operations along with the rest.
+					if (step.reset) readSnapshotDue = true;
 				},
 				// An idle long poll answers only after about 110 s; being held already
 				// shows there is no backlog.

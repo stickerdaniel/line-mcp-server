@@ -1,5 +1,6 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { LineMcpError } from './errors.ts';
+import { above } from './read-state.ts';
 
 export type Service = 'talk' | 'square';
 export type Health = 'online' | 'catching_up' | 'offline' | 'needs_login' | 'storage_error';
@@ -564,6 +565,69 @@ function scanRows(
 			ORDER BY 2 DESC, 1 DESC`,
 		params: [from.sentAt, from.sentAt, from.rowId, from.sentAt, from.rowId]
 	};
+}
+
+/** SQL: `column` holds a canonical decimal ID (digits, no leading zero). */
+export const canonicalId = (column: string) =>
+	`(${column} GLOB '[1-9]*' AND NOT ${column} GLOB '*[^0-9]*')`;
+
+/**
+ * SQL over `m` (a message) and `r` (its chat's `read_state` row) that keeps
+ * the unread messages (architecture, Read state): at or below the row id
+ * `:boundary`, in the main chat, not unsent, with a canonical ID above the
+ * known read position, and not known to be the account's own (`:self` in
+ * Talk, any recorded own member in Square). A message without a sender stays.
+ */
+const unreadWhere = `m.id <= :boundary AND m.thread_id IS NULL AND m.unsent = 0
+	AND r.marker IS NOT NULL AND ${canonicalId('m.message_id')} AND ${above('m.message_id', 'r.marker')}
+	AND NOT coalesce(CASE m.service WHEN 'talk' THEN m.sender = :self ELSE EXISTS (
+		SELECT 1 FROM square_self_member s WHERE s.chat_id = m.chat_id AND s.member_id = m.sender
+	) END, 0)`;
+
+const unreadJoin = `message m JOIN read_state r ON r.service = m.service AND r.chat_id = m.chat_id`;
+
+export interface UnreadScope {
+	/** The highest row id a traversal covers (see `messageBoundary`). */
+	boundary: number;
+	selfMid: string;
+}
+
+/** How many unread messages each chat with a known read position has, by `service\nchat`. */
+export function unreadCounts(db: DatabaseSync, scope: UnreadScope): Map<string, number> {
+	const rows = db
+		.prepare(
+			`SELECT m.service, m.chat_id, count(*) AS unread FROM ${unreadJoin}
+			WHERE ${unreadWhere} GROUP BY m.service, m.chat_id`
+		)
+		.all({ boundary: scope.boundary, self: scope.selfMid });
+	return new Map(rows.map((row) => [`${row.service}\n${row.chat_id}`, Number(row.unread)]));
+}
+
+/**
+ * Up to `limit` unread messages of one chat in numeric ID order, after the
+ * message ID `after` when given.
+ */
+export function unreadMessages(
+	db: DatabaseSync,
+	chat: { service: Service; chatId: string },
+	scope: UnreadScope & { after?: string; limit: number }
+): MessageView[] {
+	return db
+		.prepare(
+			`SELECT ${viewColumns} FROM ${unreadJoin}
+			WHERE m.service = :service AND m.chat_id = :chat AND ${unreadWhere}
+			${scope.after === undefined ? '' : `AND ${above('m.message_id', ':after')}`}
+			ORDER BY length(m.message_id), m.message_id LIMIT :limit`
+		)
+		.all({
+			service: chat.service,
+			chat: chat.chatId,
+			boundary: scope.boundary,
+			self: scope.selfMid,
+			limit: scope.limit,
+			...(scope.after === undefined ? {} : { after: scope.after })
+		})
+		.map(view);
 }
 
 /** Rows whose last insert or change has `seq > afterSeq`, in `seq` order. */

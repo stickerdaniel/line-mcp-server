@@ -1,5 +1,5 @@
 import { createServer, type AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openGap, readMessages, searchMessages, upsertChat, writeState } from '../src/archive.ts';
 import { type Daemon, type DaemonOptions, startDaemon } from '../src/daemon.ts';
 import { openDatabase, readAccount, transaction } from '../src/db.ts';
@@ -17,7 +17,7 @@ import {
 	within
 } from './fake-line.ts';
 import { callTool, post } from './mcp-client.ts';
-import { receive, textMessage } from './sync-fixture.ts';
+import { field, receive, squareChat, squareDiscovery, textMessage } from './sync-fixture.ts';
 
 const daemons: Daemon[] = [];
 afterEach(async () => {
@@ -101,6 +101,43 @@ function archiveUnnamedSquareSender(root: string): void {
 	);
 	db.close();
 }
+
+/** Archives one Talk message from the peer of the one-to-one chat `chatId`. */
+function archiveTalk(root: string, chatId: string, messageId: string): void {
+	const db = openDatabase(root);
+	const row = { messageId, text: 'hello', sentAt: 1 };
+	transaction(db, () =>
+		applyChanges(db, [
+			{
+				kind: 'message',
+				row: {
+					service: 'talk',
+					chatId,
+					chatType: 'user',
+					...row,
+					threadId: null,
+					sender: chatId,
+					editedAt: null,
+					contentType: 'NONE',
+					replyTo: null,
+					mentions: null,
+					envelope: JSON.stringify(row),
+					decryptState: 'ok',
+					missingKey: null
+				}
+			}
+		])
+	);
+	db.close();
+}
+
+/** A `getMessageBoxes` box with the account's read position and one unread message. */
+const readBox = (id: string, marker: bigint) => ({
+	id,
+	midType: 'USER',
+	lastSeenMessageId: marker,
+	unreadCount: 1n
+});
 
 describe('daemon', () => {
 	it('stops all upstream calls when LINE revokes the session and keeps serving cached reads', async () => {
@@ -540,6 +577,139 @@ describe('daemon', () => {
 		expect(listed.data.chats).toEqual([
 			expect.objectContaining({ chat_id: selfMid, name: '丹尼爾' })
 		]);
+	});
+
+	it('takes a Talk read snapshot at start, every 10 minutes and after a reset', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		// A chat LINE leaves out of every snapshot.
+		const left = `u${'7'.repeat(32)}`;
+		archiveTalk(root, left, '1001');
+		let clock = 1_900_000_000_000;
+		let snapshots = 0;
+		let rounds = 0;
+		let reset = false;
+		const { daemon } = await start(
+			root,
+			{
+				sync: () => {
+					if (!reset) return {};
+					reset = false;
+					return { fullSyncResponse: { nextRevision: 10n, reasons: [] } };
+				},
+				getMessageBoxes: (value) => {
+					if (!field(value, 2, 5)) return { messageBoxes: [], hasNext: false };
+					snapshots++;
+					const box = { id: otherMid, midType: 'USER', lastSeenMessageId: 10n, unreadCount: 1n };
+					return { messageBoxes: [box], hasNext: false };
+				},
+				// Discovery runs every worker round here, so it counts the rounds.
+				getAllChatMids: () => {
+					rounds++;
+					return { memberChatMids: [] };
+				},
+				getContactsV2: () => ({ contacts: {} })
+			},
+			{ notify: () => {}, now: () => clock, discoveryIntervalMs: 0 }
+		);
+
+		await until(() => snapshots === 1 && rounds >= 6, 'worker rounds after the first snapshot');
+		expect(snapshots).toBe(1);
+		const listed = await callTool(daemon.mcp!.port, 'list_unread');
+		expect(listed.data.chats).toEqual([
+			expect.objectContaining({ chat_id: left, messages_unknown: true }),
+			expect.objectContaining({ chat_id: otherMid, unread_count: 0, line_unread_count: 1 })
+		]);
+
+		clock += 10 * 60 * 1000;
+		await until(() => snapshots === 2, 'a snapshot 10 minutes later');
+		reset = true;
+		await until(() => snapshots === 3, 'a snapshot after a reset');
+	});
+
+	it('keeps the pages a failed Talk read snapshot committed and takes it again', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const [first, second] = [`u${'3'.repeat(32)}`, `u${'4'.repeat(32)}`];
+		const { promise: gate, resolve: open } = Promise.withResolvers<void>();
+		let secondPages = 0;
+		const { daemon } = await start(
+			root,
+			{
+				sync: () => ({}),
+				getMessageBoxes: async (value) => {
+					if (!field(value, 2, 5)) return { messageBoxes: [], hasNext: false };
+					if (field(value, 2, 1) !== first) {
+						return { messageBoxes: [readBox(first, 10n)], hasNext: true };
+					}
+					if (++secondPages === 1) throw talkError('ILLEGAL_ARGUMENT');
+					await gate;
+					return { messageBoxes: [readBox(second, 20n)], hasNext: false };
+				}
+			},
+			// The clock stands still: only a snapshot that stayed due runs again.
+			{ notify: () => {}, now: () => 1_900_000_000_000 }
+		);
+		const known = async () =>
+			((await callTool(daemon.mcp!.port, 'list_unread')).data.chats as { chat_id: string }[]).map(
+				(chat) => chat.chat_id
+			);
+
+		await until(() => secondPages === 2, 'the second page asked again');
+		expect(await known()).toEqual([first]);
+		open();
+		await vi.waitFor(async () => expect(await known()).toEqual([first, second]), {
+			timeout: 3000
+		});
+	});
+
+	it('sweeps OpenChat once at start despite a recent sweep, and again after a stall', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const clock = 1_900_000_000_000;
+		const db = openDatabase(root);
+		writeState(db, 'square:sweptAt', clock);
+		db.close();
+		const discovery = squareDiscovery([squareChat]);
+		let sweeps = 0;
+		let fetches = 0;
+		let stalling = false;
+		const { daemon } = await start(
+			root,
+			{
+				...discovery.handlers,
+				sync: () => ({}),
+				getSquareChat: (value, base) => ({
+					...(discovery.handlers.getSquareChat!(value, base) as object),
+					squareChatStatus: {
+						otherStatus: { markedAsReadMessageId: '20', unreadMessageCount: ++sweeps }
+					}
+				}),
+				// A token that leads back to itself stalls the stream.
+				fetchMyEvents: () => {
+					fetches++;
+					return {
+						events: discovery.events,
+						syncToken: 'my-1',
+						...(stalling ? { continuationToken: 'again' } : {})
+					};
+				},
+				fetchSquareChatEvents: () => ({ events: [], syncToken: 'chat-1' })
+			},
+			{ notify: () => {}, now: () => clock, worker: false }
+		);
+
+		await until(() => sweeps === 1, 'a sweep at start');
+		const steps = fetches;
+		await until(() => fetches >= steps + 5, 'more Square steps');
+		expect(sweeps).toBe(1);
+		const listed = await callTool(daemon.mcp!.port, 'list_unread');
+		expect(listed.data.chats).toEqual([
+			expect.objectContaining({ chat_id: squareChat, unread_count: 0, line_unread_count: 1 })
+		]);
+
+		stalling = true;
+		await until(() => sweeps === 2, 'a sweep after the stall');
 	});
 
 	it('reports online once both loops are caught up', async () => {

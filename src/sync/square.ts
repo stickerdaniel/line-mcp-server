@@ -17,6 +17,7 @@ import {
 import { transaction } from '../db.ts';
 import { mapError } from '../errors.ts';
 import { decimal } from '../probe.ts';
+import { observeReported } from '../read-state.ts';
 import { fetchMyEvents, fetchSquareChatEvents, listJoinedSquareChats } from '../square.ts';
 import type { BackfillState } from './backfill.ts';
 import {
@@ -33,6 +34,7 @@ import {
 	int64,
 	messageBoundary,
 	normalizeSquareEvents,
+	squareReadChanges,
 	type SquareTarget
 } from './normalize.ts';
 
@@ -317,14 +319,22 @@ const defaults: Required<SquareOptions> = {
 
 /**
  * Lists joined chats (Square discovery) and queues every one for a full fetch.
- * Never `SquareChat.listen()`: it drops the initial pages
- * (client/features/square/mod.ts:213-226).
+ * Each chat's read position and unread count are a snapshot as of its
+ * `getSquareChat` request. Never `SquareChat.listen()`: it drops the initial
+ * pages (client/features/square/mod.ts:213-226).
  */
 export async function sweepSquareChats(context: SyncContext): Promise<void> {
-	const joined = await listJoinedSquareChats(context.base);
+	const joined = await listJoinedSquareChats(context.base, context.now);
 	transaction(context.db, () => {
 		const now = context.now();
-		for (const { chat, selfMemberId } of joined.chats) {
+		for (const { chat, selfMemberId, status, statusAt } of joined.chats) {
+			observeReported(context.db, context.log, {
+				service: 'square',
+				chatId: chat.squareChatMid,
+				marker: status?.markedAsReadMessageId,
+				count: status?.unreadMessageCount,
+				at: statusAt
+			});
 			upsertChat(
 				context.db,
 				{
@@ -557,21 +567,35 @@ export async function reconcileSquareStep(context: SyncContext, key: string): Pr
 	});
 }
 
+/** What the Square loop keeps in memory from one step to the next. */
+export interface SquareLoopState {
+	/**
+	 * Sweep at the next step whatever the persisted sweep time says: once
+	 * after the daemon starts, so read state is fresh, and after a
+	 * `fetchMyEvents` stall, which may have lost read events.
+	 */
+	sweepDue: boolean;
+}
+
 /**
  * One Square step: a periodic sweep of joined chats, one `fetchMyEvents` page
- * (its tokens and subscription persisted with its events), then complete
- * fetches of up to `maxTargets` chats or threads that had activity, then one
- * older page each for up to `maxTargets` reset chats or threads. Returns the
- * wait before the next step.
+ * (its tokens and subscription persisted with its events and read positions),
+ * then complete fetches of up to `maxTargets` chats or threads that had
+ * activity, then one older page each for up to `maxTargets` reset chats or
+ * threads. Returns the wait before the next step.
  */
 export async function syncSquareOnce(
 	context: SyncContext,
-	options: SquareOptions = {}
+	options: SquareOptions = {},
+	loop: SquareLoopState = { sweepDue: false }
 ): Promise<number> {
 	const settings = { ...defaults, ...options };
 	const { db } = context;
 	const sweptAt = readState<number>(db, sweptAtKey) ?? 0;
-	if (context.now() - sweptAt >= settings.sweepIntervalMs) await sweepSquareChats(context);
+	if (loop.sweepDue || context.now() - sweptAt >= settings.sweepIntervalMs) {
+		await sweepSquareChats(context);
+		loop.sweepDue = false;
+	}
 
 	const state = readState<MyEventsPaging>(db, myEventsKey) ?? {};
 	const response = await fetchMyEvents(context.base, {
@@ -590,6 +614,7 @@ export async function syncSquareOnce(
 			: advanceChain(state.continuationToken ? state : undefined, token, events);
 	const stalled = chain === 'stalled';
 	const batch = await normalizeSquareEvents(context, events);
+	const changes = [...batch.changes, ...squareReadChanges(context, events)];
 	// Only a page that delivered events and promises more is followed at once,
 	// and only `followLimit` times in a row; then the chain yields for a wait.
 	const follow = chain !== undefined && !stalled && events.length > 0;
@@ -604,7 +629,7 @@ export async function syncSquareOnce(
 	};
 	transaction(db, () => {
 		const now = context.now();
-		applyChanges(db, batch.changes, { now });
+		applyChanges(db, changes, { now });
 		addPending(db, batch.targets);
 		if (stalled) {
 			// The rest of the chain is lost. Per-chat sync tokens do not depend on
@@ -635,6 +660,8 @@ export async function syncSquareOnce(
 		writeState(db, myEventsKey, next, now);
 		writeState(db, squareSyncedAtKey, now, now);
 	});
+	// Read positions on the lost pages are gone; the next step's sweep takes a fresh snapshot.
+	if (stalled) loop.sweepDue = true;
 
 	// Re-read each time: a drained chat can queue the threads it announced.
 	const drained = new Set<string>();
@@ -690,5 +717,6 @@ export async function runSquareLoop(
 	options: LoopOptions,
 	square: SquareOptions = {}
 ): Promise<void> {
-	await runLoop(() => syncSquareOnce(context, square), options);
+	const loop: SquareLoopState = { sweepDue: true };
+	await runLoop(() => syncSquareOnce(context, square, loop), options);
 }
