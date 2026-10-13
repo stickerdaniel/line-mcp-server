@@ -191,7 +191,7 @@ Every time is one ISO 8601 string at millisecond precision with the numeric offs
 
 ## Read tools
 
-The archive tools (`status`, `list_chats`, `read_messages`, `search_messages`, `list_changes`) read only the local copy. `get_attachment`, `get_announcements` and `get_profile` ask LINE through the shared pool. `get_attachment` decrypts only messages whose exact key generations were verified, refuses unsent messages, and streams a download of at most 100 MiB into a private cache (`0700`) under the state directory. An E2EE file keeps its name inside the encrypted payload, so `get_attachment` decrypts the payload in the pool to report it, with or without a download; that costs at most the read-only key lookups, and a failed lookup leaves the name out.
+The archive tools (`status`, `list_chats`, `read_messages`, `search_messages`, `list_changes`) read only the local copy. `list_chats` gives each chat its newest message as `last_message`, the one `read_messages` shows last with threads included, found by one `message_chat_order` lookup per chat; its text is cut to 200 code points plus `…` with `text_truncated`, and the size cap counts it. `get_attachment`, `get_announcements` and `get_profile` ask LINE through the shared pool. `get_attachment` decrypts only messages whose exact key generations were verified, refuses unsent messages, and streams a download of at most 100 MiB into a private cache (`0700`) under the state directory. An E2EE file keeps its name inside the encrypted payload, so `get_attachment` decrypts the payload in the pool to report it, with or without a download; that costs at most the read-only key lookups, and a failed lookup leaves the name out.
 
 ## Privacy
 

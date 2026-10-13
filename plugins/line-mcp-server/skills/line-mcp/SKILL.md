@@ -16,7 +16,7 @@ A command prints its result as JSON on stdout. On failure it prints a JSON error
 `line-mcp <command> --help` shows a command's flags.
 
 - `sync-status`: session health, last sync times, coverage gaps, backfill progress and `time_zone`
-- `list-chats`: chats with display names, most recent activity first
+- `list-chats`: chats with display names and each chat's latest message, most recent activity first
 - `read-messages`: messages of one chat or thread, one page at a time
 - `search-messages`: messages whose text matches, newest first
 - `list-changes`: messages inserted or changed after a sequence number

@@ -47,7 +47,7 @@ export const status = defineTool({
 export const listChats = defineTool({
 	name: 'list_chats',
 	description:
-		'Chats in the archive (one-to-one, groups, rooms, OpenChat), most recent activity first, with display names.',
+		'Chats in the archive (one-to-one, groups, rooms, OpenChat), most recent activity first, with display names. last_message is the latest message of each chat, threads included, as a read_messages item with its text cut to 200 characters (text_truncated true when cut). Follow next_cursor for more chats.',
 	input: z.object({
 		service: service.optional(),
 		name: z
@@ -59,8 +59,8 @@ export const listChats = defineTool({
 		limit,
 		cursor
 	}),
-	run: (args, { db }) =>
-		listChatsPage(db, {
+	run: (args, { db, selfMid }) =>
+		listChatsPage(db, selfMid, {
 			...(args.service ? { service: args.service } : {}),
 			...(args.name ? { name: args.name } : {}),
 			...(args.limit ? { limit: args.limit } : {}),

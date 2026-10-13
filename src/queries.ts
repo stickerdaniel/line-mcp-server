@@ -4,6 +4,7 @@ import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import {
 	type ArchiveStatus,
 	findMessage,
+	latestMessages,
 	listChanges,
 	type MessageView,
 	type Position,
@@ -188,15 +189,34 @@ export function findChat(db: DatabaseSync, service: Service, chatId: string): Ch
 	return row ? chatItem(row) : null;
 }
 
+/** Code points of text a chat's latest message shows in `list_chats`. */
+const previewLength = 200;
+
+/** A chat's newest message as `read_messages` shows it, its text cut to `previewLength`. */
+export interface LatestMessage extends MessageItem {
+	/** Set when `text` was cut and ends in `…`. */
+	text_truncated?: true;
+}
+
+/** A chat in `list_chats`, with its newest message; left out for a chat without messages. */
+export interface ChatListItem extends ChatItem {
+	last_message?: LatestMessage;
+}
+
 export interface ChatPage {
-	chats: ChatItem[];
+	chats: ChatListItem[];
 	next_cursor: string | null;
 	size_capped: boolean;
 }
 
-/** Chats by last activity, newest first; `name` matches a part of the display name. */
+/**
+ * Chats by last activity, newest first; `name` matches a part of the display
+ * name. Each chat carries its newest message in the `read_messages` order,
+ * threads included (see `latestMessages`).
+ */
 export function listChatsPage(
 	db: DatabaseSync,
+	selfMid: string,
 	options: { service?: Service; name?: string; limit?: number; cursor?: string }
 ): ChatPage {
 	const limit = pageLimit(options.limit);
@@ -228,7 +248,19 @@ export function listChatsPage(
 			ORDER BY activity DESC, c.service, c.chat_id LIMIT ?`
 		)
 		.all(...params, limit + 1);
-	const items = rows.slice(0, limit).map(chatItem);
+	const chats = rows.slice(0, limit).map(chatItem);
+	const names = new Names(db);
+	const latest = new Map(
+		latestMessages(
+			db,
+			chats.map((chat) => ({ service: chat.service, chatId: chat.chat_id }))
+		).map((message) => [`${message.service}\n${message.chatId}`, message])
+	);
+	const items = chats.map((chat): ChatListItem => {
+		const message = latest.get(`${chat.service}\n${chat.chat_id}`);
+		return message ? { ...chat, last_message: latestMessage(names, selfMid, message) } : chat;
+	});
+	// The size cap counts each chat's latest message.
 	const { kept, capped } = withinCap(items);
 	const last = rows[kept.length - 1];
 	const more = capped || rows.length > limit;
@@ -592,6 +624,19 @@ function chatMessageItem(names: Names, selfMid: string, message: MessageView): C
 		...present({ chat_name: names.chat(message.service, message.chatId) }),
 		...messageItem(names, selfMid, message)
 	};
+}
+
+/**
+ * A message item whose text is cut to `previewLength` code points plus `…`,
+ * so a surrogate pair is never split.
+ */
+function latestMessage(names: Names, selfMid: string, message: MessageView): LatestMessage {
+	const item = messageItem(names, selfMid, message);
+	// At most that many UTF-16 units is at most that many code points.
+	if (item.text === undefined || item.text.length <= previewLength) return item;
+	const points = [...item.text];
+	if (points.length <= previewLength) return item;
+	return { ...item, text: `${points.slice(0, previewLength).join('')}…`, text_truncated: true };
 }
 
 /** One message as tools show it, with its chat and sender names. */
