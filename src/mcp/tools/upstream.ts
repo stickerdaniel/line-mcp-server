@@ -8,7 +8,7 @@ import { type BaseClient, InternalError } from '@evex/linejs/base';
 import type { Message } from '@evex/linejs-types';
 import { z } from 'zod';
 import { findMessage, readEnvelope, type Service } from '../../archive.ts';
-import { LineMcpError } from '../../errors.ts';
+import { LineMcpError, mapError } from '../../errors.ts';
 import { decryptMessage } from '../../keys.ts';
 import { decimal } from '../../probe.ts';
 import { describeMessage, findChat, personName, renderTime } from '../../queries.ts';
@@ -282,7 +282,38 @@ async function downloadE2EE(
 	if (file.size > limit) throw tooLarge(limit);
 	const bytes = Buffer.from(await file.arrayBuffer());
 	writeFileSync(partial, bytes, { mode: 0o600 });
-	return { size: file.size, head: bytes.subarray(0, headBytes), name: file.name };
+	// LINEJS names the File "undefined" when the payload has no name.
+	const name = text(verified.payload?.fileName) ?? undefined;
+	return { size: file.size, head: bytes.subarray(0, headBytes), name };
+}
+
+/**
+ * The file name inside an E2EE payload, which the plaintext metadata lacks.
+ * Decrypting costs at most the read-only key lookups of `decryptMessage`, in
+ * the pool. The name is optional, so any failure but a cancelled call leaves
+ * it out.
+ */
+async function payloadFileName(
+	context: ToolContext,
+	message: Message,
+	decryptState: string,
+	signal: AbortSignal
+): Promise<string | null> {
+	// Only rows whose exact key generations were verified are decrypted.
+	if (!message.chunks?.length || decryptState !== 'ok') return null;
+	try {
+		const result = await context.pool.run(
+			() => decryptMessage(context.base, context.selfMid, message),
+			signal
+		);
+		// A key lookup that answers after the caller went away still ends the call.
+		signal.throwIfAborted();
+		return result.state === 'ok' ? text(result.payload?.fileName) : null;
+	} catch (error) {
+		if (signal.aborted) throw error;
+		context.log({ event: 'attachment_name_skipped', ...mapError(error, 'get_attachment') });
+		return null;
+	}
 }
 
 export const getAttachment = defineTool({
@@ -311,8 +342,13 @@ export const getAttachment = defineTool({
 			throw new LineMcpError('no_attachment', 'This message has no attachment');
 		}
 		const info = attachmentInfo(message);
-		const result = { message: describeMessage(db, context.selfMid, found), attachment: info };
-		if (!args.download) return { ...result, path: null };
+		const described = describeMessage(db, context.selfMid, found);
+		const named = async () => ({
+			...info,
+			file_name:
+				info.file_name ?? (await payloadFileName(context, message, found.decryptState, signal))
+		});
+		if (!args.download) return { message: described, attachment: await named(), path: null };
 		if (message.contentMetadata?.DOWNLOAD_URL && !message.contentMetadata?.OID) {
 			throw new LineMcpError('no_attachment', 'The file is hosted outside LINE storage');
 		}
@@ -326,7 +362,9 @@ export const getAttachment = defineTool({
 		chmodSync(context.attachments, 0o700);
 		const stem = cacheStem(args.service, found.messageId);
 		const cached = findCached(context.attachments, stem);
-		if (cached) return { ...result, path: cached, cached: true };
+		if (cached) {
+			return { message: described, attachment: await named(), path: cached, cached: true };
+		}
 		// Written under a temporary name, so a reader never sees half a file.
 		const random = randomBytes(12).toString('hex');
 		const partial = join(context.attachments, `.${stem}${random}.partial`);
@@ -342,7 +380,16 @@ export const getAttachment = defineTool({
 				plainExtension(info.file_name) ?? plainExtension(file.name) ?? sniffExtension(file.head);
 			const path = join(context.attachments, `${stem}${random}${extension ?? ''}`);
 			renameSync(partial, path);
-			return { ...result, attachment: { ...info, file_size: file.size }, path, cached: false };
+			return {
+				message: described,
+				attachment: {
+					...info,
+					file_name: info.file_name ?? file.name ?? null,
+					file_size: file.size
+				},
+				path,
+				cached: false
+			};
 		} finally {
 			rmSync(partial, { force: true });
 		}
