@@ -22,7 +22,7 @@ Node 24 runs the TypeScript sources directly (type stripping) in development and
 
 ## Commits and pull requests
 
-- Commit and PR title: `<type>(<scope>): <Subject>`, imperative, capitalized, at most 50 characters after the colon. Scope is required unless none fits.
+- Commit and PR title: `<type>(<scope>): <Subject>`, imperative, capitalized, subject under 50 characters. Scope is required unless none fits.
 - One focused change per PR, squash-merged. Commits carry no co-author trailers; the Post No Bills check rejects them.
 - PR bodies follow `.github/pull_request_template.md` and end with `Generated with <model> for <job> in <tool> via <host>.` Repeat `<model> for <job>` joined by `and`; join jobs with `/`. Humans are `Human`. Ask for unknown values.
 

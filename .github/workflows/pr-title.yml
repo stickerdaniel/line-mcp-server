@@ -1,11 +1,15 @@
 name: PR Title
 
+# GitHub suppresses pull_request_target for SHA-like source branch names.
+# Renaming a head branch closes its pull request. Open a replacement pull
+# request from a non-SHA-like source branch so this check can run.
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: pr-title-${{ github.event.pull_request.number }}
@@ -16,20 +20,29 @@ jobs:
     name: PR Title
     runs-on: ubicloud-standard-2
     steps:
-      # The title is passed as data through the environment, never interpolated
-      # into the script, because it is pull request content.
-      - name: Validate title
+      - name: Checkout the trusted workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      # Type stripping needs Node 24.
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # The title comes from the API rather than the event, so a rerun checks
+      # the current title. This is the only step that holds a token.
+      - name: Fetch current pull request
         env:
-          TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: [A-Z](.*[^.])?$'
-          if ! printf '%s' "$TITLE" | grep -Eq "$pattern"; then
-            echo "::error::Title must be '<type>(<scope>): <Subject>' with a capitalized subject and no trailing period."
-            exit 1
-          fi
-          subject="${TITLE#*: }"
-          if [ "${#subject}" -gt 50 ]; then
-            echo "::error::Subject is ${#subject} characters; the limit is 50."
-            exit 1
-          fi
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+            > "$RUNNER_TEMP/pull-request.json"
+
+      - name: Validate current pull request title
+        run: node scripts/check-pr-title.ts --pr-json "$RUNNER_TEMP/pull-request.json"
