@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { DatabaseSync } from 'node:sqlite';
 import type { Message } from '@evex/linejs-types';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readAccount } from '../src/db.ts';
 import { mapError } from '../src/errors.ts';
 import { decryptMessage } from '../src/keys.ts';
@@ -11,7 +11,8 @@ import {
 	type LogEntry,
 	openSession,
 	type Session,
-	type SessionOptions
+	type SessionOptions,
+	stderrLog
 } from '../src/session.ts';
 import {
 	fakeHttpUpstream,
@@ -205,6 +206,27 @@ describe('session guards', () => {
 			code: 'shutting_down'
 		});
 		expect(upstream.calls).toEqual([]);
+	});
+});
+
+describe('daemon log', () => {
+	it('stamps each line with the time it was written', () => {
+		const lines: string[] = [];
+		const write = vi
+			.spyOn(process.stderr, 'write')
+			.mockImplementation((chunk) => lines.push(String(chunk)) > 0);
+		const before = Date.now();
+		try {
+			stderrLog({ event: 'health', state: 'online' });
+		} finally {
+			write.mockRestore();
+		}
+		expect(lines).toHaveLength(1);
+		const line = JSON.parse(lines[0]!) as { time: string };
+		expect(line).toEqual({ time: line.time, event: 'health', state: 'online' });
+		expect(line.time).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+		expect(Date.parse(line.time)).toBeGreaterThanOrEqual(before);
+		expect(Date.parse(line.time)).toBeLessThanOrEqual(Date.now());
 	});
 });
 

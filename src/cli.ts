@@ -280,7 +280,10 @@ let code: number;
 try {
 	code = await main(command, args);
 } catch (error) {
-	console.error(JSON.stringify(mapError(error, command ?? 'cli')));
+	const mapped = mapError(error, command ?? 'cli');
+	// The daemon's stderr is its launchd log, where every line carries its time.
+	if (command === 'daemon') stderrLog({ event: 'daemon_failed', ...mapped });
+	else console.error(JSON.stringify(mapped));
 	code = 1;
 }
 // LINEJS keeps HTTP connections alive; exit once the output is flushed.
