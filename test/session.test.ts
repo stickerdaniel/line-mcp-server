@@ -123,6 +123,29 @@ describe('session guards', () => {
 		expect(upstream.calls).toEqual(['getProfile', 'registerE2EEGroupKey']);
 	});
 
+	it('never sends a read-state RPC', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const readState = ['sendChatChecked', 'markAsRead', 'markChatsAsRead', 'markThreadsAsRead'];
+		const upstream = fakeUpstream({
+			getProfile: profile,
+			...Object.fromEntries(readState.map((method) => [method, () => ({})]))
+		});
+		const { base } = await start(root, { createClient: upstream.createClient });
+
+		const results = await Promise.allSettled(
+			readState.map((method) => base.request.request([], method, 4, true, '/S4'))
+		);
+
+		expect(results).toEqual(
+			readState.map(() => ({
+				status: 'rejected',
+				reason: expect.objectContaining({ code: 'read_state_blocked' })
+			}))
+		);
+		expect(upstream.calls).toEqual(['getProfile']);
+	});
+
 	it('blocks all upstream work after a token write fails', async () => {
 		const root = tempRoot();
 		seedLive(root, selfMid, { authToken: 'token-1' });

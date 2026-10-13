@@ -315,6 +315,7 @@ const blockedMethods = new Map<string, ErrorCode>([
 	['registerE2EEGroupKey', 'key_registration_blocked'],
 	['sendChatChecked', 'read_state_blocked'],
 	['markAsRead', 'read_state_blocked'],
+	['markChatsAsRead', 'read_state_blocked'],
 	['markThreadsAsRead', 'read_state_blocked']
 ]);
 
