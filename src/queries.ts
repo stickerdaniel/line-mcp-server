@@ -496,31 +496,68 @@ export function readMessagesPage(
 	return page(shown, shown.length > 0 || from !== undefined, more, capped);
 }
 
+/** A search hit; with context, the messages around it as `read_messages` shows them. */
+export interface SearchHit extends MessageItem {
+	/** Up to `context` messages just before the hit in its chat or thread, oldest first. */
+	context_before?: MessageItem[];
+	/** Up to `context` messages just after the hit in its chat or thread, oldest first. */
+	context_after?: MessageItem[];
+	/** Set when the size cap left out the context messages farthest from the hit. */
+	context_truncated?: true;
+}
+
 export interface SearchPage {
 	query: string;
 	mode: 'fts' | 'scan';
 	/** Scan only: the send time this page searched back to, while next_cursor continues further. */
 	scanned_through: Time | null;
 	/** Newest first. */
-	messages: MessageItem[];
+	messages: SearchHit[];
 	next_cursor: string | null;
 	size_capped: boolean;
+}
+
+export interface SearchOptions {
+	query: string;
+	service?: Service;
+	chatId?: string;
+	senderId?: string;
+	/** Inclusive lower bound on the send time, UTC milliseconds. */
+	since?: number;
+	/** Exclusive upper bound on the send time, UTC milliseconds. */
+	until?: number;
+	/** Messages before and after each hit; 0 (the default) leaves the context fields out. */
+	context?: number;
+	limit?: number;
+	cursor?: string;
 }
 
 /**
  * One page of `searchMessages`. A scan page can hold fewer hits than `limit`,
  * or none, and still continue: its cursor resumes after the last row read.
+ * A hit's size counts its context. A hit that does not fit the rest of a page
+ * starts the next one; a hit too large for a page alone sheds context
+ * messages, farthest first, and goes out with whatever still fits.
  */
 export function searchMessagesPage(
 	db: DatabaseSync,
 	selfMid: string,
-	options: { query: string; service?: Service; chatId?: string; limit?: number; cursor?: string }
+	options: SearchOptions
 ): SearchPage {
 	const limit = pageLimit(options.limit);
+	const context = options.context ?? 0;
+	const { since, until } = options;
+	if (since !== undefined && until !== undefined && since >= until) {
+		throw new LineMcpError('invalid_argument', 'since must be earlier than until');
+	}
 	const scope = {
 		terms: searchTerms(options.query),
 		service: options.service ?? null,
-		chat: options.chatId ?? null
+		chat: options.chatId ?? null,
+		sender: options.senderId ?? null,
+		since: since ?? null,
+		until: until ?? null,
+		context
 	};
 	const before = options.cursor
 		? decodePosition(decodeCursor(options.cursor, 'search_messages', scope))
@@ -529,24 +566,85 @@ export function searchMessagesPage(
 		query: options.query,
 		...(options.service ? { service: options.service } : {}),
 		...(options.chatId !== undefined ? { chatId: options.chatId } : {}),
+		...(options.senderId !== undefined ? { sender: options.senderId } : {}),
+		sent: { since, until },
 		...(before ? { before } : {}),
 		limit: limit + 1
 	});
 	const names = new Names(db);
-	const { kept, capped } = withinCap(
-		result.messages.slice(0, limit).map((message) => messageItem(names, selfMid, message, true))
-	);
-	const last = result.messages[kept.length - 1];
+	const hits: SearchHit[] = [];
+	let budget = sizeCap;
+	let capped = false;
+	for (const message of result.messages.slice(0, limit)) {
+		const hit = searchHit(db, names, selfMid, message, context);
+		let size = byteSize(hit);
+		if (size > budget && hits.length > 0) {
+			capped = true;
+			break;
+		}
+		if (size > budget) size = shedContext(hit, budget);
+		hits.push(hit);
+		budget -= size;
+	}
+	const last = result.messages[hits.length - 1];
 	const more = capped || result.messages.length > limit;
 	const next = more && last ? positionOf(last) : result.scannedTo;
 	return {
 		query: options.query,
 		mode: result.mode,
 		scanned_through: result.mode === 'scan' && next ? renderTime(next.sentAt) : null,
-		messages: kept,
+		messages: hits,
 		next_cursor: next ? encodeCursor('search_messages', scope, encodePosition(next)) : null,
 		size_capped: capped
 	};
+}
+
+/**
+ * A hit with up to `context` messages on each side from its own chat and
+ * thread (the main chat alone for a hit outside threads), in the read order.
+ */
+function searchHit(
+	db: DatabaseSync,
+	names: Names,
+	selfMid: string,
+	message: MessageView,
+	context: number
+): SearchHit {
+	const hit = messageItem(names, selfMid, message, true);
+	if (context === 0) return hit;
+	const around = {
+		service: message.service,
+		chatId: message.chatId,
+		threadId: message.threadId,
+		limit: context
+	};
+	const at = positionOf(message);
+	const item = (entry: MessageView) => messageItem(names, selfMid, entry, false);
+	return {
+		...hit,
+		context_before: readMessages(db, { ...around, before: at })
+			.toReversed()
+			.map(item),
+		context_after: readMessages(db, { ...around, after: at }).map(item)
+	};
+}
+
+/**
+ * Drops the context messages farthest from the hit, the earlier one on a tie,
+ * until the hit takes at most `budget` bytes or has no context left. Returns
+ * the hit's size.
+ */
+function shedContext(hit: SearchHit, budget: number): number {
+	const before = hit.context_before ?? [];
+	const after = hit.context_after ?? [];
+	let size = byteSize(hit);
+	while (size > budget && before.length + after.length > 0) {
+		if (before.length >= after.length) before.shift();
+		else after.pop();
+		hit.context_truncated = true;
+		size = byteSize(hit);
+	}
+	return size;
 }
 
 export interface ChangePage {

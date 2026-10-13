@@ -53,7 +53,10 @@ function flagOf(field: string, schema: unknown): Flag {
 		// `.describe()` may sit on the optional wrapper or on the type inside it.
 		description: descriptionOf(schema) ?? descriptionOf(inner) ?? ''
 	};
-	if (inner instanceof z.ZodString) return { ...flag, type: 'string' };
+	// A string format such as `z.iso.datetime()` is a string, though not a `ZodString`.
+	if (inner instanceof z.ZodString || inner instanceof z.ZodStringFormat) {
+		return { ...flag, type: 'string' };
+	}
 	if (inner instanceof z.ZodEnum) {
 		return { ...flag, type: 'string', choices: inner.options.map(String) };
 	}

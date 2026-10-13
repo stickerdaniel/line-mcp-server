@@ -641,6 +641,237 @@ describe('search_messages', () => {
 		});
 		expect(misused).toMatchObject({ isError: true, data: { error: { code: 'invalid_cursor' } } });
 	});
+
+	it('keeps messages sent from since up to before until, in any offset, scanned or indexed', async () => {
+		const { server, session } = await serve();
+		store(
+			session.db,
+			row('1', base - 1, '晚餐吃 ok'),
+			row('2', base, '晚餐吃 ok'),
+			row('3', base + 59_999, '晚餐吃 ok'),
+			row('4', base + 60_000, '晚餐吃 ok'),
+			row('5', null, '晚餐吃 ok')
+		);
+		const search = async (query: string, bounds: Record<string, string>) => {
+			const { data } = await callTool(server.port, 'search_messages', { query, ...bounds });
+			return [data.mode, ids(data.messages)];
+		};
+
+		for (const [query, mode] of [
+			['晚餐吃', 'fts'],
+			['ok', 'scan']
+		]) {
+			// base is 04:30 UTC, 06:30 in Berlin.
+			expect(
+				await search(query!, { since: '2026-10-12T06:30:00+02:00', until: '2026-10-12T04:31:00Z' })
+			).toEqual([mode, ['3', '2']]);
+			expect(await search(query!, { since: '2026-10-12T04:30:00.000Z' })).toEqual([
+				mode,
+				['4', '3', '2']
+			]);
+			expect(await search(query!, { until: '2026-10-12T00:31:00-04:00' })).toEqual([
+				mode,
+				['3', '2', '1']
+			]);
+			expect(await search(query!, {})).toEqual([mode, ['4', '3', '2', '1', '5']]);
+		}
+	});
+
+	it('scans from until and stops at since without a cursor', async () => {
+		const { server, session } = await serve();
+		const { db } = session;
+		// The message of rank r (1 the newest) was sent at top - r; hits at ranks 1, 20,000 and 55,000.
+		const top = 10_000_000;
+		db.prepare(
+			`WITH RECURSIVE n(r) AS (SELECT 2 UNION ALL SELECT r + 1 FROM n WHERE r < 60000)
+			INSERT INTO message (service, chat_id, message_id, sent_at, envelope, decrypt_state, seq)
+			SELECT 'talk', ?, 'filler' || r, ? - r, '{}', 'ok', 1000000 + r FROM n
+			WHERE r NOT IN (20000, 55000)`
+		).run(otherMid, top);
+		store(
+			db,
+			row('new', top - 1, '罕 new'),
+			row('mid', top - 20_000, '罕 mid'),
+			row('old', top - 55_000, '罕 old')
+		);
+		const at = (rank: number) => new Date(top - rank).toISOString();
+		const search = async (bounds: Record<string, string>) =>
+			(await callTool(server.port, 'search_messages', { query: '罕', ...bounds })).data;
+
+		// One page reads 50,000 messages: without since it would continue with a cursor.
+		const recent = await search({ since: at(30_000) });
+		expect(ids(recent.messages)).toEqual(['new', 'mid']);
+		expect(recent).toMatchObject({ next_cursor: null, scanned_through: null });
+		// Starting at until, one page reaches the oldest message.
+		const older = await search({ until: at(10_000) });
+		expect(ids(older.messages)).toEqual(['mid', 'old']);
+		expect(older).toMatchObject({ next_cursor: null, scanned_through: null });
+	});
+
+	it('keeps only the messages of sender_id, own ones by the account MID', async () => {
+		const { server, session } = await serve();
+		store(
+			session.db,
+			row('1', base, '晚餐吃 ok'),
+			row('2', base + 1, '晚餐吃 ok', { sender: selfMid }),
+			row('3', base + 2, '晚餐吃 ok'),
+			row('4', base + 3, '晚餐吃 ok', { chatId: groupMid, chatType: 'group', sender: selfMid })
+		);
+		for (const query of ['晚餐吃', 'ok']) {
+			const from = async (sender: string) =>
+				(await callTool(server.port, 'search_messages', { query, sender_id: sender })).data
+					.messages as { message_id: string; from_self: boolean }[];
+
+			expect(ids(await from(otherMid))).toEqual(['3', '1']);
+			const own = await from(selfMid);
+			expect(ids(own)).toEqual(['4', '2']);
+			expect(own.every((hit) => hit.from_self)).toBe(true);
+			expect(ids(await from(`u${'0'.repeat(32)}`))).toEqual([]);
+		}
+	});
+
+	it('adds context from the same chat and thread as read_messages shows it', async () => {
+		const { server, session } = await serve();
+		const { db } = session;
+		store(
+			db,
+			squareRow('t1', 0, thread),
+			{ ...squareRow('m1', 1, null), text: '關鍵字 m1' },
+			squareRow('t2', 2, thread),
+			{ ...squareRow('t3', 3, thread), text: '關鍵字 t3' },
+			// Another OpenChat, between m1 and m2.
+			{ ...squareRow('o1', 1.5, null), chatId: `m${'9'.repeat(32)}` },
+			squareRow('m2', 4, null),
+			squareRow('m3', 5, null),
+			squareRow('t4', 6, thread),
+			squareRow('m4', 7, null)
+		);
+		apply(db, { kind: 'unsend', service: 'square', chatId: square, messageId: 'm3' });
+		const shown = new Map(
+			(
+				(await callTool(server.port, 'read_messages', { service: 'square', chat_id: square })).data
+					.messages as { message_id: string }[]
+			).map((entry) => [entry.message_id, entry])
+		);
+		const shownAs = (...messageIds: string[]) => messageIds.map((id) => shown.get(id));
+
+		const { data } = await callTool(server.port, 'search_messages', {
+			query: '關鍵字',
+			context: 2
+		});
+
+		expect(data.messages).toMatchObject([
+			{ message_id: 't3', context_before: shownAs('t1', 't2'), context_after: shownAs('t4') },
+			{ message_id: 'm1', context_before: [], context_after: shownAs('m2', 'm3') }
+		]);
+		expect(shown.get('m3')).toMatchObject({ unsent: true, text: null });
+		const plain = await callTool(server.port, 'search_messages', { query: '關鍵字' });
+		expect(Object.keys((plain.data.messages as object[])[0]!)).not.toContain('context_before');
+	});
+
+	it('refuses a cursor replayed with another since, until, sender_id or context', async () => {
+		const { server, session } = await serve();
+		store(session.db, row('1', base, '晚餐吃'), row('2', base + 1, '晚餐吃'));
+		const filters = {
+			query: '晚餐吃',
+			since: '2026-10-12T00:00:00Z',
+			until: '2026-10-13T00:00:00Z',
+			sender_id: otherMid,
+			context: 1
+		};
+		const page = await callTool(server.port, 'search_messages', { ...filters, limit: 1 });
+		const replay = (changed: Record<string, unknown>) =>
+			callTool(server.port, 'search_messages', {
+				...filters,
+				...changed,
+				cursor: page.data.next_cursor
+			});
+
+		expect(ids((await replay({})).data.messages)).toEqual(['1']);
+		for (const changed of [
+			{ since: '2026-10-11T00:00:00Z' },
+			{ until: '2026-10-14T00:00:00Z' },
+			{ sender_id: selfMid },
+			{ context: 2 }
+		]) {
+			expect(await replay(changed), JSON.stringify(changed)).toMatchObject({
+				isError: true,
+				data: { error: { code: 'invalid_cursor' } }
+			});
+		}
+	});
+
+	it('sheds the farthest context of a hit too large for a page and continues after it', async () => {
+		const { server, session } = await serve();
+		const big = (id: string, at: number) => row(id, at, `${id} ${'長'.repeat(8000)}`);
+		// Oldest first: a small hit in the group, then two hits among large messages.
+		store(
+			session.db,
+			row('s1', base - 2000, 'small', { chatId: groupMid, chatType: 'group' }),
+			row('h0', base - 1000, '關鍵字 h0', { chatId: groupMid, chatType: 'group' }),
+			...['b1', 'b2', 'b3'].map((id, index) => big(id, base + index)),
+			row('h1', base + 3, '關鍵字 h1'),
+			...['b4', 'b5', 'b6'].map((id, index) => big(id, base + 4 + index)),
+			row('h2', base + 7, '關鍵字 h2'),
+			...['b7', 'b8', 'b9'].map((id, index) => big(id, base + 8 + index))
+		);
+		type Hit = {
+			message_id: string;
+			context_before: unknown;
+			context_after: unknown;
+			context_truncated?: boolean;
+		};
+		const page = async (cursor?: unknown) =>
+			(
+				await callTool(server.port, 'search_messages', {
+					query: '關鍵字',
+					context: 3,
+					...(cursor ? { cursor } : {})
+				})
+			).data;
+		const shape = (hit: Hit) => [
+			hit.message_id,
+			ids(hit.context_before),
+			ids(hit.context_after),
+			hit.context_truncated ?? false
+		];
+
+		const first = await page();
+		expect(Buffer.byteLength(JSON.stringify(first.messages))).toBeLessThanOrEqual(sizeCap);
+		expect((first.messages as Hit[]).map(shape)).toEqual([['h2', ['b6'], ['b7'], true]]);
+		expect(first.size_capped).toBe(true);
+		const second = await page(first.next_cursor);
+		expect((second.messages as Hit[]).map(shape)).toEqual([
+			['h1', ['b3'], ['b4'], true],
+			['h0', ['s1'], [], false]
+		]);
+		expect(second.next_cursor).toBeNull();
+	});
+
+	it('refuses a time without an offset or finer than milliseconds, context above 3 and since not before until', async () => {
+		const { server } = await serve();
+		for (const args of [
+			{ since: '2026-10-12T06:30:00' },
+			{ until: '2026-10-12' },
+			// Cut to milliseconds, either bound would move past a message sent at :00.000.
+			{ since: '2026-10-12T04:30:00.0001Z' },
+			{ until: '2026-10-12T04:30:00.0001+02:00' },
+			{ context: 4 },
+			{ sender_id: 'someone' }
+		]) {
+			// -32602: the tool's input schema refuses the arguments before the tool runs.
+			await expect(
+				callTool(server.port, 'search_messages', { query: '晚餐吃', ...args }),
+				JSON.stringify(args)
+			).rejects.toThrow('"code":-32602');
+		}
+		const empty = await callTool(server.port, 'search_messages', {
+			query: '晚餐吃',
+			since: '2026-10-12T04:30:00Z',
+			until: '2026-10-12T06:30:00+02:00'
+		});
+		expect(empty).toMatchObject({ isError: true, data: { error: { code: 'invalid_argument' } } });
+	});
 });
 
 describe('list_changes', () => {

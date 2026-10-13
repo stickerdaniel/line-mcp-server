@@ -91,10 +91,19 @@ export const readMessages = defineTool({
 		})
 });
 
+/**
+ * A send time bound; any offset, `Z` included, names the same instant. Send
+ * times are whole milliseconds, so a finer fraction is refused rather than cut,
+ * which would move an inclusive or exclusive bound.
+ */
+const sentTime = z.iso
+	.datetime({ offset: true })
+	.regex(/^[^.]+(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/, 'At most millisecond precision');
+
 export const searchMessages = defineTool({
 	name: 'search_messages',
 	description:
-		'Search message text, newest first. Give up to 10 words or "quoted phrases"; a message matches when its text contains all of them. Text matches as written: search Traditional and Simplified Chinese, or other languages, as separate queries. A query of only 1- or 2-character words searches back in steps: a page may hold no messages yet a next_cursor that continues further back, and scanned_through tells how far back it reached.',
+		'Search message text, newest first. Give up to 10 words or "quoted phrases"; a message matches when its text contains all of them. Text matches as written: search Traditional and Simplified Chinese, or other languages, as separate queries. since, until and sender_id narrow the hits; context adds the messages around each hit in its chat or thread. A query of only 1- or 2-character words searches back in steps: a page may hold no messages yet a next_cursor that continues further back, and scanned_through tells how far back it reached.',
 	input: z.object({
 		query: z
 			.string()
@@ -103,6 +112,28 @@ export const searchMessages = defineTool({
 			.describe('Words and "quoted phrases" that must all occur, for example 晚餐 "see you"'),
 		service: service.optional(),
 		chat_id: chatId.optional(),
+		since: sentTime
+			.optional()
+			.describe(
+				'Only messages sent at or after this ISO 8601 time with offset, for example 2026-10-12T06:30:00+02:00'
+			),
+		until: sentTime.optional().describe('Only messages sent before this ISO 8601 time with offset'),
+		sender_id: z
+			.string()
+			.regex(/^[a-z][0-9a-f]{32}$/)
+			.optional()
+			.describe(
+				'Only messages with this sender_id; the account MID from status finds own Talk messages'
+			),
+		context: z
+			.number()
+			.int()
+			.min(0)
+			.max(3)
+			.optional()
+			.describe(
+				'Messages before and after each hit, 0 to 3, as context_before and context_after; default 0'
+			),
 		limit,
 		cursor
 	}),
@@ -111,6 +142,10 @@ export const searchMessages = defineTool({
 			query: args.query,
 			...(args.service ? { service: args.service } : {}),
 			...(args.chat_id ? { chatId: args.chat_id } : {}),
+			...(args.sender_id ? { senderId: args.sender_id } : {}),
+			...(args.since ? { since: Date.parse(args.since) } : {}),
+			...(args.until ? { until: Date.parse(args.until) } : {}),
+			...(args.context ? { context: args.context } : {}),
 			...(args.limit ? { limit: args.limit } : {}),
 			...(args.cursor ? { cursor: args.cursor } : {})
 		})
