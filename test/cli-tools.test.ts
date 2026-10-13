@@ -1,11 +1,21 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { transaction } from '../src/db.ts';
 import { Pool } from '../src/sync/loop.ts';
 import { applyChanges, type MessageRow } from '../src/sync/normalize.ts';
-import { freePort, otherMid } from './fake-line.ts';
-import { callTool, listTools, runCli, serve, type Served, startCli } from './mcp-client.ts';
+import { freePort, otherMid, tempRoot } from './fake-line.ts';
+import {
+	callTool,
+	cliEntry,
+	listTools,
+	runCli,
+	serve,
+	type Served,
+	startCli
+} from './mcp-client.ts';
 
 /** Messages from the peer with `texts`, one minute apart. */
 function store(served: Served, ...texts: string[]): void {
@@ -67,6 +77,26 @@ class CountingPool extends Pool {
 	}
 }
 
+/** Runs `line-mcp <command> | <reader>` through bash; the CLI's exit code and stderr. */
+async function pipedCli(port: number, command: string, reader: string) {
+	const shell = spawn(
+		'bash',
+		[
+			'-c',
+			`"$0" "$1" ${command} | ${reader} >/dev/null; echo "\${PIPESTATUS[0]}"`,
+			process.execPath,
+			cliEntry
+		],
+		{ env: { ...process.env, LINE_MCP_HOME: tempRoot(), LINE_MCP_PORT: String(port) } }
+	);
+	let stdout = '';
+	let stderr = '';
+	shell.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+	shell.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+	await once(shell, 'close');
+	return { code: Number(stdout.trim()), stderr };
+}
+
 /** The published command name of a tool. */
 const commandOf = (tool: string) => (tool === 'status' ? 'sync-status' : tool.replaceAll('_', '-'));
 
@@ -83,6 +113,23 @@ describe('tool commands', { timeout: 30_000 }, () => {
 		expect(run).toMatchObject({ code: 0, stderr: '' });
 		expect(JSON.parse(run.stdout)).toEqual(expected.data);
 		expect(expected.data.messages).toHaveLength(2);
+	});
+
+	it('finishes quietly when the reader closes the pipe early', async () => {
+		const { port } = (await serve()).server;
+
+		// `head` exits after one byte, while the command still closes its MCP session.
+		const run = await pipedCli(port, 'sync-status', 'head -c 1');
+
+		expect(run).toEqual({ code: 0, stderr: '' });
+	});
+
+	it('keeps its own exit code when the reader is gone before any output', async () => {
+		// `true` exits at once; with no daemon the command fails without stdout output.
+		const run = await pipedCli(await freePort(), 'sync-status', 'true');
+
+		expect(run.code).toBe(1);
+		expect(run.stderr).not.toContain('EPIPE');
 	});
 
 	it('offers every served tool as a command, with its input fields as flags', async () => {
