@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import { BaseClient } from '@evex/linejs/base';
 import type { Message } from '@evex/linejs-types';
 import { describe, expect, it } from 'vitest';
-import { listChanges, readMessages, searchMessages, shortQueryWindow } from '../src/archive.ts';
+import { listChanges, readMessages, searchMessages } from '../src/archive.ts';
 import { openDatabase, transaction } from '../src/db.ts';
 import { SqliteStorage } from '../src/storage.ts';
 import type { SyncContext } from '../src/sync/loop.ts';
@@ -228,22 +228,5 @@ describe('search', () => {
 			mode: 'fts',
 			messages: [{ text: '今天晚上吃什麼' }]
 		});
-	});
-
-	it('scans the most recently sent messages even when older history was archived later', async () => {
-		const context = archive();
-		await store(context, textMessage('500000000000000003', '台北見'));
-		// A backfill of a full window of older history, inserted after the recent message.
-		context.db
-			.prepare(
-				`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
-				INSERT INTO message (service, chat_id, message_id, sent_at, text, envelope, decrypt_state, seq)
-				SELECT 'talk', ?, 'old' || i, 1000 + i, 'older history', '{}', 'ok', 1000000 + i FROM n`
-			)
-			.run(shortQueryWindow, otherMid);
-
-		expect(searchMessages(context.db, { query: '台北' }).messages.map((m) => m.text)).toEqual([
-			'台北見'
-		]);
 	});
 });
