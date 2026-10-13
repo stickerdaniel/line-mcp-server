@@ -129,7 +129,9 @@ const migrations = [
 		member_id TEXT NOT NULL,
 		confirmed_at INTEGER NOT NULL,
 		PRIMARY KEY (chat_id, member_id)
-	) STRICT;`
+	) STRICT;`,
+	// Search context reads one thread, or the main chat alone, in read order.
+	`CREATE INDEX message_thread_order ON message (service, chat_id, thread_id, coalesce(sent_at, 0), id);`
 ];
 
 export const schemaVersion = migrations.length;

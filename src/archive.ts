@@ -297,24 +297,28 @@ function keyset(position: Position | undefined, direction: '<' | '>', params: SQ
 }
 
 /**
- * One chat (or one thread of it). Newest first, continuing before `before`;
- * with `after`, oldest first from just after it. Tombstones appear with their
- * metadata only.
+ * One chat (or one thread of it; `threadId: null` for the main chat without
+ * its threads). Newest first, continuing before `before`; with `after`, oldest
+ * first from just after it. Tombstones appear with their metadata only.
  */
 export function readMessages(
 	db: DatabaseSync,
 	options: {
 		service: Service;
 		chatId: string;
-		threadId?: string;
+		threadId?: string | null;
 		limit?: number;
 		before?: Position;
 		after?: Position;
 	}
 ): MessageView[] {
 	const params: SQLInputValue[] = [options.service, options.chatId];
-	const thread = options.threadId === undefined ? '' : 'AND m.thread_id = ?';
-	if (options.threadId !== undefined) params.push(options.threadId);
+	let thread = '';
+	if (options.threadId === null) thread = 'AND m.thread_id IS NULL';
+	else if (options.threadId !== undefined) {
+		thread = 'AND m.thread_id = ?';
+		params.push(options.threadId);
+	}
 	const newer = options.after !== undefined;
 	const page = newer ? keyset(options.after, '>', params) : keyset(options.before, '<', params);
 	const order = newer ? 'ASC' : 'DESC';
@@ -383,9 +387,18 @@ export interface SearchResult {
 	messages: MessageView[];
 	/**
 	 * Scan only: the last row read when the scan stopped at `scanLimit` rows with
-	 * fewer than `limit` hits while older rows remain. The next page continues after it.
+	 * fewer than `limit` hits while older rows remain to read. The next page continues after it.
 	 */
 	scannedTo: Position | null;
+}
+
+/**
+ * Send times a search keeps: from `since` (inclusive) to `until` (exclusive),
+ * in UTC milliseconds. A message without a send time is outside any range.
+ */
+export interface SentRange {
+	since?: number;
+	until?: number;
 }
 
 /**
@@ -401,6 +414,8 @@ export function searchMessages(
 		query: string;
 		service?: Service;
 		chatId?: string;
+		sender?: string;
+		sent?: SentRange;
 		limit?: number;
 		before?: Position;
 	}
@@ -409,6 +424,7 @@ export function searchMessages(
 	const terms = searchTerms(options.query);
 	const long = terms.filter((term) => [...term].length >= 3);
 	const short = terms.filter((term) => [...term].length < 3);
+	const sent = sentBounds(options.sent);
 	const scope: string[] = ['m.unsent = 0'];
 	const params: SQLInputValue[] = [];
 	if (options.service) {
@@ -418,6 +434,14 @@ export function searchMessages(
 	if (options.chatId !== undefined) {
 		scope.push('m.chat_id = ?');
 		params.push(options.chatId);
+	}
+	if (options.sender !== undefined) {
+		scope.push('m.sender = ?');
+		params.push(options.sender);
+	}
+	if (sent) {
+		scope.push('m.sent_at >= ?', 'm.sent_at < ?');
+		params.push(sent.from, sent.until);
 	}
 	// `instr` keeps text after an embedded NUL, where `LIKE` would stop.
 	scope.push(...short.map(() => 'instr(lower(m.text), lower(?)) > 0'));
@@ -437,15 +461,16 @@ export function searchMessages(
 		return { mode: 'fts', messages: rows.map(view), scannedTo: null };
 	}
 
+	// `until` is where the scan starts, `since` where it ends: rows outside the range are never read.
 	const from = options.before ?? {
-		sentAt: Number.MAX_SAFE_INTEGER,
-		rowId: Number.MAX_SAFE_INTEGER
+		sentAt: sent?.until ?? Number.MAX_SAFE_INTEGER,
+		rowId: sent ? 0 : Number.MAX_SAFE_INTEGER
 	};
 	const chat =
 		options.service && options.chatId !== undefined
 			? { service: options.service, chatId: options.chatId }
 			: undefined;
-	const read = scanRows(from, chat);
+	const read = scanRows(from, chat, sent?.from);
 	// The rows read come first, so the hits keep their order and the page stops early once full.
 	const rows = db
 		.prepare(
@@ -466,25 +491,49 @@ export function searchMessages(
 }
 
 /**
+ * A `SentRange` as SQL bounds. Send times are positive, so a lower bound of at
+ * least 1 also leaves out the messages without one.
+ */
+function sentBounds(range: SentRange | undefined): { from: number; until: number } | undefined {
+	if (range?.since === undefined && range?.until === undefined) return undefined;
+	return {
+		from: Math.max(1, range.since ?? 1),
+		until: range.until ?? Number.MAX_SAFE_INTEGER
+	};
+}
+
+/**
  * The rows a scan reads, newest first strictly after `from` in the read order,
- * as `id` and the order key `k`, from an index alone. In one chat
- * `message_chat_order` serves that order. Across chats `message_recent
- * (sent_at, id)` does: a send time is positive or unknown (ordered as 0), so
- * the rows with one come first and the rest follow. The unknown ones keep `k`
- * NULL, which sorts last like 0, so the index order needs no sort.
+ * as `id` and the order key `k`, from an index alone; with `lowest`, only rows
+ * sent at or after it. In one chat `message_chat_order` serves that order.
+ * Across chats `message_recent (sent_at, id)` does: a send time is positive or
+ * unknown (ordered as 0), so the rows with one come first and the rest follow.
+ * The unknown ones keep `k` NULL, which sorts last like 0, so the index order
+ * needs no sort.
  */
 function scanRows(
 	from: Position,
-	chat: { service: Service; chatId: string } | undefined
+	chat: { service: Service; chatId: string } | undefined,
+	lowest?: number
 ): { sql: string; params: SQLInputValue[] } {
 	if (chat) {
 		const params: SQLInputValue[] = [chat.service, chat.chatId];
 		const page = keyset(from, '<', params);
+		if (lowest !== undefined) params.push(lowest);
 		return {
 			sql: `SELECT m.id AS id, ${orderKey} AS k FROM message m
 				WHERE m.service = ? AND m.chat_id = ? ${page}
+				${lowest === undefined ? '' : `AND ${orderKey} >= ?`}
 				ORDER BY ${orderKey} DESC, m.id DESC`,
 			params
+		};
+	}
+	if (lowest !== undefined) {
+		return {
+			sql: `SELECT m.id AS id, m.sent_at AS k FROM message m
+				WHERE m.sent_at <= ? AND (m.sent_at < ? OR m.id < ?) AND m.sent_at >= ?
+				ORDER BY 2 DESC, 1 DESC`,
+			params: [from.sentAt, from.sentAt, from.rowId, lowest]
 		};
 	}
 	return {

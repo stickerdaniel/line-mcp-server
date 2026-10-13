@@ -116,6 +116,11 @@ describe('tool commands', { timeout: 30_000 }, () => {
 		['a value outside the enum', ['list-chats', '--service', 'line'], '--service:'],
 		['a non-integer', ['list-chats', '--limit', 'ten'], '--limit:'],
 		['an integer out of range', ['list-chats', '--limit', '500'], '--limit:'],
+		[
+			'a time without an offset',
+			['search-messages', '--query', '晚餐', '--since', '2026-10-12T06:30:00'],
+			'--since:'
+		],
 		['a positional argument', ['list-chats', 'extra'], "'extra'"]
 	])('refuses %s with exit 2 before any request', async (_case, args, names) => {
 		const listener = await counter();
