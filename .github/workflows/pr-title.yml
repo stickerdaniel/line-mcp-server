@@ -23,7 +23,7 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-          pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: [A-Z][^.]*$'
+          pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: [A-Z](.*[^.])?$'
           if ! printf '%s' "$TITLE" | grep -Eq "$pattern"; then
             echo "::error::Title must be '<type>(<scope>): <Subject>' with a capitalized subject and no trailing period."
             exit 1
