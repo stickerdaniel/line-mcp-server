@@ -12,7 +12,7 @@ import { archiveStatus, upsertChat, upsertParticipant } from '../src/archive.ts'
 import { transaction } from '../src/db.ts';
 import { getAttachment, writeAll } from '../src/mcp/tools/upstream.ts';
 import { Outbox } from '../src/outbox.ts';
-import { sizeCap } from '../src/queries.ts';
+import { type ChatPage, sizeCap } from '../src/queries.ts';
 import type { SqliteStorage } from '../src/storage.ts';
 import { Pool } from '../src/sync/loop.ts';
 import {
@@ -130,6 +130,22 @@ class WatchedPool extends Pool {
 
 const ids = (messages: unknown) =>
 	(messages as { message_id: string }[]).map((entry) => entry.message_id);
+
+const chatMid = (index: number) => `u${index.toString(16).padStart(32, '0')}`;
+
+/** list_chats, by chat ID. */
+async function listed(port: number) {
+	const { chats } = (await callTool(port, 'list_chats')).data as unknown as ChatPage;
+	return Object.fromEntries(chats.map((chat) => [chat.chat_id, chat]));
+}
+
+/** The newest message read_messages shows for a chat. */
+async function newest(port: number, service: string, chatId: string) {
+	const page = await callTool(port, 'read_messages', { service, chat_id: chatId });
+	return (page.data.messages as unknown[]).at(-1);
+}
+
+const bowls = (count: number) => '🍜'.repeat(count);
 
 describe('MCP transport', () => {
 	it('refuses any Origin and any Host but this listener', async () => {
@@ -266,6 +282,127 @@ describe('list_chats', () => {
 		expect((await callTool(server.port, 'list_chats')).data.chats).toEqual([
 			expect.objectContaining({ chat_id: selfMid, name: '我的記事本' })
 		]);
+	});
+
+	it("shows each chat's newest message as read_messages shows it, threads included", async () => {
+		const { server, session } = await serve();
+		const { db } = session;
+		const untimed = chatMid(1);
+		const tied = chatMid(2);
+		const sticker = chatMid(3);
+		const empty = chatMid(4);
+		const sent = (id: string, sentAt: number | null, chatId: string, text = `訊息 ${id}`) =>
+			row(id, sentAt, text, { chatId, sender: chatId });
+		store(
+			db,
+			sent('10', base, otherMid),
+			sent('11', base + 1000, otherMid, '明天見'),
+			squareRow('20', 0, null),
+			squareRow('21', 2, thread),
+			squareRow('22', 1, null),
+			// A message without a send time sorts as the oldest.
+			sent('30', base, untimed),
+			sent('31', null, untimed),
+			// The same send time: the one archived later is newer, whatever its ID.
+			sent('41', base, tied),
+			sent('40', base, tied),
+			row('50', base, '', {
+				chatId: sticker,
+				sender: sticker,
+				contentType: 'STICKER',
+				text: null,
+				envelope: JSON.stringify({
+					id: '50',
+					contentType: 'STICKER',
+					contentMetadata: { STKID: '1', STKTXT: '[OK]' }
+				})
+			})
+		);
+		upsertChat(db, { service: 'talk', chatId: empty, type: 'user' });
+
+		const chats = await listed(server.port);
+		const latest = Object.fromEntries(
+			Object.values(chats).map((chat) => [chat.chat_id, chat.last_message?.message_id])
+		);
+		expect(latest).toEqual({
+			[otherMid]: '11',
+			[square]: '21',
+			[untimed]: '30',
+			[tied]: '40',
+			[sticker]: '50',
+			[empty]: undefined
+		});
+		expect(chats[empty]).not.toHaveProperty('last_message');
+		expect(chats[sticker]!.last_message).toMatchObject({
+			content_type: 'sticker',
+			alt_text: '[OK]'
+		});
+		expect(chats[square]!.last_message).toMatchObject({ thread_id: thread });
+		for (const chat of Object.values(chats).filter((entry) => entry.last_message)) {
+			expect(chat.last_message).toEqual(await newest(server.port, chat.service, chat.chat_id));
+		}
+		expect(chats[otherMid]!.last_message).not.toHaveProperty('service');
+		expect(chats[otherMid]!.last_message).not.toHaveProperty('chat_id');
+	});
+
+	it('shows an unsent latest message as unsent, without text', async () => {
+		const { server, session } = await serve();
+		store(session.db, row('60', base, '早安'), row('61', base + 1000, '打錯了'));
+		apply(session.db, { kind: 'unsend', service: 'talk', chatId: otherMid, messageId: '61' });
+
+		const { last_message } = (await listed(server.port))[otherMid]!;
+		expect(last_message).toMatchObject({ message_id: '61', unsent: true });
+		expect(last_message).not.toHaveProperty('text');
+		expect(last_message).toEqual(await newest(server.port, 'talk', otherMid));
+	});
+
+	it('cuts the text to 200 code points without splitting a character', async () => {
+		const { server, session } = await serve();
+		const long = chatMid(1);
+		const exact = chatMid(2);
+		store(
+			session.db,
+			row('70', base, `a${bowls(249)}`, { chatId: long }),
+			row('71', base, bowls(200), { chatId: exact })
+		);
+
+		const chats = await listed(server.port);
+		expect(chats[long]!.last_message).toMatchObject({
+			text: `a${bowls(199)}…`,
+			text_truncated: true
+		});
+		expect(chats[exact]!.last_message).toMatchObject({ text: bowls(200) });
+		expect(chats[exact]!.last_message).not.toHaveProperty('text_truncated');
+		expect(chats[exact]!.last_message).toEqual(await newest(server.port, 'talk', exact));
+	});
+
+	it('counts the latest messages toward the size cap and pages every chat once', async () => {
+		const { server, session } = await serve();
+		const all = Array.from({ length: 200 }, (_, index) => chatMid(index + 1));
+		store(
+			session.db,
+			...all.map((chatId, index) =>
+				row(String(900 + index), base + index * 1000, '長'.repeat(300), { chatId })
+			)
+		);
+
+		const seen: string[] = [];
+		let cursor: string | null = null;
+		let pages = 0;
+		do {
+			const page = (
+				await callTool(server.port, 'list_chats', { limit: 200, ...(cursor ? { cursor } : {}) })
+			).data as unknown as ChatPage;
+			if (pages === 0) expect(page.size_capped).toBe(true);
+			expect(Buffer.byteLength(JSON.stringify(page.chats))).toBeLessThanOrEqual(sizeCap);
+			expect(page.chats.every((chat) => chat.last_message?.text_truncated)).toBe(true);
+			seen.push(...page.chats.map((chat) => chat.chat_id));
+			cursor = page.next_cursor;
+			pages += 1;
+		} while (cursor);
+		expect(pages).toBeGreaterThan(1);
+		// Newest activity first, each chat exactly once.
+		expect(seen).toEqual(all.toReversed());
 	});
 });
 

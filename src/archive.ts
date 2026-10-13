@@ -332,6 +332,26 @@ export function readMessages(
 		.map(view);
 }
 
+/**
+ * The newest message of each chat, threads and tombstones included: what
+ * `readMessages` without a thread returns first. One statement with one
+ * `message_chat_order` lookup per chat; a chat without messages has none.
+ */
+export function latestMessages(
+	db: DatabaseSync,
+	chats: { service: Service; chatId: string }[]
+): MessageView[] {
+	if (chats.length === 0) return [];
+	return db
+		.prepare(
+			`SELECT ${viewColumns} FROM json_each(?) k CROSS JOIN message m ON m.id = (
+				SELECT l.id FROM message l WHERE l.service = k.value ->> 0 AND l.chat_id = k.value ->> 1
+				ORDER BY coalesce(l.sent_at, 0) DESC, l.id DESC LIMIT 1)`
+		)
+		.all(JSON.stringify(chats.map((chat) => [chat.service, chat.chatId])))
+		.map(view);
+}
+
 /** One message by its LINE ID in a chat, tombstones included. */
 export function findMessage(
 	db: DatabaseSync,
