@@ -1,0 +1,220 @@
+name: Release
+
+# A merge to main that raises the version in package.json publishes it to npm,
+# tags the merge commit and creates a GitHub Release. Every step is idempotent,
+# so "Re-run all jobs" completes a release that failed halfway.
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+
+# One group per commit: a rerun waits for a running attempt, and a second bump
+# merged meanwhile is neither cancelled nor dropped from a shared queue.
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Squash merges make HEAD~1 the previous main. The peeled `^{}` line of
+      # an annotated tag sorts last, so tail picks the commit either way.
+      - name: Decide whether to release
+        id: plan
+        run: |
+          set -euo pipefail
+          previous=$(git show HEAD~1:package.json | jq -r .version)
+          current=$(jq -r .version package.json)
+          tag_sha=$(git ls-remote origin "refs/tags/v$current" "refs/tags/v$current^{}" | tail -n1 | cut -f1)
+          node scripts/release-plan.ts detect "$previous" "$current" "$tag_sha" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+
+  # Builds without credentials. Every later job needs this one, so they all
+  # skip with it.
+  build:
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 10
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify
+        run: bun run verify
+
+      # Runs prepack, which builds dist/.
+      - name: Pack
+        run: npm pack
+
+      # A rerun replaces the artifact; later jobs download it by ID, never by name.
+      - name: Upload package
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package
+          path: line-mcp-server-${{ needs.detect.outputs.version }}.tgz
+          if-no-files-found: error
+          overwrite: true
+
+  smoke:
+    needs: [detect, build]
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/package
+
+      - name: Install and test the package
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: scripts/smoke-pack.sh "$RUNNER_TEMP/package/line-mcp-server-$VERSION.tgz"
+
+  # Trusted publishing: npm trusts this workflow file in the `npm` environment
+  # through OIDC, so there is no npm token. OIDC needs a GitHub-hosted runner.
+  publish-npm:
+    needs: [detect, build, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      id-token: write
+    steps:
+      # Only the reviewed helper from the triggering commit, never one from the
+      # build artifact: install and test steps there run dependency code.
+      - name: Checkout the release helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/release-plan.ts
+          sparse-checkout-cone-mode: false
+
+      - name: Download package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/package
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - name: Install npm
+        run: npm install --global npm@11.21.0
+
+      - name: Check the registry
+        id: plan
+        working-directory: ${{ runner.temp }}/package
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: node "$GITHUB_WORKSPACE/scripts/release-plan.ts" publish "line-mcp-server-$VERSION.tgz" "$VERSION" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Publish to npm
+        if: steps.plan.outputs.publish == 'true'
+        working-directory: ${{ runner.temp }}/package
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: npm publish "line-mcp-server-$VERSION.tgz" --access public
+
+  # Runs no repository code: it holds the only write token.
+  release:
+    needs: [detect, publish-npm]
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: v${{ needs.detect.outputs.version }}
+      VERSION: ${{ needs.detect.outputs.version }}
+    steps:
+      - name: Tag the release commit
+        run: |
+          set -euo pipefail
+          tagged=$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "refs/tags/$TAG" "refs/tags/$TAG^{}" | tail -n1 | cut -f1)
+          if [ -z "$tagged" ]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
+          elif [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG points at $tagged, not $GITHUB_SHA"
+            exit 1
+          fi
+
+      # --generate-notes lists the merged pull requests after these notes.
+      - name: Create the GitHub Release
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already has a release"
+            exit 0
+          fi
+          cat >"$RUNNER_TEMP/notes.md" <<EOF
+          ## Install
+
+          \`\`\`bash
+          npm i -g line-mcp-server@$VERSION
+          line-mcp login
+          line-mcp install
+          \`\`\`
+
+          An update needs only \`npm i -g line-mcp-server@$VERSION\` and \`line-mcp install\`, which restarts the daemon. Update the plugins with \`codex plugin marketplace upgrade line-mcp-server\` or \`claude plugin update line-mcp-server@line-mcp-server\`.
+          EOF
+          gh release create "$TAG" --verify-tag --generate-notes --notes-file "$RUNNER_TEMP/notes.md"

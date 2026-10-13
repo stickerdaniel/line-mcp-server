@@ -25,3 +25,7 @@ Node 24 runs the TypeScript sources directly (type stripping) in development and
 - Commit and PR title: `<type>(<scope>): <Subject>`, imperative, capitalized, at most 50 characters after the colon. Scope is required unless none fits.
 - One focused change per PR, squash-merged. Commits carry no co-author trailers; the Post No Bills check rejects them.
 - PR bodies follow `.github/pull_request_template.md` and end with `Generated with <model> for <job> in <tool> via <host>.` Repeat `<model> for <job>` joined by `and`; join jobs with `/`. Humans are `Human`. Ask for unknown values.
+
+## Releasing
+
+`bun run release:bump <major|minor|patch|x.y.z>` sets the version in `package.json` and both plugin manifests; a test keeps the three equal. The bump goes in its own PR, `chore(release): Release vX.Y.Z`. Merging it runs `.github/workflows/release.yml`, which publishes to npm, tags the merge commit and creates the GitHub Release. Merge no further bump until that run is green. "Re-run all jobs" finishes a failed run, since every step skips what is already done; a failure that needs a code change ships with the next bump.
