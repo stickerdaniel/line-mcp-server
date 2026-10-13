@@ -25,20 +25,20 @@ function offsetIn(zone: string, utc: string): string {
 }
 
 describe('local time', () => {
-	it('keeps utc the same whatever the local zone', () => {
+	it('names the same instant whatever the local zone', () => {
 		const utc = '2026-10-12T04:30:00.123Z';
 
 		for (const zone of ['UTC', 'America/New_York', 'Asia/Kathmandu']) {
-			expect(renderIn(zone, utc)?.utc).toBe(utc);
+			expect(Date.parse(renderIn(zone, utc)!)).toBe(Date.parse(utc));
 		}
-		expect(renderIn('UTC', utc)?.local).toBe('2026-10-12T04:30:00.123+00:00');
+		expect(renderIn('UTC', utc)).toBe('2026-10-12T04:30:00.123+00:00');
 	});
 
 	it('uses the winter and the summer offset of the zone', () => {
-		expect(renderIn('Europe/Berlin', '2026-01-15T04:30:00.123Z')?.local).toBe(
+		expect(renderIn('Europe/Berlin', '2026-01-15T04:30:00.123Z')).toBe(
 			'2026-01-15T05:30:00.123+01:00'
 		);
-		expect(renderIn('Europe/Berlin', '2026-07-15T04:30:00.123Z')?.local).toBe(
+		expect(renderIn('Europe/Berlin', '2026-07-15T04:30:00.123Z')).toBe(
 			'2026-07-15T06:30:00.123+02:00'
 		);
 	});
@@ -47,22 +47,22 @@ describe('local time', () => {
 		const before = renderIn('America/New_York', '2026-11-01T05:30:00.000Z');
 		const after = renderIn('America/New_York', '2026-11-01T06:30:00.000Z');
 
-		expect(before?.local).toBe('2026-11-01T01:30:00.000-04:00');
-		expect(after?.local).toBe('2026-11-01T01:30:00.000-05:00');
+		expect(before).toBe('2026-11-01T01:30:00.000-04:00');
+		expect(after).toBe('2026-11-01T01:30:00.000-05:00');
 		// Each local time still names its own instant.
-		expect([Date.parse(before!.local), Date.parse(after!.local)]).toEqual([
-			Date.parse(before!.utc),
-			Date.parse(after!.utc)
+		expect([Date.parse(before!), Date.parse(after!)]).toEqual([
+			Date.parse('2026-11-01T05:30:00.000Z'),
+			Date.parse('2026-11-01T06:30:00.000Z')
 		]);
 	});
 
 	it('renders an offset that is not a whole hour', () => {
-		expect(renderIn('Asia/Kathmandu', '2026-10-12T04:30:00.123Z')?.local).toBe(
+		expect(renderIn('Asia/Kathmandu', '2026-10-12T04:30:00.123Z')).toBe(
 			'2026-10-12T10:15:00.123+05:45'
 		);
 	});
 
-	it('names in status the zone its local times use', async () => {
+	it('names in status the zone its times use', async () => {
 		const { server, session } = await serve();
 		const syncedAt = '2026-11-01T06:30:00.000Z';
 		session.db
@@ -72,7 +72,7 @@ describe('local time', () => {
 		for (const zone of ['America/New_York', 'Asia/Kathmandu']) {
 			process.env.TZ = zone;
 			const { data } = await callTool(server.port, 'status', {});
-			const local = (data.synced_at as { talk: { local: string } }).talk.local;
+			const local = (data.synced_at as { talk: string }).talk;
 
 			expect(local.slice(-6)).toBe(offsetIn(data.time_zone as string, syncedAt));
 			expect(offsetIn(data.time_zone as string, syncedAt)).toBe(offsetIn(zone, syncedAt));

@@ -16,7 +16,7 @@ import { chatId, cursor, defineTool, limit, messageId, service } from '../tool.t
 export const status = defineTool({
 	name: 'status',
 	description:
-		'Session health, last sync times, unreconciled coverage gaps, backfill progress, archive size and time_zone, the zone every local time is given in. Check stale before treating other results as current.',
+		'Session health, last sync times, unreconciled coverage gaps, backfill progress, archive size and time_zone, the zone whose offset every time carries. Check stale before treating other results as current.',
 	input: z.object({}),
 	run: (_args, context) => {
 		const { db } = context;
@@ -71,7 +71,7 @@ export const listChats = defineTool({
 export const readMessages = defineTool({
 	name: 'read_messages',
 	description:
-		'Messages of one chat or thread, oldest first within a page. Without a cursor: the newest page. older_cursor and newer_cursor page from there; around_message_id centres a page on one message. Unsent messages appear without text.',
+		'Messages of one chat or thread, oldest first within a page. Without a cursor: the newest page. older_cursor and newer_cursor page from there; around_message_id centres a page on one message. Unsent messages appear without text. A field without a value is left out: unsent appears only when true, decrypt_state only when not ok, from_self only when known.',
 	input: z.object({
 		service,
 		chat_id: chatId,

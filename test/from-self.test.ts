@@ -65,7 +65,7 @@ function discovery(member: (entry: Joined) => string | undefined) {
 
 let nextId = 5000;
 
-function row(service: 'talk' | 'square', chatId: string, sender: string): MessageRow {
+function row(service: 'talk' | 'square', chatId: string, sender: string | null): MessageRow {
 	const messageId = String(nextId++);
 	return {
 		service,
@@ -98,13 +98,18 @@ function archive(served: Served, ...rows: MessageRow[]) {
 	return rows.map((entry) => entry.messageId);
 }
 
-type Item = { message_id: string; from_self: boolean | null };
+type Item = { message_id: string; from_self?: boolean };
 
-/** `from_self` per message ID as read_messages, search_messages and list_changes each show it. */
+/**
+ * `from_self` per message ID as read_messages, search_messages and list_changes
+ * each show it; `absent` where the item leaves it out.
+ */
 async function shownFromSelf(served: Served, chats: [string, string][]) {
 	const { port } = served.server;
 	const byId = (items: Item[]) =>
-		Object.fromEntries(items.map((item) => [item.message_id, item.from_self]));
+		Object.fromEntries(
+			items.map((item) => [item.message_id, 'from_self' in item ? item.from_self : 'absent'])
+		);
 	const read: Item[] = [];
 	for (const [service, chatId] of chats) {
 		const page = await callTool(port, 'read_messages', { service, chat_id: chatId });
@@ -120,7 +125,7 @@ const sweep = ({ session }: Served) =>
 	sweepSquareChats({ db: session.db, base: session.base, selfMid, log: () => {}, now: Date.now });
 
 describe('own OpenChat messages', () => {
-	it('marks own messages by the account member of each chat, and unknown members as null', async () => {
+	it('marks own messages by the account member of each chat, and leaves unknown ones unmarked', async () => {
 		let withMember = true;
 		const served = await serve(discovery((entry) => (withMember ? entry.self : undefined)));
 		await sweep(served);
@@ -129,7 +134,7 @@ describe('own OpenChat messages', () => {
 		await sweep(served);
 
 		const [a, b] = squares;
-		const [ownA, otherA, ownB, otherB, unconfirmed, ownTalk, otherTalk] = archive(
+		const [ownA, otherA, ownB, otherB, unconfirmed, ownTalk, otherTalk, noSenderTalk] = archive(
 			served,
 			row('square', a!.chat, a!.self),
 			row('square', a!.chat, b!.self),
@@ -137,7 +142,8 @@ describe('own OpenChat messages', () => {
 			row('square', b!.chat, otherMember),
 			row('square', unconfirmedChat, a!.self),
 			row('talk', otherMid, selfMid),
-			row('talk', otherMid, otherMid)
+			row('talk', otherMid, otherMid),
+			row('talk', otherMid, null)
 		);
 
 		const expected = {
@@ -145,9 +151,10 @@ describe('own OpenChat messages', () => {
 			[otherA!]: false,
 			[ownB!]: true,
 			[otherB!]: false,
-			[unconfirmed!]: null,
+			[unconfirmed!]: 'absent',
 			[ownTalk!]: true,
-			[otherTalk!]: false
+			[otherTalk!]: false,
+			[noSenderTalk!]: 'absent'
 		};
 		expect(
 			await shownFromSelf(served, [
@@ -213,7 +220,8 @@ describe('own OpenChat messages', () => {
 
 		expect(page.data.chat).toMatchObject({ name: 'Kept' });
 		expect(page.data.messages).toMatchObject([
-			{ message_id: message.messageId, text: message.text, from_self: null }
+			{ message_id: message.messageId, text: message.text }
 		]);
+		expect((page.data.messages as object[])[0]).not.toHaveProperty('from_self');
 	});
 });
