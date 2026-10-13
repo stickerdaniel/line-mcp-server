@@ -466,17 +466,142 @@ describe('search_messages', () => {
 		);
 
 		const short = await callTool(server.port, 'search_messages', { query: '晚上' });
-		expect(short.data).toMatchObject({ mode: 'scan', scanned_window: 20_000 });
+		expect(short.data).toMatchObject({ mode: 'scan', scanned_through: null, next_cursor: null });
 		expect(ids(short.data.messages)).toEqual(['1']);
 		const single = await callTool(server.port, 'search_messages', {
 			query: '天',
+			service: 'talk',
 			chat_id: otherMid
 		});
-		expect(single.data).toMatchObject({ mode: 'scan', scanned_window: null });
+		expect(single.data).toMatchObject({ mode: 'scan', scanned_through: null });
 		expect(ids(single.data.messages)).toEqual(['2', '1']);
 		const long = await callTool(server.port, 'search_messages', { query: '晚上吃' });
 		expect(long.data).toMatchObject({ mode: 'fts' });
 		expect(ids(long.data.messages)).toEqual(['1']);
+	});
+
+	it('matches every word in any order and a quoted phrase as written', async () => {
+		const { server, session } = await serve();
+		store(
+			session.db,
+			row('1', base, 'dinner 明天見 at seven'),
+			row('2', base + 1, '明天見, then dinner'),
+			row('3', base + 2, 'dinner only'),
+			row('4', base + 3, 'see you there'),
+			row('5', base + 4, 'you will see')
+		);
+		const search = async (query: string) =>
+			ids((await callTool(server.port, 'search_messages', { query })).data.messages);
+
+		expect(await search('dinner 明天見')).toEqual(['2', '1']);
+		expect(await search('明天見 dinner')).toEqual(['2', '1']);
+		expect(await search('see you')).toEqual(['5', '4']);
+		expect(await search('"see you"')).toEqual(['4']);
+		// U+3000, the ideographic space, separates words too.
+		expect(await search('明天見　seven')).toEqual(['1']);
+	});
+
+	it('searches AND, NEAR, *, _ and % as text', async () => {
+		const { server, session } = await serve();
+		store(
+			session.db,
+			row('1', base, 'cats AND dogs'),
+			row('2', base + 1, 'cats and the dogs'),
+			row('3', base + 2, 'NEAR the station'),
+			row('4', base + 3, 'wow* indeed'),
+			row('5', base + 4, 'wowza'),
+			row('6', base + 5, '5 * 3'),
+			row('7', base + 6, 'snake_case'),
+			row('8', base + 7, '100%')
+		);
+		const search = async (query: string) =>
+			ids((await callTool(server.port, 'search_messages', { query })).data.messages);
+
+		expect(await search('"cats AND dogs"')).toEqual(['1']);
+		expect(await search('NEAR')).toEqual(['3']);
+		expect(await search('wow*')).toEqual(['4']);
+		expect(await search('*')).toEqual(['6', '4']);
+		expect(await search('_')).toEqual(['7']);
+		expect(await search('%')).toEqual(['8']);
+	});
+
+	it('refuses an unclosed quote, an empty query and more than ten words', async () => {
+		const { server } = await serve();
+		const words = Array.from({ length: 11 }, (_, i) => `w${i}`);
+		for (const query of ['"see you', 'dinner "', '" "', words.join(' ')]) {
+			const result = await callTool(server.port, 'search_messages', { query });
+			expect(result, query).toMatchObject({
+				isError: true,
+				data: { error: { code: 'invalid_argument' } }
+			});
+		}
+		const ten = await callTool(server.port, 'search_messages', {
+			query: words.slice(0, 10).join(' ')
+		});
+		expect(ten).toMatchObject({ data: { messages: [] } });
+		expect(ten.isError).toBeFalsy();
+	});
+
+	it('matches one- and two-character terms, ASCII in any case, alone or with longer words', async () => {
+		const { server, session } = await serve();
+		store(
+			session.db,
+			row('1', base, 'OKAY, 晚上見'),
+			row('2', base + 1, 'dinner OK'),
+			row('3', base + 2, 'dinner later'),
+			row('4', base + 3, '早'),
+			// No send time: read after every message that has one.
+			row('5', null, '早安'),
+			row('6', base + 4, 'line one\u0000ok')
+		);
+		const search = async (query: string) =>
+			(await callTool(server.port, 'search_messages', { query })).data;
+
+		expect(await search('ok')).toMatchObject({ mode: 'scan' });
+		expect(ids((await search('ok')).messages)).toEqual(['6', '2', '1']);
+		expect(ids((await search('okay')).messages)).toEqual(['1']);
+		expect(ids((await search('早')).messages)).toEqual(['4', '5']);
+		expect(ids((await search('晚上 ok')).messages)).toEqual(['1']);
+		const mixed = await search('dinner ok');
+		expect(mixed).toMatchObject({ mode: 'fts' });
+		expect(ids(mixed.messages)).toEqual(['2']);
+	});
+
+	it('scans back in bounded pages that may hold no hits, skipping and repeating nothing', async () => {
+		const { server, session } = await serve();
+		const { db } = session;
+		// The message of rank r (1 the newest) was sent at top - r. Hits sit at
+		// ranks 1, 50,000 (the last row the first page reads) and 100,001;
+		// text-less rows fill the rest.
+		const top = 10_000_000;
+		db.prepare(
+			`WITH RECURSIVE n(r) AS (SELECT 2 UNION ALL SELECT r + 1 FROM n WHERE r < 100000)
+			INSERT INTO message (service, chat_id, message_id, sent_at, envelope, decrypt_state, seq)
+			SELECT 'talk', ?, 'filler' || r, ? - r, '{}', 'ok', 1000000 + r FROM n
+			WHERE r != 50000`
+		).run(otherMid, top);
+		store(
+			db,
+			row('new', top - 1, '罕 new'),
+			row('edge', top - 50_000, '罕 edge'),
+			row('old', top - 100_001, '罕 old')
+		);
+
+		const pages: Record<string, unknown>[] = [];
+		let cursor: unknown;
+		do {
+			const { data } = await callTool(server.port, 'search_messages', {
+				query: '罕',
+				...(cursor ? { cursor } : {})
+			});
+			pages.push(data);
+			cursor = data.next_cursor;
+		} while (cursor && pages.length < 5);
+
+		expect(pages.map((page) => ids(page.messages))).toEqual([['new', 'edge'], [], ['old']]);
+		expect(
+			pages.map((page) => (page.scanned_through as { utc: string } | null)?.utc ?? null)
+		).toEqual([new Date(top - 50_000).toISOString(), new Date(top - 100_000).toISOString(), null]);
 	});
 
 	it('pages results with a cursor, each once, and never shows unsent text', async () => {
@@ -501,6 +626,20 @@ describe('search_messages', () => {
 			seen.push(...ids(page.messages));
 		}
 		expect(seen).toEqual(['14', '13', '11', '10']);
+	});
+
+	it('refuses a cursor replayed with another query', async () => {
+		const { server, session } = await serve();
+		store(session.db, row('1', base, 'dinner 明天見'), row('2', base + 1, 'dinner 明天見'));
+		const page = await callTool(server.port, 'search_messages', {
+			query: 'dinner 明天見',
+			limit: 1
+		});
+		const misused = await callTool(server.port, 'search_messages', {
+			query: 'dinner',
+			cursor: page.data.next_cursor
+		});
+		expect(misused).toMatchObject({ isError: true, data: { error: { code: 'invalid_cursor' } } });
 	});
 });
 

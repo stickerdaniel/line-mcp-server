@@ -146,7 +146,9 @@ Every insert or change takes a fresh `seq` from one counter. Reading changes aft
 
 ## Search
 
-Queries of three or more characters use the FTS5 `trigram` index, which handles Chinese text. Shorter queries cannot match a trigram index, so they scan with `instr`, limited to one chat or to the most recent messages.
+A query splits into terms at whitespace; a phrase in double quotes is one term, spaces included. A message matches when its text contains every term, at most 10. Terms of three or more characters go to the FTS5 `trigram` index as quoted phrases joined by `AND`, so `OR`, `NEAR` and `*` are plain text; the index handles Chinese text and folds case. Shorter terms cannot match a trigram index and filter with `instr` over `lower`, which folds ASCII letters only. Beyond case, text matches as written, so Traditional and Simplified Chinese are separate queries.
+
+A query of only short terms scans in pages. A page reads at most 50,000 messages newest first in the read order: of the chat when service and chat are both given (`message_chat_order`), otherwise of the whole archive. Its cursor continues after the last message read, not the last hit, so a page may hold fewer hits than its limit, or none, and `scanned_through` gives the send time it reached. Across chats, `message_recent (sent_at, id)` serves the read order without a sort: a send time is positive or unknown (ordered as 0), so the messages with one come first and the rest follow.
 
 ## MCP transport and trust boundary
 

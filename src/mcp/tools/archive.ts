@@ -94,9 +94,13 @@ export const readMessages = defineTool({
 export const searchMessages = defineTool({
 	name: 'search_messages',
 	description:
-		'Search message text, newest first. Queries of 3 or more characters use the trigram index; 1 or 2 characters scan one chat, or the 20,000 most recent messages when no chat is given.',
+		'Search message text, newest first. Give up to 10 words or "quoted phrases"; a message matches when its text contains all of them. Text matches as written: search Traditional and Simplified Chinese, or other languages, as separate queries. A query of only 1- or 2-character words searches back in steps: a page may hold no messages yet a next_cursor that continues further back, and scanned_through tells how far back it reached.',
 	input: z.object({
-		query: z.string().min(1).max(200).describe('Text to find, for example 晚餐'),
+		query: z
+			.string()
+			.min(1)
+			.max(200)
+			.describe('Words and "quoted phrases" that must all occur, for example 晚餐 "see you"'),
 		service: service.optional(),
 		chat_id: chatId.optional(),
 		limit,

@@ -10,8 +10,8 @@ import {
 	positionOf,
 	readMessages,
 	searchMessages,
-	type Service,
-	shortQueryWindow
+	searchTerms,
+	type Service
 } from './archive.ts';
 import { LineMcpError } from './errors.ts';
 
@@ -499,14 +499,18 @@ export function readMessagesPage(
 export interface SearchPage {
 	query: string;
 	mode: 'fts' | 'scan';
-	/** Recent messages a short query scanned when no chat narrowed it. */
-	scanned_window: number | null;
+	/** Scan only: the send time this page searched back to, while next_cursor continues further. */
+	scanned_through: Time | null;
 	/** Newest first. */
 	messages: MessageItem[];
 	next_cursor: string | null;
 	size_capped: boolean;
 }
 
+/**
+ * One page of `searchMessages`. A scan page can hold fewer hits than `limit`,
+ * or none, and still continue: its cursor resumes after the last row read.
+ */
 export function searchMessagesPage(
 	db: DatabaseSync,
 	selfMid: string,
@@ -514,7 +518,7 @@ export function searchMessagesPage(
 ): SearchPage {
 	const limit = pageLimit(options.limit);
 	const scope = {
-		query: options.query,
+		terms: searchTerms(options.query),
 		service: options.service ?? null,
 		chat: options.chatId ?? null
 	};
@@ -534,16 +538,13 @@ export function searchMessagesPage(
 	);
 	const last = result.messages[kept.length - 1];
 	const more = capped || result.messages.length > limit;
+	const next = more && last ? positionOf(last) : result.scannedTo;
 	return {
 		query: options.query,
 		mode: result.mode,
-		scanned_window:
-			result.mode === 'scan' && options.chatId === undefined ? shortQueryWindow : null,
+		scanned_through: result.mode === 'scan' && next ? renderTime(next.sentAt) : null,
 		messages: kept,
-		next_cursor:
-			more && last
-				? encodeCursor('search_messages', scope, encodePosition(positionOf(last)))
-				: null,
+		next_cursor: next ? encodeCursor('search_messages', scope, encodePosition(next)) : null,
 		size_capped: capped
 	};
 }

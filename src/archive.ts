@@ -1,4 +1,5 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import { LineMcpError } from './errors.ts';
 
 export type Service = 'talk' | 'square';
 export type Health = 'online' | 'catching_up' | 'offline' | 'needs_login' | 'storage_error';
@@ -288,10 +289,11 @@ export function positionOf(message: MessageView): Position {
 
 const orderKey = 'coalesce(m.sent_at, 0)';
 
+// Written as a bound on the order key plus a tiebreak, so an index on it serves a range.
 function keyset(position: Position | undefined, direction: '<' | '>', params: SQLInputValue[]) {
 	if (!position) return '';
 	params.push(position.sentAt, position.sentAt, position.rowId);
-	return `AND (${orderKey} ${direction} ? OR (${orderKey} = ? AND m.id ${direction} ?))`;
+	return `AND ${orderKey} ${direction}= ? AND (${orderKey} ${direction} ? OR m.id ${direction} ?)`;
 }
 
 /**
@@ -347,18 +349,51 @@ export function readEnvelope(db: DatabaseSync, rowId: number): string | undefine
 	return row?.envelope;
 }
 
-/** How many recent messages a short query scans when no chat narrows it. */
-export const shortQueryWindow = 20_000;
+const maxSearchTerms = 10;
+
+/**
+ * Splits a search query into terms: words separated by whitespace, and phrases
+ * in double quotes, kept whole with their spaces. A double quote itself cannot
+ * be searched. Every term must occur in a match.
+ */
+export function searchTerms(query: string): string[] {
+	const parts = query.split('"');
+	if (parts.length % 2 === 0) {
+		throw new LineMcpError('invalid_argument', 'A quoted phrase in the query is not closed');
+	}
+	// Odd parts are inside quotes.
+	const terms = parts.flatMap((part, index) =>
+		index % 2 === 1 ? (part.trim() ? [part] : []) : part.split(/\s+/u).filter(Boolean)
+	);
+	if (terms.length === 0) throw new LineMcpError('invalid_argument', 'The query has no words');
+	if (terms.length > maxSearchTerms) {
+		throw new LineMcpError(
+			'invalid_argument',
+			`A query has at most ${maxSearchTerms} words or quoted phrases`
+		);
+	}
+	return terms;
+}
+
+/** Rows one scan page reads at most; the next page continues after the last one read. */
+const scanLimit = 50_000;
 
 export interface SearchResult {
 	mode: 'fts' | 'scan';
 	messages: MessageView[];
+	/**
+	 * Scan only: the last row read when the scan stopped at `scanLimit` rows with
+	 * fewer than `limit` hits while older rows remain. The next page continues after it.
+	 */
+	scannedTo: Position | null;
 }
 
 /**
- * FTS5 trigram for queries of three or more characters. The trigram index
- * cannot match shorter queries, so those scan with `instr`, limited to one chat
- * or to the most recent messages. Newest first, continuing before `before`.
+ * Messages whose text contains every term of `query` (see `searchTerms`),
+ * newest first, continuing before `before`. Terms of three or more characters
+ * use the FTS5 trigram index, which folds case; shorter ones filter with
+ * `instr` over `lower`, which folds ASCII letters only. A query of only short
+ * terms reads at most `scanLimit` rows a call (see `scanRows`).
  */
 export function searchMessages(
 	db: DatabaseSync,
@@ -371,6 +406,9 @@ export function searchMessages(
 	}
 ): SearchResult {
 	const limit = options.limit ?? 50;
+	const terms = searchTerms(options.query);
+	const long = terms.filter((term) => [...term].length >= 3);
+	const short = terms.filter((term) => [...term].length < 3);
 	const scope: string[] = ['m.unsent = 0'];
 	const params: SQLInputValue[] = [];
 	if (options.service) {
@@ -381,40 +419,82 @@ export function searchMessages(
 		scope.push('m.chat_id = ?');
 		params.push(options.chatId);
 	}
-	const pageParams: SQLInputValue[] = [];
-	const page = keyset(options.before, '<', pageParams);
-	if ([...options.query].length >= 3) {
-		const phrase = `"${options.query.replaceAll('"', '""')}"`;
+	// `instr` keeps text after an embedded NUL, where `LIKE` would stop.
+	scope.push(...short.map(() => 'instr(lower(m.text), lower(?)) > 0'));
+	params.push(...short);
+	if (long.length > 0) {
+		// Quoted phrases: `AND`, `NEAR` or `*` inside a term are text, not operators.
+		const match = long.map((term) => `"${term}"`).join(' AND ');
+		const pageParams: SQLInputValue[] = [];
+		const page = keyset(options.before, '<', pageParams);
 		const rows = db
 			.prepare(
 				`SELECT ${viewColumns} FROM message_fts f JOIN message m ON m.id = f.rowid
 				WHERE message_fts MATCH ? AND ${scope.join(' AND ')} ${page}
 				ORDER BY ${orderKey} DESC, m.id DESC LIMIT ?`
 			)
-			.all(phrase, ...params, ...pageParams, limit);
-		return { mode: 'fts', messages: rows.map(view) };
+			.all(match, ...params, ...pageParams, limit);
+		return { mode: 'fts', messages: rows.map(view), scannedTo: null };
 	}
-	if (!options.query) return { mode: 'scan', messages: [] };
-	// The window is the newest messages by send time, not by insertion: backfill
-	// inserts old history after recent messages.
-	const window = options.chatId === undefined ? 'LIMIT ?' : '';
+
+	const from = options.before ?? {
+		sentAt: Number.MAX_SAFE_INTEGER,
+		rowId: Number.MAX_SAFE_INTEGER
+	};
+	const chat =
+		options.service && options.chatId !== undefined
+			? { service: options.service, chatId: options.chatId }
+			: undefined;
+	const read = scanRows(from, chat);
+	// The rows read come first, so the hits keep their order and the page stops early once full.
 	const rows = db
 		.prepare(
-			`SELECT ${viewColumns} FROM (
-				SELECT m.* FROM message m WHERE ${scope.join(' AND ')}
-				ORDER BY m.sent_at DESC, m.id DESC ${window}
-			) m
-			WHERE instr(m.text, ?) > 0 ${page}
-			ORDER BY ${orderKey} DESC, m.id DESC LIMIT ?`
+			`SELECT ${viewColumns} FROM (${read.sql} LIMIT ?) w CROSS JOIN message m ON m.id = w.id
+			WHERE ${scope.join(' AND ')}
+			ORDER BY w.k DESC, w.id DESC LIMIT ?`
 		)
-		.all(
-			...params,
-			...(options.chatId === undefined ? [shortQueryWindow] : []),
-			options.query,
-			...pageParams,
-			limit
-		);
-	return { mode: 'scan', messages: rows.map(view) };
+		.all(...read.params, scanLimit, ...params, limit);
+	if (rows.length >= limit) return { mode: 'scan', messages: rows.map(view), scannedTo: null };
+	const [last, beyond] = db
+		.prepare(`${read.sql} LIMIT 2 OFFSET ?`)
+		.all(...read.params, scanLimit - 1);
+	return {
+		mode: 'scan',
+		messages: rows.map(view),
+		scannedTo: last && beyond ? { sentAt: Number(last.k ?? 0), rowId: Number(last.id) } : null
+	};
+}
+
+/**
+ * The rows a scan reads, newest first strictly after `from` in the read order,
+ * as `id` and the order key `k`, from an index alone. In one chat
+ * `message_chat_order` serves that order. Across chats `message_recent
+ * (sent_at, id)` does: a send time is positive or unknown (ordered as 0), so
+ * the rows with one come first and the rest follow. The unknown ones keep `k`
+ * NULL, which sorts last like 0, so the index order needs no sort.
+ */
+function scanRows(
+	from: Position,
+	chat: { service: Service; chatId: string } | undefined
+): { sql: string; params: SQLInputValue[] } {
+	if (chat) {
+		const params: SQLInputValue[] = [chat.service, chat.chatId];
+		const page = keyset(from, '<', params);
+		return {
+			sql: `SELECT m.id AS id, ${orderKey} AS k FROM message m
+				WHERE m.service = ? AND m.chat_id = ? ${page}
+				ORDER BY ${orderKey} DESC, m.id DESC`,
+			params
+		};
+	}
+	return {
+		sql: `SELECT m.id AS id, m.sent_at AS k FROM message m
+			WHERE m.sent_at <= ? AND (m.sent_at < ? OR m.id < ?)
+			UNION ALL
+			SELECT m.id, m.sent_at FROM message m WHERE m.sent_at IS NULL AND (? > 0 OR m.id < ?)
+			ORDER BY 2 DESC, 1 DESC`,
+		params: [from.sentAt, from.sentAt, from.rowId, from.sentAt, from.rowId]
+	};
 }
 
 /** Rows whose last insert or change has `seq > afterSeq`, in `seq` order. */
