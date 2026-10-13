@@ -1,11 +1,21 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { transaction } from '../src/db.ts';
 import { Pool } from '../src/sync/loop.ts';
 import { applyChanges, type MessageRow } from '../src/sync/normalize.ts';
-import { freePort, otherMid } from './fake-line.ts';
-import { callTool, listTools, runCli, serve, type Served, startCli } from './mcp-client.ts';
+import { freePort, otherMid, tempRoot } from './fake-line.ts';
+import {
+	callTool,
+	cliEntry,
+	listTools,
+	runCli,
+	serve,
+	type Served,
+	startCli
+} from './mcp-client.ts';
 
 /** Messages from the peer with `texts`, one minute apart. */
 function store(served: Served, ...texts: string[]): void {
@@ -83,6 +93,30 @@ describe('tool commands', { timeout: 30_000 }, () => {
 		expect(run).toMatchObject({ code: 0, stderr: '' });
 		expect(JSON.parse(run.stdout)).toEqual(expected.data);
 		expect(expected.data.messages).toHaveLength(2);
+	});
+
+	it('exits quietly when the reader closes the pipe before the command ends', async () => {
+		const { port } = (await serve()).server;
+
+		// A shell pipe: `head` exits after one byte, while the command still closes its MCP session.
+		const shell = spawn(
+			'bash',
+			[
+				'-c',
+				'"$0" "$1" sync-status | head -c 1 >/dev/null; echo "code=${PIPESTATUS[0]}"',
+				process.execPath,
+				cliEntry
+			],
+			{ env: { ...process.env, LINE_MCP_HOME: tempRoot(), LINE_MCP_PORT: String(port) } }
+		);
+		let stdout = '';
+		let stderr = '';
+		shell.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+		shell.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+		await once(shell, 'close');
+
+		expect(stderr).toBe('');
+		expect(stdout).toBe('code=0\n');
 	});
 
 	it('offers every served tool as a command, with its input fields as flags', async () => {
