@@ -71,7 +71,7 @@ export const listChats = defineTool({
 export const readMessages = defineTool({
 	name: 'read_messages',
 	description:
-		'Messages of one chat or thread, oldest first within a page. Without a cursor: the newest page. older_cursor and newer_cursor page from there; around_message_id centres a page on one message. Unsent messages appear without text. A field without a value is left out: unsent appears only when true, decrypt_state only when not ok, from_self only when known.',
+		"Messages of one chat or thread, oldest first within a page. Without a cursor: the newest page. older_cursor and newer_cursor page from there; around_message_id centres a page on one message. Unsent messages appear without text. A field without a value is left out: unsent appears only when true, decrypt_state only when not ok, from_self only when known. content_type is text, or LINE's type in lower case. Non-text messages carry, when LINE gives them: alt_text (sticker or Flex), file_name, duration_ms, image_set (index and total), call (type and result) and event (chat changes and the people they name). A canceled call with from_self false is a missed call. get_attachment fetches media.",
 	input: z.object({
 		service,
 		chat_id: chatId,

@@ -1007,7 +1007,7 @@ describe('result shape', () => {
 				sender_name: '王小明',
 				from_self: false,
 				sent_at: '2026-10-12T06:30:00.000+02:00',
-				content_type: 'NONE',
+				content_type: 'text',
 				text: '晚餐吃 plain',
 				seq: expect.any(Number)
 			},

@@ -168,6 +168,23 @@ Message and chat items leave out a field without a value: `unsent` appears only 
 
 Pages hold 50 items by default and at most 200. A continuation is an opaque cursor bound to the tool and a fingerprint of its filters, so a cursor replayed with other filters is refused rather than paging a different result. A page also ends early at about 64 KiB of items, with a continuation. `read_messages` pages by keyset over send time and row ID, so pages never skip or repeat a message, and `around_message_id` centres a page on one message. `list_changes` returns changes after a `seq` in `seq` order, as described under Tombstones and changes.
 
+## Non-text messages
+
+`content_type` is `text` for LINE's `NONE` and LINE's content type in lower case otherwise (`image`, `sticker`, `chatevent`, ...); the archive stores LINE's names. A non-text message is described by fields read from the plaintext `contentMetadata` of its retained envelope, each left out when LINE gave no valid value:
+
+| Field         | Content types      | Source                                                                                    |
+| ------------- | ------------------ | ----------------------------------------------------------------------------------------- |
+| `alt_text`    | flex, sticker      | `ALT_TEXT`, `STKTXT`                                                                      |
+| `file_name`   | file               | `FILE_NAME`, sent in plaintext only for files without E2EE; `get_attachment` has the rest |
+| `duration_ms` | video, audio, call | `DURATION`, a non-negative integer in milliseconds                                        |
+| `image_set`   | image              | `GSEQ` (1-based) and `GTOTAL` of an image sent with others                                |
+| `call`        | call               | `TYPE` (`A` audio, `V` video) and `RESULT` in lower case                                  |
+| `event`       | chatevent          | `LOC_KEY` and `LOC_ARGS`: args split at U+001E, MID lists in an arg at U+001F             |
+
+`event` covers only the codes whose arguments LINE's own web client confirms: `C_MJ` joined, `C_ML` left, `C_GI` and `C_MI` invited, `C_IC` invitation_canceled, `C_MR` removed, `C_PN` renamed (with the new `name`), `C_PI` picture_changed, `C_SN` link_join_allowed and `C_SP` link_join_disabled. Its `by` and `members` name MIDs with their archived display names. Any other code, an argument count the code does not take, or a malformed MID gives no `event`. A canceled call with `from_self: false` is a missed call, as LINE's web client shows it.
+
+Nothing else leaves the envelope: no chunks, URLs, `OID`, `SID`, `FLEX_JSON`, `MEDIA_CONTENT_INFO` or `REPLACE`. A page reads these keys only for the non-text messages it shows, after the rows are chosen, so finding the hits of a search parses no envelope, and a text message's envelope is never parsed. An unsent message has none of these fields. The fields follow the envelope, which every content change (edit, decryption, unsend) replaces; LINE resending only metadata for an unchanged message keeps the archived envelope, and with it the archived fields. Search covers message text only, not these fields.
+
 ## Time
 
 Every time is one ISO 8601 string at millisecond precision with the numeric offset of the daemon's system time zone at that instant, for example `2026-10-12T10:15:00.000+05:45`. The offset makes it one exact instant, so both sides of a daylight saving change stay distinct, and `search_messages` accepts it unchanged as `since` or `until`. The zone is read on every call, so a changed `TZ` applies without a restart. `status` reports the zone as `time_zone`.

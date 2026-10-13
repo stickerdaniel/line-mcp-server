@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
-import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import {
 	type ArchiveStatus,
 	findMessage,
@@ -263,8 +263,19 @@ export interface MessageItem {
 	from_self?: boolean;
 	sent_at?: string;
 	edited_at?: string;
-	/** LINE's content type; left out only for a tombstone of a message never archived. */
+	/**
+	 * `text` for LINE's `NONE`, otherwise LINE's content type in lower case,
+	 * such as `image` or `chatevent`; left out only for a tombstone of a
+	 * message never archived.
+	 */
 	content_type?: string;
+	// What a non-text message holds, from its envelope's plaintext metadata (see `details`).
+	alt_text?: string;
+	file_name?: string;
+	duration_ms?: number;
+	image_set?: { index: number; total: number };
+	call?: { type?: 'audio' | 'video'; result?: string };
+	event?: ChatEvent;
 	text?: string;
 	reply_to?: string;
 	mentions?: string[];
@@ -295,17 +306,62 @@ function mentioned(raw: string | null): string[] | null {
 }
 
 /**
- * Resolves display names and the account's own OpenChat members from the
- * archive's chat and participant tables, once per page.
+ * The plaintext `contentMetadata` keys non-text messages are described by.
+ * Only these leave the envelope; chunks, URLs, OID, SID, FLEX_JSON and the
+ * rest stay in SQLite.
+ */
+const metadataKeys = [
+	'ALT_TEXT',
+	'STKTXT',
+	'FILE_NAME',
+	'DURATION',
+	'GSEQ',
+	'GTOTAL',
+	'TYPE',
+	'RESULT',
+	'LOC_KEY',
+	'LOC_ARGS'
+] as const;
+type Metadata = Partial<Record<(typeof metadataKeys)[number], string>>;
+
+/**
+ * Resolves display names, the account's own OpenChat members and the
+ * metadata of non-text messages from the archive, once per page.
  */
 class Names {
 	readonly #db: DatabaseSync;
 	readonly #chats = new Map<string, string | null>();
 	readonly #people = new Map<string, string | null>();
 	readonly #selfMembers = new Map<string, Set<string>>();
+	readonly #metadata = new Map<number, Metadata>();
+	#metadataQuery: StatementSync | undefined;
 
 	constructor(db: DatabaseSync) {
 		this.#db = db;
+	}
+
+	/**
+	 * The allowlisted metadata of one archive row. Read from the envelope only
+	 * when a message is rendered, so rows outside a page are never parsed.
+	 */
+	metadata(rowId: number): Metadata {
+		if (!this.#metadata.has(rowId)) {
+			this.#metadataQuery ??= this.#db.prepare(
+				`SELECT json_extract(envelope, ${metadataKeys.map((key) => `'$.contentMetadata.${key}'`).join(', ')})
+					AS metadata FROM message WHERE id = ?`
+			);
+			// One value per key, in order; null where the envelope has none.
+			const values: unknown[] = JSON.parse(
+				String(this.#metadataQuery.get(rowId)?.metadata ?? '[]')
+			);
+			const metadata: Metadata = {};
+			metadataKeys.forEach((key, index) => {
+				const value = values[index];
+				if (typeof value === 'string') metadata[key] = value;
+			});
+			this.#metadata.set(rowId, metadata);
+		}
+		return this.#metadata.get(rowId)!;
 	}
 
 	chat(service: Service, chatId: string): string | null {
@@ -350,6 +406,161 @@ function fromSelf(names: Names, selfMid: string, message: MessageView): boolean 
 	return own.size === 0 ? null : own.has(message.sender);
 }
 
+/** A person a chat event names, with the archived display name when there is one. */
+export interface EventPerson {
+	id: string;
+	name?: string;
+}
+
+/** A membership or settings change LINE reports as a CHATEVENT message. */
+export interface ChatEvent {
+	type: string;
+	by?: EventPerson;
+	members?: EventPerson[];
+	/** The new chat name of a `renamed` event. */
+	name?: string;
+}
+
+const isMid = (value: string) => /^[a-z][0-9a-f]{32}$/.test(value);
+
+/** LINE's content type as tools show it: `text` for `NONE`, otherwise the name in lower case. */
+const contentTypeName = (contentType: string | null) =>
+	contentType === null ? null : contentType === 'NONE' ? 'text' : contentType.toLowerCase();
+
+/** A count from a metadata value: a non-negative safe integer written in decimal digits. */
+function count(value: string | undefined): number | null {
+	if (value === undefined || !/^\d+$/.test(value)) return null;
+	const parsed = Number(value);
+	return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+// Maps, so a metadata value such as `__proto__` finds nothing rather than an inherited property.
+const callTypes = new Map<string, 'audio' | 'video'>([
+	['A', 'audio'],
+	['V', 'video']
+]);
+
+const optionalActor = ([first]: string[]) =>
+	first !== undefined && isMid(first) ? first : undefined;
+
+/**
+ * Chat events by `LOC_KEY`, only codes whose arguments are verified against
+ * LINE's own client: the event type, the arity it accepts and which argument
+ * names whom. Every MID argument holds one MID or several separated by U+001F.
+ */
+const chatEvents = new Map<
+	string,
+	{
+		type: string;
+		arity: number[];
+		by?: (args: string[]) => string | undefined;
+		members?: (args: string[]) => string | undefined;
+		name?: (args: string[]) => string | undefined;
+	}
+>([
+	['C_MJ', { type: 'joined', arity: [1], members: (args) => args[0] }],
+	['C_ML', { type: 'left', arity: [1], members: (args) => args[0] }],
+	['C_GI', { type: 'invited', arity: [2], by: (args) => args[0], members: (args) => args[1] }],
+	['C_MI', { type: 'invited', arity: [2], by: (args) => args[0], members: (args) => args[1] }],
+	[
+		'C_IC',
+		{
+			type: 'invitation_canceled',
+			arity: [2],
+			by: (args) => args[0],
+			members: (args) => args[1]
+		}
+	],
+	[
+		'C_MR',
+		{
+			type: 'removed',
+			arity: [1, 2],
+			by: (args) => (args.length === 2 ? args[0] : undefined),
+			members: (args) => args.at(-1)
+		}
+	],
+	['C_PN', { type: 'renamed', arity: [2], by: (args) => args[0], name: (args) => args[1] }],
+	['C_PI', { type: 'picture_changed', arity: [1], by: (args) => args[0] }],
+	// The actor is optional here: an argument that is not a MID is left out, not refused.
+	['C_SN', { type: 'link_join_allowed', arity: [0, 1], by: optionalActor }],
+	['C_SP', { type: 'link_join_disabled', arity: [0, 1], by: optionalActor }]
+]);
+
+/** The event a CHATEVENT's `LOC_KEY` and `LOC_ARGS` describe; null for anything unverified or malformed. */
+function chatEvent(names: Names, service: Service, metadata: Metadata): ChatEvent | null {
+	const shape = metadata.LOC_KEY === undefined ? undefined : chatEvents.get(metadata.LOC_KEY);
+	if (!shape) return null;
+	const args = metadata.LOC_ARGS ? metadata.LOC_ARGS.split('\u001e') : [];
+	if (!shape.arity.includes(args.length)) return null;
+	const person = (id: string): EventPerson => ({
+		id,
+		...present({ name: names.person(service, id) })
+	});
+	const people = (arg: string | undefined) => {
+		const mids = arg?.split('\u001f') ?? [];
+		return mids.length > 0 && mids.every(isMid) ? mids.map(person) : null;
+	};
+	const event: ChatEvent = { type: shape.type };
+	if (shape.by) {
+		const by = shape.by(args);
+		if (by !== undefined) {
+			if (!isMid(by)) return null;
+			event.by = person(by);
+		}
+	}
+	if (shape.members) {
+		const members = people(shape.members(args));
+		if (!members) return null;
+		event.members = members;
+	}
+	if (shape.name) {
+		const name = shape.name(args);
+		if (!name) return null;
+		event.name = name;
+	}
+	return event;
+}
+
+/**
+ * What a non-text message holds, from the plaintext metadata LINE sends with
+ * it (architecture, Non-text messages). Each field is null when LINE gave no
+ * valid value for it.
+ */
+function details(names: Names, message: MessageView) {
+	const none = {
+		alt_text: null,
+		file_name: null,
+		duration_ms: null,
+		image_set: null,
+		call: null,
+		event: null
+	};
+	// Text rows are never parsed, and an unsend cleared the metadata.
+	if (message.unsent || message.contentType === null || message.contentType === 'NONE') return none;
+	const metadata = names.metadata(message.rowId);
+	const type = message.contentType;
+	const index = count(metadata.GSEQ);
+	const total = count(metadata.GTOTAL);
+	const call = present({
+		type: callTypes.get(metadata.TYPE ?? '') ?? null,
+		result: metadata.RESULT ? metadata.RESULT.toLowerCase() : null
+	});
+	return {
+		alt_text:
+			(type === 'FLEX' ? metadata.ALT_TEXT : type === 'STICKER' ? metadata.STKTXT : undefined) ||
+			null,
+		file_name: (type === 'FILE' && metadata.FILE_NAME) || null,
+		duration_ms: ['VIDEO', 'AUDIO', 'CALL'].includes(type) ? count(metadata.DURATION) : null,
+		image_set:
+			type === 'IMAGE' && index !== null && total !== null && index >= 1 && index <= total
+				? { index, total }
+				: null,
+		call: type === 'CALL' && Object.keys(call).length > 0 ? call : null,
+		event: type === 'CHATEVENT' ? chatEvent(names, message.service, metadata) : null
+	};
+}
+
 function messageItem(names: Names, selfMid: string, message: MessageView): MessageItem {
 	return {
 		message_id: message.messageId,
@@ -360,7 +571,8 @@ function messageItem(names: Names, selfMid: string, message: MessageView): Messa
 			from_self: fromSelf(names, selfMid, message),
 			sent_at: renderTime(message.sentAt),
 			edited_at: renderTime(message.editedAt),
-			content_type: message.contentType,
+			content_type: contentTypeName(message.contentType),
+			...details(names, message),
 			// The archive clears an unsent message's text; a tombstone never shows any.
 			text: message.unsent ? null : message.text,
 			reply_to: message.replyTo,
