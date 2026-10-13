@@ -121,7 +121,15 @@ const migrations = [
 	CREATE INDEX outbox_message ON outbox (service, chat_id, message_id) WHERE message_id IS NOT NULL;
 	CREATE INDEX outbox_in_flight ON outbox (state) WHERE state = 'in_flight';`,
 	// Discovery looks up every archived sender still unnamed (architecture, Names).
-	`CREATE INDEX message_sender ON message (service, sender);`
+	`CREATE INDEX message_sender ON message (service, sender);`,
+	// Every own member MID discovery confirmed in a Square chat (architecture,
+	// OpenChat adapter).
+	`CREATE TABLE square_self_member (
+		chat_id TEXT NOT NULL,
+		member_id TEXT NOT NULL,
+		confirmed_at INTEGER NOT NULL,
+		PRIMARY KEY (chat_id, member_id)
+	) STRICT;`
 ];
 
 export const schemaVersion = migrations.length;

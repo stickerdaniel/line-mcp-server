@@ -207,7 +207,7 @@ async function discover(fixture: Fixture) {
 	sessions.push(session);
 	const result = await listJoinedSquareChats(session.base);
 	return {
-		chats: result.chats.map((chat) => chat.squareChatMid),
+		chats: result.chats.map(({ chat }) => chat.squareChatMid),
 		uncoveredSquares: result.uncoveredSquares.map((square) => square.mid),
 		stalled: result.stalled,
 		calls: upstream.calls

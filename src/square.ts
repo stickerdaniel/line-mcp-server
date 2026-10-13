@@ -46,9 +46,15 @@ export async function fetchMyEvents(
 	);
 }
 
+export interface JoinedSquareChat {
+	chat: SquareChat;
+	/** The account's own member MID in the chat, unknown when `getSquareChat` omits it. */
+	selfMemberId: string | undefined;
+}
+
 export interface JoinedSquareChats {
 	/** Chats LINE confirms as `JOINED` through `getSquareChat`. */
-	chats: SquareChat[];
+	chats: JoinedSquareChat[];
 	/** Joined squares with no confirmed chat: a coverage gap for the caller to record. */
 	uncoveredSquares: Square[];
 	/** True when a continuation token stopped advancing and paging ended early. */
@@ -77,12 +83,12 @@ export async function listJoinedSquareChats(base: BaseClient): Promise<JoinedSqu
 		ownMembers
 	);
 
-	const chats: SquareChat[] = [];
+	const chats: JoinedSquareChat[] = [];
 	for (const squareChatMid of candidates) {
-		const chat = await confirmedChat(base, squareChatMid);
-		if (chat) chats.push(chat);
+		const joined = await confirmedChat(base, squareChatMid);
+		if (joined) chats.push(joined);
 	}
-	const covered = new Set(chats.map((chat) => chat.squareMid));
+	const covered = new Set(chats.map(({ chat }) => chat.squareMid));
 	const uncoveredSquares = squares.pages
 		.flatMap((page) => page.squares ?? [])
 		.filter((square) => !covered.has(square.mid));
@@ -177,18 +183,19 @@ function membershipChange(
 }
 
 /**
- * The chat when LINE reports the account as `JOINED`. FORBIDDEN and NOT_FOUND
- * mean the account cannot read the chat (gone, or no longer a member), so the
- * candidate is dropped; any other failure ends discovery.
+ * The chat and the account's member in it when LINE reports the account as
+ * `JOINED`. FORBIDDEN and NOT_FOUND mean the account cannot read the chat
+ * (gone, or no longer a member), so the candidate is dropped; any other
+ * failure ends discovery.
  */
 async function confirmedChat(
 	base: BaseClient,
 	squareChatMid: string
-): Promise<SquareChat | undefined> {
+): Promise<JoinedSquareChat | undefined> {
 	try {
-		const response = await base.square.getSquareChat({ squareChatMid });
-		return response.squareChatMember?.membershipState === 'JOINED'
-			? response.squareChat
+		const { squareChat, squareChatMember } = await base.square.getSquareChat({ squareChatMid });
+		return squareChatMember?.membershipState === 'JOINED'
+			? { chat: squareChat, selfMemberId: squareChatMember.squareMemberMid || undefined }
 			: undefined;
 	} catch (error) {
 		const code = error instanceof InternalError ? error.data?.errorCode : undefined;

@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { BaseClient } from '@evex/linejs/base';
 import type { FetchSquareChatEventsResponse, SquareEvent } from '@evex/linejs-types';
 import {
+	addSquareSelfMember,
 	closeGap,
 	deleteState,
 	listGaps,
@@ -323,7 +324,7 @@ export async function sweepSquareChats(context: SyncContext): Promise<void> {
 	const joined = await listJoinedSquareChats(context.base);
 	transaction(context.db, () => {
 		const now = context.now();
-		for (const chat of joined.chats) {
+		for (const { chat, selfMemberId } of joined.chats) {
 			upsertChat(
 				context.db,
 				{
@@ -334,10 +335,11 @@ export async function sweepSquareChats(context: SyncContext): Promise<void> {
 				},
 				now
 			);
+			if (selfMemberId) addSquareSelfMember(context.db, chat.squareChatMid, selfMemberId, now);
 		}
 		addPending(
 			context.db,
-			joined.chats.map((chat) => ({ chat: chat.squareChatMid }))
+			joined.chats.map(({ chat }) => ({ chat: chat.squareChatMid }))
 		);
 		if (joined.stalled) {
 			openGap(
