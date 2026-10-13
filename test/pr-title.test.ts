@@ -3,7 +3,6 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-	ALLOWED_TYPES,
 	FINAL_PERIOD,
 	INVALID_PR_DATA,
 	INVALID_SCOPE,
@@ -64,9 +63,13 @@ describe('validateTitle', () => {
 		expect(validateTitle(title)).toBeUndefined();
 	});
 
-	it.each(ALLOWED_TYPES)('accepts the type %s', (type) => {
-		expect(validateTitle(`${type}: Accept this title`)).toBeUndefined();
-	});
+	// linkedin-mcp-server's list, written out so a type dropped from the checker fails here.
+	it.each(['feat', 'fix', 'docs', 'style', 'refactor', 'test', 'chore', 'perf', 'ci'])(
+		'accepts the type %s',
+		(type) => {
+			expect(validateTitle(`${type}: Accept this title`)).toBeUndefined();
+		}
+	);
 
 	it.each(['build', 'revert'])('rejects the type %s', (type) => {
 		expect(validateTitle(`${type}: Package the release`)).toBe(UNSUPPORTED_TYPE);
@@ -230,7 +233,7 @@ describe('check-pr-title.ts', () => {
 		expect(result.output).toBe('');
 	});
 
-	it.each(['{', '{}', '{"title": null}', '{"title": ""}', '[]', '﻿{"title": "fix: Ok"}'])(
+	it.each(['{', '{}', '{"title": null}', '{"title": ""}', '[]', '\uFEFF{"title": "fix: Ok"}'])(
 		'refuses malformed PR JSON %j without echoing it',
 		(contents) => {
 			const result = runWithPrJson(contents, 'fix: Stale event title');
