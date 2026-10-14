@@ -8,18 +8,33 @@ const runner = toolRunner({
 	LINE_MCP_SERVICE_RUNNER: fileURLToPath(new URL('fixtures/service-runner.ts', import.meta.url))
 });
 
-/** A runner that answers launchctl from `replies` and records every call. */
-function scripted(replies: { bootout?: number; print?: number[] }) {
+const exit = (code: number) => ({ exit: code, stdout: '' });
+
+/**
+ * Stands in for launchctl and records every call. After a bootout that found
+ * the agent (exit 0) launchd keeps it loaded for `unloadPolls` more `print`
+ * calls, as while the daemon shuts down, and a bootstrap until then fails
+ * with 5, as the real one does.
+ */
+function fakeLaunchd({ bootout = 0, unloadPolls = 0 }: { bootout?: number; unloadPolls?: number }) {
 	const calls: string[][] = [];
-	const prints = [...(replies.print ?? [113])];
+	let loadedFor = 0;
 	const launchctl: ToolRunner = {
 		run: async (tool, args) => {
 			calls.push([tool, ...args]);
-			if (args[0] === 'bootout') return { exit: replies.bootout ?? 0, stdout: '' };
-			// The last answer repeats.
-			if (args[0] === 'print')
-				return { exit: prints.length > 1 ? prints.shift()! : prints[0]!, stdout: '' };
-			return { exit: 0, stdout: '' };
+			switch (args[0]) {
+				case 'bootout':
+					if (bootout === 0) loadedFor = unloadPolls;
+					return exit(bootout);
+				case 'print':
+					if (loadedFor === 0) return exit(113);
+					loadedFor--;
+					return exit(0);
+				case 'bootstrap':
+					return exit(loadedFor > 0 ? 5 : 0);
+				default:
+					return exit(0);
+			}
 		},
 		describe: (tool, args) => [tool, ...args].join(' ')
 	};
@@ -93,15 +108,15 @@ describe('launchd', () => {
 	it.each([0, 3, 113])(
 		'stops for login with bootout (exits %i) and starts with bootstrap',
 		async (bootout) => {
-			const { calls, launchctl } = scripted({ bootout });
+			const { calls, launchctl } = fakeLaunchd({ bootout });
 			const service = serviceFor('darwin', { home: '/Users/me', env: {}, runner: launchctl });
 
 			await service.stop();
 			await service.start();
 
-			expect(calls).toEqual([
+			// `print` only reads, so the mutations are what counts.
+			expect(calls.filter((call) => call[1] !== 'print')).toEqual([
 				['/bin/launchctl', 'bootout', target],
-				...(bootout === 0 ? [['/bin/launchctl', 'print', target]] : []),
 				bootstrap
 			]);
 		}
@@ -109,18 +124,16 @@ describe('launchd', () => {
 
 	// bootout returns while the daemon still shuts down; a bootstrap then fails.
 	it('waits until launchd has let the agent go before starting it again', async () => {
-		const { calls, launchctl } = scripted({ print: [0, 0, 113] });
+		const { launchctl } = fakeLaunchd({ unloadPolls: 3 });
 		const service = serviceFor('darwin', { home: '/Users/me', env: {}, runner: launchctl });
 
 		await service.stop();
-		await service.start();
 
-		const print = ['/bin/launchctl', 'print', target];
-		expect(calls).toEqual([['/bin/launchctl', 'bootout', target], print, print, print, bootstrap]);
+		await expect(service.start()).resolves.toBeUndefined();
 	});
 
 	it('fails the stop when launchd keeps the agent loaded', async () => {
-		const { calls, launchctl } = scripted({ print: [0] });
+		const { launchctl } = fakeLaunchd({ unloadPolls: Number.POSITIVE_INFINITY });
 		const service = serviceFor('darwin', {
 			home: '/Users/me',
 			env: {},
@@ -129,6 +142,5 @@ describe('launchd', () => {
 		});
 
 		await expect(service.stop()).rejects.toMatchObject({ code: 'launchctl_failed' });
-		expect(calls.filter((call) => call[1] === 'print').length).toBeGreaterThan(1);
 	});
 });
