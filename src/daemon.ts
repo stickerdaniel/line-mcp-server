@@ -94,7 +94,9 @@ const noop = () => {};
  * Starts the daemon: the session in its fixed startup order (lock, database,
  * binding, guards, token handler, restore), then the Talk loop, the Square
  * loop and the worker. When the session leaves `online` every loop stops
- * calling upstream while the archive stays open for cached reads.
+ * calling upstream while the archive stays open for cached reads. An abort of
+ * `options.signal` before it resolves undoes startup and rejects with
+ * `shutting_down`; after that, stopping is `stop()`.
  */
 export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> {
 	const log = options.log ?? stderrLog;
@@ -185,6 +187,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 			throw error;
 		}
 		log({ event: 'mcp_listening', port: mcp.port });
+	}
+	// The last point before the loops dispatch anything.
+	if (options.signal?.aborted) {
+		await mcp?.close();
+		await session.close();
+		throw new LineMcpError('shutting_down', 'Startup was stopped before the daemon ran');
 	}
 
 	const loopOptions = (name: keyof typeof offline): LoopOptions => ({

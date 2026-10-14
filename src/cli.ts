@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { once } from 'node:events';
 import { existsSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -6,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import qrcode from 'qrcode-terminal';
 import { archiveStatus } from './archive.ts';
-import { startDaemon } from './daemon.ts';
+import { type Daemon, startDaemon } from './daemon.ts';
 import { readAccount } from './db.ts';
 import { doctor } from './doctor.ts';
 import { LineMcpError, mapError } from './errors.ts';
@@ -168,14 +169,26 @@ async function runProbe(args: string[]): Promise<number> {
 	return 0;
 }
 
-/** Runs until SIGTERM (launchd bootout) or SIGINT; the lock listener keeps the process alive. */
+/**
+ * Runs until SIGTERM (launchd bootout), SIGINT or a stop request over the lock
+ * port (`requestStop`); the lock listener keeps the process alive. Each of
+ * them also cancels a startup still in progress.
+ */
 async function runDaemon(): Promise<number> {
-	const daemon = await startDaemon();
+	const stop = new AbortController();
+	const abort = () => stop.abort();
+	process.once('SIGTERM', abort);
+	process.once('SIGINT', abort);
+	let daemon: Daemon;
+	try {
+		daemon = await startDaemon({ signal: stop.signal, onStopRequest: abort });
+	} catch (error) {
+		if (!(error instanceof LineMcpError && error.code === 'shutting_down')) throw error;
+		stderrLog({ event: 'daemon_stopped' });
+		return 0;
+	}
 	stderrLog({ event: 'daemon_started', health: daemon.health() });
-	await new Promise<void>((resolve) => {
-		process.once('SIGTERM', resolve);
-		process.once('SIGINT', resolve);
-	});
+	if (!stop.signal.aborted) await once(stop.signal, 'abort');
 	await daemon.stop();
 	stderrLog({ event: 'daemon_stopped' });
 	return 0;

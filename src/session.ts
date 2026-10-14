@@ -40,6 +40,14 @@ export interface SessionOptions {
 	/** Builds the LINEJS client; tests pass a fake upstream here. */
 	createClient?: CreateClient;
 	log?: Log;
+	/**
+	 * Cancels startup: the session refuses further upstream dispatch, closes
+	 * the archive, releases the lock and rejects with `shutting_down`, without
+	 * waiting for a pending upstream call.
+	 */
+	signal?: AbortSignal;
+	/** Called once on a stop request over the lock port (`requestStop`); only the daemon passes it. */
+	onStopRequest?: () => void;
 }
 
 export interface Session {
@@ -63,9 +71,12 @@ export interface Session {
  */
 export async function openSession(options: SessionOptions = {}): Promise<Session> {
 	const log = options.log ?? stderrLog;
-	const lock = await acquireLock(options.lockPort);
+	const { signal } = options;
+	const lock = await acquireLock(options.lockPort, options.onStopRequest);
 	let db: DatabaseSync | undefined;
+	let guards: Control | undefined;
 	try {
+		signal?.throwIfAborted();
 		const live = (db = openDatabase(options.root ?? stateRoot()));
 		const account = readAccount(live);
 		if (!account) {
@@ -74,7 +85,7 @@ export async function openSession(options: SessionOptions = {}): Promise<Session
 		if (account.device !== device) {
 			throw new LineMcpError('device_mismatch', `The bound session is not ${device}`);
 		}
-		const control = new Control(log, () => setAuthState(live, 'needs_login'));
+		const control = (guards = new Control(log, () => setAuthState(live, 'needs_login')));
 		const storage = new SqliteStorage(live, control.storageFailed);
 		const base = (options.createClient ?? createClient)(storage);
 		installGuards(base, control, storage);
@@ -89,11 +100,15 @@ export async function openSession(options: SessionOptions = {}): Promise<Session
 			control.state = 'needs_login';
 		} else {
 			// A recognized auth loss here leaves the session open in `needs_login`
-			// so cached reads keep working; any other failure aborts startup.
-			const profile = await base.talk.getProfile().catch((error: unknown) => {
-				if (control.state === 'needs_login') return undefined;
-				throw error;
-			});
+			// so cached reads keep working; any other failure aborts startup. An
+			// abort does not wait for LINE's answer, which then meets closed guards.
+			const profile = await untilAborted(
+				base.talk.getProfile().catch((error: unknown) => {
+					if (control.state === 'needs_login') return undefined;
+					throw error;
+				}),
+				signal
+			);
 			// An answer without the profile verifies nothing.
 			if (control.state !== 'needs_login') {
 				if (!profile?.mid) {
@@ -105,6 +120,7 @@ export async function openSession(options: SessionOptions = {}): Promise<Session
 				base.profile = profile;
 			}
 		}
+		signal?.throwIfAborted();
 		return {
 			base,
 			db: live,
@@ -120,13 +136,34 @@ export async function openSession(options: SessionOptions = {}): Promise<Session
 			}
 		};
 	} catch (error) {
+		// The same order as `close`.
+		guards?.close();
 		db?.close();
 		await lock.release();
+		if (signal?.aborted) {
+			throw new LineMcpError('shutting_down', 'Startup was stopped before the session opened', {
+				cause: error
+			});
+		}
 		throw error;
 	}
 }
 
-export interface LoginOptions extends SessionOptions {
+/**
+ * Settles as `promise` does, or rejects as soon as `signal` aborts. `promise`
+ * stays handled either way, so a late rejection is not unhandled.
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return promise;
+	return new Promise<T>((resolve, reject) => {
+		const abort = () => reject(signal.reason);
+		signal.addEventListener('abort', abort, { once: true });
+		void promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+		if (signal.aborted) abort();
+	});
+}
+
+export interface LoginOptions extends Omit<SessionOptions, 'signal' | 'onStopRequest'> {
 	onQrUrl: (url: string) => void;
 	onPin: (pin: string) => void;
 }
@@ -237,6 +274,9 @@ class Control {
 	}
 
 	readonly storageFailed = (): void => {
+		// A write that an answer after close attempts fails on the closed
+		// archive; that is no storage failure.
+		if (this.#closed) return;
 		this.#enter('storage_error');
 	};
 
@@ -263,7 +303,8 @@ class Control {
 	}
 
 	needsLogin(): void {
-		if (this.state !== 'online') return;
+		// An answer that arrives after close finds the archive closed.
+		if (this.#closed || this.state !== 'online') return;
 		try {
 			this.#persistNeedsLogin();
 		} catch {

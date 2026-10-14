@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { healthKey, writeState } from '../src/archive.ts';
 import { openDatabase, setAuthState } from '../src/db.ts';
+import { lockInUse, requestStop } from '../src/lock.ts';
 import { selectNode } from '../src/service/node.ts';
 import { databasePath } from '../src/paths.ts';
 import { freePort, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
@@ -349,13 +350,7 @@ describe('commands', { timeout: 15_000 }, () => {
 	it('serves a cache-only archive over MCP and stops on SIGTERM', async () => {
 		const home = tempRoot();
 		const state = join(home, 'state');
-		seedLive(state, selfMid, { authToken: 'token' });
-		// LINE ended the session before: the daemon starts without calling LINE,
-		// and the unchanged health raises no macOS notification.
-		const db = openDatabase(state);
-		setAuthState(db, 'needs_login');
-		writeState(db, healthKey, { state: 'needs_login', since: Date.now() });
-		db.close();
+		cacheOnly(state);
 		const port = await freePort();
 		const daemon = spawn(process.execPath, [cliEntry, 'daemon'], {
 			env: {
@@ -383,7 +378,60 @@ describe('commands', { timeout: 15_000 }, () => {
 		});
 		expect(await within(5000, exited, 'the daemon to exit')).toBe(0);
 	}, 20_000);
+
+	// No signal reaches a daemon run as a Windows scheduled task; this request does.
+	it('stops on a stop request over the lock port and frees it', async () => {
+		const home = tempRoot();
+		const state = join(home, 'state');
+		cacheOnly(state);
+		const lockPort = await freePort();
+		const daemon = spawn(process.execPath, [cliEntry, 'daemon'], {
+			env: {
+				...process.env,
+				HOME: home,
+				LINE_MCP_HOME: state,
+				LINE_MCP_LOCK_PORT: String(lockPort),
+				LINE_MCP_PORT: String(await freePort())
+			},
+			stdio: ['ignore', 'ignore', 'pipe']
+		});
+		let stderr = '';
+		daemon.stderr.setEncoding('utf-8').on('data', (chunk: string) => (stderr += chunk));
+		const exited = new Promise<number | null>((resolve) => daemon.once('exit', resolve));
+		try {
+			await within(
+				10_000,
+				(async () => {
+					while (!stderr.includes('"daemon_started"')) {
+						await new Promise((resolve) => setTimeout(resolve, 50));
+					}
+				})(),
+				'the daemon to start'
+			);
+
+			await expect(requestStop(lockPort, { deadlineMs: 5000 })).resolves.toBe('stopped');
+		} catch (error) {
+			daemon.kill('SIGKILL');
+			throw error;
+		}
+
+		expect(await within(5000, exited, 'the daemon to exit')).toBe(0);
+		expect(stderr).toContain('"event":"daemon_stopped"');
+		expect(await lockInUse(lockPort)).toBe(false);
+	}, 20_000);
 });
+
+/**
+ * A state root whose session LINE ended before, so the daemon starts without
+ * calling LINE and, with the health unchanged, raises no notification.
+ */
+function cacheOnly(state: string): void {
+	seedLive(state, selfMid, { authToken: 'token' });
+	const db = openDatabase(state);
+	setAuthState(db, 'needs_login');
+	writeState(db, healthKey, { state: 'needs_login', since: Date.now() });
+	db.close();
+}
 
 /** `status` from the daemon on `port` once it listens; gives up after 10 s. */
 async function serving(port: number): Promise<ToolCall> {

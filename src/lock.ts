@@ -1,4 +1,6 @@
-import { connect, createServer } from 'node:net';
+import { Buffer } from 'node:buffer';
+import { connect, createServer, type Socket } from 'node:net';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { LineMcpError } from './errors.ts';
 
 /** Fixed loopback port whose exclusive bind marks the owner of the LINE session. */
@@ -32,15 +34,62 @@ export interface OwnershipLock {
 	release(): Promise<void>;
 }
 
+/** The one request the lock listener understands, sent as the first line of a connection. */
+const stopLine = Buffer.from('line-mcp stop\n');
+/** Bytes read from a connection before it is refused; the stop line needs fewer. */
+const maxRequestBytes = 64;
+/** Time from accept within which a connection must send the stop line. */
+const requestDeadlineMs = 1000;
+
 /**
  * Takes ownership by binding `127.0.0.1:<port>`. The kernel releases the port
  * when the process dies, so there is no lock file and no stale-lock case. Any
  * bind failure fails closed: no fallback port, no guess about the occupant.
+ *
+ * With `onStop`, a connection whose first line is exactly `line-mcp stop` calls
+ * it once (`requestStop`). There is no token: anyone who can connect here can
+ * also reach the unauthenticated MCP port, which already sends messages, and a
+ * browser cannot make a connection start with that line. Without `onStop`
+ * (login, probe) nothing is read and the request is ignored.
  */
-export async function acquireLock(port: number = lockPort()): Promise<OwnershipLock> {
-	// Nothing is ever exchanged: an accepted connection is destroyed at once,
-	// so stray clients cannot hold the listener open during release.
-	const server = createServer({ pauseOnConnect: true }, (socket) => socket.destroy());
+export async function acquireLock(
+	port: number = lockPort(),
+	onStop?: () => void
+): Promise<OwnershipLock> {
+	const sockets = new Set<Socket>();
+	let stopRequested = false;
+	const server = createServer({ pauseOnConnect: true }, (socket) => {
+		// Nothing else is ever exchanged: any other connection is destroyed at
+		// once, or at its deadline, and release destroys the rest.
+		if (!onStop) {
+			socket.destroy();
+			return;
+		}
+		sockets.add(socket);
+		const deadline = setTimeout(() => socket.destroy(), requestDeadlineMs);
+		socket.once('close', () => {
+			clearTimeout(deadline);
+			sockets.delete(socket);
+		});
+		socket.on('error', () => {});
+		let received = Buffer.alloc(0);
+		const read = (chunk: Buffer) => {
+			received = Buffer.concat([received, chunk]).subarray(0, maxRequestBytes);
+			if (!received.includes('\n') && received.length < maxRequestBytes) return;
+			socket.off('data', read);
+			// Exactly the line from byte zero: no prefix, no suffix, nothing after it.
+			if (!received.equals(stopLine)) {
+				socket.destroy();
+				return;
+			}
+			socket.end();
+			if (stopRequested) return;
+			stopRequested = true;
+			onStop();
+		};
+		socket.on('data', read);
+		socket.resume();
+	});
 	try {
 		await new Promise<void>((resolve, reject) => {
 			server.once('error', reject);
@@ -66,6 +115,50 @@ export async function acquireLock(port: number = lockPort()): Promise<OwnershipL
 		release: () =>
 			(closed ??= new Promise<void>((resolve, reject) => {
 				server.close((error) => (error ? reject(error) : resolve()));
+				// A connection still open would hold the close until its deadline.
+				for (const socket of sockets) socket.destroy();
 			}))
 	};
+}
+
+/**
+ * Asks the process holding the lock port to stop and waits until the port is
+ * free. Resolves `not_running` when nothing listened. Fails with `stop_timeout`
+ * when the port is still held at the deadline, for example by a login, which
+ * ignores the request. It never kills anything.
+ */
+export async function requestStop(
+	port: number,
+	{ deadlineMs }: { deadlineMs: number }
+): Promise<'stopped' | 'not_running'> {
+	const deadline = Date.now() + deadlineMs;
+	const timedOut = () =>
+		new LineMcpError('stop_timeout', `The owner of lock port ${port} did not stop in time`);
+	const connected = await new Promise<boolean | 'timeout'>((resolve) => {
+		const socket = connect({ host: '127.0.0.1', port });
+		let sent = false;
+		// The owner ends the connection once it read the line; a listener that
+		// never does is cut off at the deadline.
+		const timer = setTimeout(() => {
+			socket.destroy();
+			resolve(sent || 'timeout');
+		}, deadlineMs);
+		socket.once('connect', () => {
+			sent = true;
+			socket.end(stopLine);
+		});
+		socket.on('error', () => {});
+		socket.once('close', () => {
+			clearTimeout(timer);
+			resolve(sent);
+		});
+	});
+	if (connected === 'timeout') throw timedOut();
+	if (!connected) return 'not_running';
+	for (;;) {
+		if (!(await lockInUse(port))) return 'stopped';
+		const left = deadline - Date.now();
+		if (left <= 0) throw timedOut();
+		await sleep(Math.min(left, 50));
+	}
 }
