@@ -5,6 +5,7 @@ import type { BaseStorage } from '@evex/linejs/storage';
 import {
 	type Account,
 	bindAccount,
+	keepTempInMemory,
 	migrate,
 	openDatabase,
 	readAccount,
@@ -14,6 +15,7 @@ import {
 import { type ErrorCode, isHttpStatus, LineMcpError, mapError } from './errors.ts';
 import { acquireLock } from './lock.ts';
 import { stateRoot } from './paths.ts';
+import { type StatePrivacy, statePrivacy } from './privacy.ts';
 import { type KvRow, SqliteStorage, type Value } from './storage.ts';
 
 export const device = 'ANDROIDSECONDARY';
@@ -48,6 +50,8 @@ export interface SessionOptions {
 	signal?: AbortSignal;
 	/** Called once on a stop request over the lock port (`requestStop`); only the daemon passes it. */
 	onStopRequest?: () => void;
+	/** Checks the state root before the database opens; this platform's by default. */
+	privacy?: StatePrivacy;
 }
 
 export interface Session {
@@ -77,7 +81,10 @@ export async function openSession(options: SessionOptions = {}): Promise<Session
 	let guards: Control | undefined;
 	try {
 		signal?.throwIfAborted();
-		const live = (db = openDatabase(options.root ?? stateRoot()));
+		const root = options.root ?? stateRoot();
+		await (options.privacy ?? statePrivacy()).database(root, { create: true });
+		signal?.throwIfAborted();
+		const live = (db = openDatabase(root));
 		const account = readAccount(live);
 		if (!account) {
 			throw new LineMcpError('not_logged_in', 'No LINE account is bound; run line-mcp login');
@@ -202,8 +209,11 @@ export async function login(options: LoginOptions): Promise<LoginResult> {
 	signal?.addEventListener('abort', refuse);
 	try {
 		signal?.throwIfAborted();
-		const liveDb = (live = openDatabase(options.root ?? stateRoot()));
-		const stagingDb = (staging = new DatabaseSync(':memory:'));
+		const root = options.root ?? stateRoot();
+		await (options.privacy ?? statePrivacy()).database(root, { create: true });
+		signal?.throwIfAborted();
+		const liveDb = (live = openDatabase(root));
+		const stagingDb = (staging = keepTempInMemory(new DatabaseSync(':memory:')));
 		migrate(stagingDb);
 		copyRows(liveDb, stagingDb, 'replace');
 

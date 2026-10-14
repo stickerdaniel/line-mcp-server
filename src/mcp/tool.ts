@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { ArchiveStatus } from '../archive.ts';
 import { LineMcpError, MappedFailure, mapError } from '../errors.ts';
 import type { Outbox } from '../outbox.ts';
+import type { StatePrivacy } from '../privacy.ts';
 import { freshness, maxLimit } from '../queries.ts';
 import type { Log } from '../session.ts';
 import type { Pool } from '../sync/loop.ts';
@@ -17,8 +18,10 @@ export interface ToolContext {
 	selfMid: string;
 	/** The bounded pool history and media share (architecture, Upstream concurrency). */
 	pool: Pool;
-	/** Private directory (0700) that downloaded attachments go to. */
+	/** Private directory that downloaded attachments go to. */
 	attachments: string;
+	/** Keeps `attachments` and every file returned from it private. */
+	privacy: StatePrivacy;
 	/** Largest attachment download in bytes; 100 MiB by default. */
 	maxAttachmentBytes?: number;
 	/** Current health; cached reads report it in every result. */

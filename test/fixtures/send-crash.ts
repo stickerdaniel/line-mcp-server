@@ -3,9 +3,10 @@
 // stalls; with `after`, LINE's sendMessage stalls once it was dispatched. Each
 // prints a line when it stalls, and stays there until the parent kills it.
 import { Buffer } from 'node:buffer';
-import { join } from 'node:path';
 import { archiveStatus } from '../../src/archive.ts';
 import { startMcpServer } from '../../src/mcp/server.ts';
+import { attachmentsDir } from '../../src/paths.ts';
+import { statePrivacy } from '../../src/privacy.ts';
 import { openSession } from '../../src/session.ts';
 import { Pool } from '../../src/sync/loop.ts';
 import { fakeUpstream, otherMid, selfMid } from '../fake-line.ts';
@@ -36,7 +37,8 @@ const server = await startMcpServer(
 		base: session.base,
 		selfMid,
 		pool: new Pool(2),
-		attachments: join(root, 'attachments'),
+		attachments: attachmentsDir(root),
+		privacy: statePrivacy(),
 		status: () => archiveStatus(session.db),
 		log: () => {}
 	},

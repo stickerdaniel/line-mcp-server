@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { basename, dirname, join } from 'node:path';
@@ -12,6 +13,7 @@ import { archiveStatus, upsertChat, upsertParticipant } from '../src/archive.ts'
 import { transaction } from '../src/db.ts';
 import { getAttachment, writeAll } from '../src/mcp/tools/upstream.ts';
 import { Outbox } from '../src/outbox.ts';
+import { statePrivacy } from '../src/privacy.ts';
 import { type ChatPage, sizeCap } from '../src/queries.ts';
 import type { SqliteStorage } from '../src/storage.ts';
 import { Pool } from '../src/sync/loop.ts';
@@ -84,6 +86,21 @@ function squareRow(id: string, minute: number, threadId: string | null): Message
 }
 
 /** An image message whose retained envelope names its file. */
+/** `get_attachment` with download for a message in the chat with `otherMid`. */
+function downloadMedia(port: number, id: string) {
+	return callTool(port, 'get_attachment', {
+		service: 'talk',
+		chat_id: otherMid,
+		message_id: id,
+		download: true
+	});
+}
+
+/** Adds an allow entry with icacls (Windows), as `*<SID>:<rights>`. */
+function grant(path: string, entry: string): void {
+	execFileSync('icacls', [path, '/grant', entry], { stdio: 'ignore' });
+}
+
 function media(id: string): MessageRow {
 	return row(id, base, '', {
 		text: null,
@@ -1404,6 +1421,33 @@ describe('upstream tools', () => {
 		expect(statSync(join(root, 'attachments')).mode & 0o777).toBe(0o700);
 	});
 
+	it.runIf(process.platform === 'win32')(
+		'returns no attachment from a cache or file that is not private',
+		async () => {
+			const fetched: string[] = [];
+			const fetch = async (request: Request) => {
+				fetched.push(new URL(request.url).pathname);
+				return new Response(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+			};
+			const first = await serve({}, fetch);
+			store(first.session.db, media('41'), media('42'));
+			const refused = { isError: true, data: { error: { code: 'insecure_directory' } } };
+
+			const saved = await downloadMedia(first.server.port, '41');
+			grant(saved.data.path as string, '*S-1-1-0:(R)');
+			const cached = await downloadMedia(first.server.port, '41');
+			grant(join(first.root, 'attachments'), '*S-1-1-0:(OI)(CI)(R)');
+			// Another process checks the cache directory before it reads or writes there.
+			const second = await serve({}, fetch, { root: first.root });
+			const fresh = await downloadMedia(second.server.port, '42');
+
+			expect(saved.data).toMatchObject({ cached: false });
+			expect(cached).toMatchObject(refused);
+			expect(fresh).toMatchObject(refused);
+			expect(fetched).toEqual(['/r/talk/m/41']);
+		}
+	);
+
 	it('names cached media without a file name by its leading bytes', async () => {
 		const files: Record<string, Uint8Array> = {
 			'61': Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46]),
@@ -1716,6 +1760,7 @@ describe('upstream tools', () => {
 			selfMid,
 			pool,
 			attachments: join(root, 'attachments'),
+			privacy: statePrivacy(),
 			status: () => archiveStatus(session.db),
 			log: () => {},
 			outbox: new Outbox(session.db, { log: () => {} })

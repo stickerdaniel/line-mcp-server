@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import {
 	cpSync,
 	existsSync,
@@ -19,7 +19,7 @@ import { openDatabase, setAuthState } from '../src/db.ts';
 import { lockInUse, requestStop } from '../src/lock.ts';
 import { selectNode } from '../src/service/node.ts';
 import { databasePath } from '../src/paths.ts';
-import { freePort, nodeAt, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
+import { freePort, nodeAt, seedLive, selfMid, tempRoot, tree, within } from './fake-line.ts';
 import { callTool, cliEntry, type ToolCall } from './mcp-client.ts';
 
 /** The real path of the CLI under test, which `install` writes into the LaunchAgent. */
@@ -43,6 +43,7 @@ function npxCopy(): string {
 
 const windows = process.platform === 'win32';
 const linux = process.platform === 'linux';
+const macos = process.platform === 'darwin';
 
 interface Run {
 	code: number;
@@ -120,9 +121,10 @@ function cliEnv(
 	for (const name of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) delete base[name];
 	return {
 		...base,
-		// os.homedir() reads USERPROFILE on Windows.
+		// os.homedir() reads USERPROFILE on Windows, where the state stays inside it.
 		HOME: home,
 		USERPROFILE: home,
+		LOCALAPPDATA: join(home, 'AppData', 'Local'),
 		LINE_MCP_HOME: join(home, 'state'),
 		LINE_MCP_LOCK_PORT: String(lockPort),
 		LINE_MCP_SERVICE_RUNNER: serviceRunner,
@@ -159,8 +161,9 @@ function unitState(load: string, active: string, fragment = ''): Reply {
 }
 
 /**
- * The CLI's service manager on this OS: systemd on Linux, launchd everywhere
- * else until Windows gets its own backend. Each gives the definition path,
+ * The CLI's service manager on this OS: systemd on Linux, launchd on macOS
+ * (Windows has none yet; only `definitionIn`, a stray plist, is used there).
+ * Each gives the definition path,
  * the text that runs a Node and a CLI, the fixture replies and calls of an
  * install under `home`, and the calls that stop a running service for a login
  * and restore it (launchd's read-only `print` left out), the stop first.
@@ -220,8 +223,7 @@ async function uninstall(exits: Record<string, number>) {
 
 // Each CLI run is a cold Node start that loads the whole server; under load it can pass 5 s.
 describe('install and uninstall', { timeout: 15_000 }, () => {
-	// launchd is the backend on every OS but Linux until Windows gets its own.
-	it.skipIf(linux)(
+	it.runIf(macos)(
 		'prints the LaunchAgent and launchctl commands on a dry run and changes nothing',
 		async () => {
 			const result = await runCli(['install', '--dry-run'], { env: { LINE_MCP_PORT: '47900' } });
@@ -327,19 +329,24 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(readdirSync(install.home)).toEqual([]);
 	});
 
-	it('still shows the service definition on a dry run from the npx cache, with the same advice', async () => {
-		const copy = npxCopy();
+	// Windows has no service definition to show.
+	it.skipIf(windows)(
+		'still shows the service definition on a dry run from the npx cache, with the same advice',
+		async () => {
+			const copy = npxCopy();
 
-		const dryRun = await runCli(['install', '--dry-run'], { script: copy });
+			const dryRun = await runCli(['install', '--dry-run'], { script: copy });
 
-		expect(dryRun.code).toBe(0);
-		expect(dryRun.stderr).toContain('npm i -g line-mcp-server');
-		expect(dryRun.stdout).toContain(host.runs(realpathSync(copy)));
-		expect(dryRun.launched).toBe(false);
-	});
+			expect(dryRun.code).toBe(0);
+			expect(dryRun.stderr).toContain('npm i -g line-mcp-server');
+			expect(dryRun.stdout).toContain(host.runs(realpathSync(copy)));
+			expect(dryRun.launched).toBe(false);
+		}
+	);
 
 	// One CLI process per case: two in one test can outlast the default timeout on a loaded machine.
-	it.each(['--node', 'LINE_MCP_NODE'])(
+	// Windows has no service definition to write it into.
+	it.skipIf(windows).each(['--node', 'LINE_MCP_NODE'])(
 		'writes a validated Node override from %s into the service definition',
 		async (source) => {
 			const node = nodeAt(join(tempRoot(), 'bin'));
@@ -397,7 +404,8 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		}
 	);
 
-	it.each([
+	// Windows: see 'Windows without a service backend'.
+	it.skipIf(windows).each([
 		[[], 'kept the archive in'],
 		[['--purge'], 'would delete']
 	])('changes nothing on an uninstall dry run with %j', async (flags, line) => {
@@ -438,7 +446,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		]);
 	});
 
-	it.skipIf(linux)('runs doctor offline and reports the missing LaunchAgent', async () => {
+	it.runIf(macos)('runs doctor offline and reports the missing LaunchAgent', async () => {
 		const home = tempRoot();
 		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
 
@@ -454,7 +462,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(result.calls).toEqual([['launchctl', 'print', agent]]);
 	});
 
-	it.skipIf(linux).each([
+	it.runIf(macos).each([
 		[0, 'ok   launch_agent_loaded: io.github.stickerdaniel.line-mcp is loaded'],
 		[113, 'FAIL launch_agent_loaded: io.github.stickerdaniel.line-mcp is not loaded'],
 		[5, 'FAIL launch_agent_loaded: launchctl print failed (5)']
@@ -470,7 +478,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		}
 	);
 
-	it.skipIf(linux).each([3, 113])(
+	it.runIf(macos).each([3, 113])(
 		'treats a not-loaded agent as booted out (bootout exits %i)',
 		async (bootout) => {
 			const result = await uninstall({ bootout });
@@ -480,7 +488,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		}
 	);
 
-	it.skipIf(linux)('surfaces other launchctl errors on uninstall and keeps the plist', async () => {
+	it.runIf(macos)('surfaces other launchctl errors on uninstall and keeps the plist', async () => {
 		const failed = await uninstall({ bootout: 5, print: 5 });
 
 		expect(failed.code).toBe(1);
@@ -526,41 +534,111 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 
 		expect(result.code).toBe(1);
 		expect(result.stderr).toContain('"code":"lock_held"');
+		// Windows has no service, so a stray plist hands nothing over.
 		expect(result.calls.filter(([, command]) => command !== 'print')).toEqual(
-			installed ? host.handoff(home) : []
+			installed && !windows ? host.handoff(home) : []
 		);
 	});
 
-	it('fails with service_restore_failed when the service does not come back', async () => {
-		const home = tempRoot();
-		mkdirSync(dirname(host.definitionIn(home)), { recursive: true });
-		writeFileSync(host.definitionIn(home), '');
-		const holder = createServer();
-		const port = await freePort();
-		await new Promise<void>((resolve) => holder.listen(port, '127.0.0.1', resolve));
-		let result: Awaited<ReturnType<typeof runCli>>;
-		try {
-			result = await runCli(['login'], {
-				home,
-				env: { LINE_MCP_LOCK_PORT: String(port) },
-				// systemd: active before the stop, still inactive after the failed start.
-				replies: {
-					show: [unitState('loaded', 'active', unitIn(home)), unitState('loaded', 'inactive')],
-					start: { exit: 1 },
-					bootstrap: { exit: 5 }
-				}
-			});
-		} finally {
-			holder.close();
+	// Windows has no service to restore.
+	it.skipIf(windows)(
+		'fails with service_restore_failed when the service does not come back',
+		async () => {
+			const home = tempRoot();
+			mkdirSync(dirname(host.definitionIn(home)), { recursive: true });
+			writeFileSync(host.definitionIn(home), '');
+			const holder = createServer();
+			const port = await freePort();
+			await new Promise<void>((resolve) => holder.listen(port, '127.0.0.1', resolve));
+			let result: Awaited<ReturnType<typeof runCli>>;
+			try {
+				result = await runCli(['login'], {
+					home,
+					env: { LINE_MCP_LOCK_PORT: String(port) },
+					// systemd: active before the stop, still inactive after the failed start.
+					replies: {
+						show: [unitState('loaded', 'active', unitIn(home)), unitState('loaded', 'inactive')],
+						start: { exit: 1 },
+						bootstrap: { exit: 5 }
+					}
+				});
+			} finally {
+				holder.close();
+			}
+
+			expect(result.code).toBe(1);
+			const error = JSON.parse(result.stderr.trim().split('\n').at(-1)!) as Record<string, string>;
+			expect(error.code).toBe('service_restore_failed');
+			expect(error.message).toContain('Run line-mcp install');
+			expect(error.message).toContain(
+				'The login failed too: Another process holds the line-mcp lock port'
+			);
 		}
+	);
+});
+
+/** The JSON error line a failed command ends its stderr with. */
+const failure = (stderr: string) =>
+	JSON.parse(stderr.trim().split('\n').at(-1)!) as Record<string, string>;
+
+describe.runIf(windows)('Windows without a service backend', { timeout: 15_000 }, () => {
+	it.each([
+		[['install']],
+		[['install', '--dry-run']],
+		[['uninstall', '--purge']],
+		[['uninstall', '--dry-run', '--purge']]
+	])('refuses %j before it changes anything, beside a stray plist', async (args) => {
+		const home = tempRoot();
+		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
+		mkdirSync(dirname(plistIn(home)), { recursive: true });
+		writeFileSync(plistIn(home), 'stray');
+		const before = tree(home);
+
+		const result = await runCli(args, { home });
 
 		expect(result.code).toBe(1);
-		const error = JSON.parse(result.stderr.trim().split('\n').at(-1)!) as Record<string, string>;
-		expect(error.code).toBe('service_restore_failed');
-		expect(error.message).toContain('Run line-mcp install');
-		expect(error.message).toContain(
-			'The login failed too: Another process holds the line-mcp lock port'
+		expect(failure(result.stderr)).toMatchObject({ code: 'service_unsupported' });
+		expect(result.stdout).toBe('');
+		expect(result.calls).toEqual([]);
+		expect(tree(home)).toEqual(before);
+	});
+
+	it('runs doctor on the checked state without a service manager call', async () => {
+		const home = tempRoot();
+		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
+
+		const result = await runCli(['doctor'], { home });
+
+		expect(result.stdout).toContain(`ok   privacy: ${join(home, 'state')}, its parents`);
+		expect(result.stdout).toContain(`ok   account: ${selfMid} on ANDROIDSECONDARY, active`);
+		expect(result.stdout).toContain(
+			'warn service: line-mcp has no background service on Windows yet'
 		);
+		expect(result.calls).toEqual([]);
+	});
+
+	it('refuses status and doctor on a state root that grants everyone access', async () => {
+		const home = tempRoot();
+		const state = join(home, 'state');
+		seedLive(state, selfMid, { authToken: 'token' });
+		execFileSync('icacls', [state, '/grant', '*S-1-1-0:(OI)(CI)(R)']);
+		const exposure = `${state} is not private: it grants WD access: (A;OICI;FR;;;WD)`;
+
+		const status = await runCli(['status'], { home });
+		const doctor = await runCli(['doctor'], { home });
+
+		expect(status.code).toBe(1);
+		expect(failure(status.stderr)).toMatchObject({
+			code: 'insecure_directory',
+			message: expect.stringContaining(exposure)
+		});
+		expect(status.stdout).toBe('');
+		expect(doctor.code).toBe(1);
+		expect(doctor.stdout).toContain(
+			`FAIL privacy: ${exposure}. Fix: icacls "${state}" /remove:g *S-1-1-0\n`
+		);
+		// The archive is not read until it is private.
+		expect(doctor.stdout).not.toContain('account:');
 	});
 });
 
