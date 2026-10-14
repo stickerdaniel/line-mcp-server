@@ -412,11 +412,14 @@ describe('read_messages', () => {
 		// tombstones without one, so pages split inside ties.
 		const { server, session } = await serve();
 		const all: string[] = [];
+		const rows: MessageRow[] = [];
 		for (let index = 0; index < 450; index++) {
 			const id = String(700000000000000000n + BigInt(index));
 			all.push(id);
-			store(session.db, row(id, base + Math.floor(index / 3) * 1000, `訊息 ${index}`));
+			rows.push(row(id, base + Math.floor(index / 3) * 1000, `訊息 ${index}`));
 		}
+		// One commit: each one costs about 10 ms of fsync on Windows CI.
+		store(session.db, ...rows);
 		for (const id of ['690000000000000001', '690000000000000002']) {
 			apply(session.db, { kind: 'unsend', service: 'talk', chatId: otherMid, messageId: id });
 			all.push(id);

@@ -57,7 +57,14 @@ jobs:
       - name: Type check
         run: bun run check
 
+      # Tests put their state roots in the temp directory. On the Windows
+      # runner TEMP is on C:, where a SQLite commit's fsync takes 5-10 ms;
+      # on runner.temp (D:) it takes about 1 ms.
       - name: Test
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: bun run test
 
   # The npm package as users install it, on macOS like the LaunchAgent it installs.
