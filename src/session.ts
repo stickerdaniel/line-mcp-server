@@ -25,7 +25,7 @@ export type LogEntry = Record<string, string | number | boolean>;
 export type Log = (entry: LogEntry) => void;
 export type CreateClient = (storage: BaseStorage) => BaseClient;
 
-/** One JSON line per entry, led by the time it was written; launchd adds none. */
+/** One JSON line per entry, led by the time it was written; neither service log adds one. */
 export const stderrLog: Log = (entry) => {
 	process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), ...entry })}\n`);
 };

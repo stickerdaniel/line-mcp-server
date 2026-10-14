@@ -2,6 +2,7 @@
 import { once } from 'node:events';
 import { existsSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -14,8 +15,8 @@ import { LineMcpError, mapError } from './errors.ts';
 import { acquireLock, lockInUse } from './lock.ts';
 import { databasePath, stateRoot } from './paths.ts';
 import { probe } from './probe.ts';
-import { serviceFor } from './service/index.ts';
-import { isCellarPath, selectNode } from './service/node.ts';
+import { serviceFor, withServiceStopped } from './service/index.ts';
+import { selectNode, versionedLayout } from './service/node.ts';
 import { toolRunner } from './service/runner.ts';
 import { type Log, login, openSession, stderrLog } from './session.ts';
 import { runToolCommand, toolCommands, toolUsage } from './tool-cli.ts';
@@ -25,9 +26,9 @@ const usage = `Usage: line-mcp <command>
   login      Log in by QR code as a secondary Android device
   status     Show the bound account, session and sync state
   probe      Read-only live checks [--dm <mid>] [--group <mid>] [--square <mid>]
-  daemon     Run the sync daemon (started by the LaunchAgent)
-  install    Install and start the LaunchAgent [--dry-run] [--node <path>]
-  uninstall  Stop and remove the LaunchAgent; keeps the archive [--dry-run] [--purge]
+  daemon     Run the sync daemon (started by the background service)
+  install    Install and start the background service [--dry-run] [--node <path>]
+  uninstall  Stop and remove the background service; keeps the archive [--dry-run] [--purge]
   doctor     Check the local setup without contacting LINE
 
 Tool commands call the running daemon; line-mcp <command> --help lists the flags:
@@ -37,7 +38,7 @@ ${toolUsage()}`;
 /**
  * The real path of this file: `src/cli.ts` in a clone, `dist/cli.js` in the
  * npm package. Node resolves the global bin symlink for the entry module, so
- * the LaunchAgent and `doctor` name the file itself.
+ * the service definition and `doctor` name the file itself.
  */
 const cliPath = fileURLToPath(import.meta.url);
 
@@ -77,13 +78,10 @@ async function main(command: string | undefined, args: string[]): Promise<number
 
 /**
  * The daemon holds the lock port, so an installed service is stopped first
- * and started again once `login` has released the lock.
+ * and returned to its prior state once `login` has released the lock.
  */
 async function runLogin(): Promise<number> {
-	const agent = service();
-	const installed = agent.installed();
-	if (installed) await agent.stop();
-	try {
+	await withServiceStopped(service(), async () => {
 		const result = await login({
 			onQrUrl: (url) => {
 				console.log('Scan this QR code with LINE on your phone:');
@@ -96,9 +94,7 @@ async function runLogin(): Promise<number> {
 			`Logged in as ${result.mid} (${result.firstLogin ? 'account bound' : 'bound account'}), ` +
 				`${result.addedKeyGenerations} new E2EE key generation(s) stored`
 		);
-	} finally {
-		if (installed) await agent.start();
-	}
+	});
 	return 0;
 }
 
@@ -170,7 +166,7 @@ async function runProbe(args: string[]): Promise<number> {
 }
 
 /**
- * Runs until SIGTERM (launchd bootout), SIGINT or, when the Windows scheduled
+ * Runs until SIGTERM (launchd bootout, systemctl stop), SIGINT or, when the Windows scheduled
  * task started it, a stop request over the lock port (`requestStop`); the lock
  * listener keeps the process alive. Each of them also cancels a startup still
  * in progress.
@@ -205,8 +201,16 @@ async function runInstall(args: string[]): Promise<number> {
 		options: { 'dry-run': { type: 'boolean' }, node: { type: 'string' } }
 	});
 	const dryRun = values['dry-run'] === true;
-	// npm may clear its npx cache at any time, and the LaunchAgent's CLI with it.
-	if (cliPath.includes('/_npx/')) {
+	// The service starts in another directory, where a relative root names another archive.
+	const home = process.env.LINE_MCP_HOME;
+	if (home && !isAbsolute(home)) {
+		throw new LineMcpError(
+			'invalid_state_root',
+			`LINE_MCP_HOME must be an absolute path, not ${home}`
+		);
+	}
+	// npm may clear its npx cache at any time, and the service's CLI with it.
+	if (/[\\/]_npx[\\/]/i.test(cliPath)) {
 		const reason =
 			'line-mcp runs from the npx cache; run npm i -g line-mcp-server, then line-mcp install';
 		if (!dryRun) throw new LineMcpError('npx_cache', reason);
@@ -214,8 +218,13 @@ async function runInstall(args: string[]): Promise<number> {
 	}
 	const agent = service();
 	const node = selectNode({ override: values.node ?? process.env.LINE_MCP_NODE });
-	if (isCellarPath(node.path)) {
-		console.error(`warning: ${node.path} is a versioned Cellar path; brew upgrade removes it`);
+	for (const path of [node.path, cliPath]) {
+		const layout = versionedLayout(path);
+		if (layout) {
+			console.error(
+				`warning: ${path} is in a versioned ${layout} directory; the service fails once that version is gone`
+			);
+		}
 	}
 	const definition = agent.render({ node: node.path, cli: cliPath, env: process.env });
 	await agent.install(definition, { dryRun });
@@ -276,7 +285,7 @@ try {
 	code = await main(command, args);
 } catch (error) {
 	const mapped = mapError(error, command ?? 'cli');
-	// The daemon's stderr is its launchd log, where every line carries its time.
+	// The daemon's stderr is its service log, where every line carries its time.
 	if (command === 'daemon') stderrLog({ event: 'daemon_failed', ...mapped });
 	else console.error(JSON.stringify(mapped));
 	code = 1;

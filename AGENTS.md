@@ -2,7 +2,7 @@
 
 > `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md`.
 
-`line-mcp` mirrors one personal LINE account into local SQLite and serves it to coding agents as an MCP server. A Node 24 daemon, run by launchd, owns the only LINE session. Architecture and invariants: [`docs/architecture.md`](docs/architecture.md). Read it before changing session, sync, storage or tool code.
+`line-mcp` mirrors one personal LINE account into local SQLite and serves it to coding agents as an MCP server. A Node 24 daemon, run by launchd on macOS and by a systemd user unit on Linux, owns the only LINE session. Architecture and invariants: [`docs/architecture.md`](docs/architecture.md). Read it before changing session, sync, storage or tool code.
 
 ## Stack
 
@@ -10,7 +10,7 @@ Node 24 runs the TypeScript sources directly (type stripping) in development and
 
 ## Invariants
 
-- Tests never contact LINE. Each test gets its own temporary state root; the real state under `~/Library/Application Support/line-mcp` stays untouched.
+- Tests never contact LINE. Each test gets its own temporary state root; the real state under `~/Library/Application Support/line-mcp` or `~/.local/share/line-mcp` stays untouched.
 - Live checks run only when the user asks for them, and only in the connected account's own chat, unless the user names another recipient and action.
 - Reads never mutate LINE state: no read receipts and no E2EE key registration.
 - Integer LINE IDs and revisions stay decimal strings end to end; MIDs and tokens stay opaque strings.

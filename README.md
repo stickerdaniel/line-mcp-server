@@ -2,7 +2,7 @@
 
 Local MCP server that mirrors a personal LINE account into SQLite, so coding agents (Claude Code, Codex, T3 Code) can read, search and answer messages.
 
-A Node 24 daemon, started by launchd, logs in to LINE as a secondary Android device, keeps a local copy of every chat, and serves MCP tools on `127.0.0.1`. The `line-mcp` CLI runs the same tools from a shell, and an agent skill teaches agents to use it.
+A Node 24 daemon, started by launchd or systemd, logs in to LINE as a secondary Android device, keeps a local copy of every chat, and serves MCP tools on `127.0.0.1`. The `line-mcp` CLI runs the same tools from a shell, and an agent skill teaches agents to use it.
 
 Status: in development. See [`docs/architecture.md`](docs/architecture.md) for the architecture.
 
@@ -11,7 +11,7 @@ Status: in development. See [`docs/architecture.md`](docs/architecture.md) for t
 
 ## Requirements
 
-- macOS. The daemon runs as a per-user LaunchAgent.
+- macOS, where the daemon runs as a per-user LaunchAgent, or Linux with systemd (see [Linux](#linux))
 - [Node](https://nodejs.org) 24.18 or later
 - The LINE app on your phone, logged in to the account
 
@@ -24,11 +24,13 @@ line-mcp install
 line-mcp doctor
 ```
 
-`login` shows a QR code. Scan it with LINE on your phone and enter the PIN it prints. line-mcp joins the account as a secondary device; the phone stays the primary one. `install` writes the LaunchAgent and starts the daemon, which syncs from then on and starts again after a reboot. `doctor` checks the setup without contacting LINE.
+`login` shows a QR code. Scan it with LINE on your phone and enter the PIN it prints. line-mcp joins the account as a secondary device; the phone stays the primary one. `install` writes the background service and starts the daemon, which syncs from then on and starts again after a reboot. `doctor` checks the setup without contacting LINE.
 
-If LINE ends the session, the daemon keeps serving the local archive, shows a macOS notification, and waits for another `login`.
+If LINE ends the session, the daemon keeps serving the local archive, shows a desktop notification, and waits for another `login`.
 
 ## State
+
+On macOS; [Linux](#linux) keeps it in the XDG directories.
 
 | What        | Where                                                           |
 | ----------- | --------------------------------------------------------------- |
@@ -37,7 +39,7 @@ If LINE ends the session, the daemon keeps serving the local archive, shows a ma
 | Logs        | `~/Library/Logs/line-mcp/daemon.log`, without message content   |
 | LaunchAgent | `~/Library/LaunchAgents/io.github.stickerdaniel.line-mcp.plist` |
 
-`LINE_MCP_HOME` moves the state directory; set it before `install`, which passes it on to the LaunchAgent.
+`LINE_MCP_HOME` moves the state directory; set it before `install`, which passes it on to the service.
 
 ## Upgrade
 
@@ -46,7 +48,7 @@ npm i -g line-mcp-server@latest
 line-mcp install
 ```
 
-`install` rewrites the LaunchAgent and restarts the daemon. The archive and the session stay.
+`install` rewrites the service and restarts the daemon. The archive and the session stay.
 
 ## Uninstall
 
@@ -58,9 +60,37 @@ npm rm -g line-mcp-server
 
 To revoke the session itself, log the device out in LINE's device list on your phone.
 
+## Linux
+
+Linux needs line-mcp-server 0.3.0 or later.
+
+The daemon runs as the systemd user unit `line-mcp.service`. Install, upgrade and uninstall work as above. Linux also needs:
+
+- systemd 240 or later with a user manager, so `systemctl --user status` answers.
+- Lingering, for the daemon to keep running after you log out: `loginctl enable-linger "$(id -un)"`. line-mcp never turns it on; `doctor` reports it.
+- An npm prefix you own, so `npm i -g` needs no sudo, with its `bin` on `PATH`. With a distribution Node, `npm config set prefix ~/.local` and `~/.local/bin` on `PATH` do that.
+- The state directory on a local disk. SQLite's WAL mode needs shared memory, which network file systems do not provide.
+
+| What        | Where                                                                      |
+| ----------- | -------------------------------------------------------------------------- |
+| Archive     | `~/.local/share/line-mcp/line.db` (`0600`), under `$XDG_DATA_HOME` if set  |
+| Attachments | `~/.local/share/line-mcp/attachments`                                      |
+| Logs        | `~/.local/state/line-mcp/daemon.log`, under `$XDG_STATE_HOME` if set       |
+| Unit        | `~/.config/systemd/user/line-mcp.service`, under `$XDG_CONFIG_HOME` if set |
+
+`install` writes the state directory into the unit, so the daemon opens the same archive whatever environment the user manager has. The unit must go where the user manager looks: with an `XDG_CONFIG_HOME` set only in your shell, `install` fails with `unit_not_found` and removes the unit again. Notifications go through `notify-send` when it is installed.
+
+A Node from nvm, fnm, Volta, asdf or snap lives in a directory that goes away with its version, and the daemon with it; `install` and `doctor` warn about that. Pass `--node` with a Node that stays, such as the distribution's `/usr/bin/node`, or run `line-mcp install` again after switching versions.
+
+Without systemd, for example in a container, run `line-mcp daemon` in the foreground.
+
+### WSL
+
+WSL 2 with systemd enabled works like Linux. Keep the state directory in the Linux file system, not under `/mnt/c`. A systemd service does not keep WSL running, so the daemon stops when WSL shuts down after its last terminal closes.
+
 ## MCP endpoint
 
-The daemon serves Streamable HTTP at `http://127.0.0.1:47822/mcp`, stateless, for as long as it runs. `LINE_MCP_PORT` changes the port (set it before `install`, which passes it on to the LaunchAgent); it must differ from the lock port 47821 (`LINE_MCP_LOCK_PORT`).
+The daemon serves Streamable HTTP at `http://127.0.0.1:47822/mcp`, stateless, for as long as it runs. `LINE_MCP_PORT` changes the port (set it before `install`, which passes it on to the service); it must differ from the lock port 47821 (`LINE_MCP_LOCK_PORT`).
 
 Read tools: `status`, `list_chats`, `list_unread`, `read_messages`, `search_messages`, `list_changes`, `get_attachment`, `get_announcements`, `get_profile`. `list_unread` returns every unread message across chats in one call and marks nothing as read. Every result reports `stale` and the last sync times. Each time is an ISO 8601 string with the offset of the daemon's system time zone, which `status` reports as `time_zone`. Message and chat items leave out fields without a value.
 

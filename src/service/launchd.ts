@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { userInfo } from 'node:os';
 import { posix } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { LineMcpError } from '../errors.ts';
+import { LineMcpError, mapError } from '../errors.ts';
 import { serviceTemplate } from '../paths.ts';
 import type { DryRun, Service, ServiceDeps } from './index.ts';
 
@@ -57,7 +57,10 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 	 * Boots the agent out and waits until launchd has let it go; one that is
 	 * not loaded is already where it should be. `bootout` returns while the
 	 * daemon is still shutting down, and until it is gone a `bootstrap` fails
-	 * (5) and a login finds the lock held.
+	 * (5) and a login finds the lock held. A bootout that failed or timed out
+	 * may still take effect, so launchd's view decides then too: it fails only
+	 * while the agent stays loaded, and with `service_state_unknown` when
+	 * `print` fails.
 	 */
 	async function bootout({ dryRun }: DryRun = {}): Promise<void> {
 		const args = ['bootout', target];
@@ -65,13 +68,34 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 			console.log(`would run: ${runner.describe(launchctl, args)}`);
 			return;
 		}
-		if ((await run(args)) === 'not_loaded') return;
+		let failure: unknown;
+		try {
+			if ((await run(args)) === 'not_loaded') return;
+		} catch (error) {
+			failure = error;
+		}
+		const loaded = () =>
+			run(['print', target]).then(
+				(state) => state === 'done',
+				(error: unknown) => {
+					const after =
+						failure === undefined ? '' : `${mapError(failure, 'service').message}, and `;
+					throw new LineMcpError(
+						'service_state_unknown',
+						`${after}${mapError(error, 'service').message}, so it is unknown whether launchd ` +
+							`still has ${label} loaded. Run line-mcp doctor`,
+						{ cause: error }
+					);
+				}
+			);
 		const deadline = Date.now() + stopTimeoutMs;
-		while ((await run(['print', target])) === 'done') {
+		while (await loaded()) {
 			if (Date.now() >= deadline) {
+				const after = failure === undefined ? 'bootout' : mapError(failure, 'service').message;
 				throw new LineMcpError(
 					'launchctl_failed',
-					`launchd still had ${label} loaded ${stopTimeoutMs / 1000} s after bootout`
+					`launchd still had ${label} loaded ${stopTimeoutMs / 1000} s after ${after}`,
+					{ cause: failure }
 				);
 			}
 			await sleep(100);
@@ -121,9 +145,46 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 			if (dryRun) console.log(`would remove ${paths.definition}`);
 			else rmSync(paths.definition, { force: true });
 		},
-		stop: () => bootout(),
+		async stop() {
+			try {
+				await bootout();
+			} catch (error) {
+				if (!(error instanceof LineMcpError) || error.code !== 'service_state_unknown') throw error;
+				// launchd may have let the agent go without saying so. Loading it
+				// again puts it back; while it is still loaded that fails, and the
+				// state stays unknown.
+				try {
+					await bootstrap();
+				} catch {
+					throw error;
+				}
+				throw new LineMcpError(
+					'launchctl_failed',
+					`launchd could not confirm that ${label} stopped, so line-mcp loaded it again; the service is unchanged`,
+					{ cause: error }
+				);
+			}
+			// Today's handoff: bootstrap again whenever the plist is there.
+			return async () => {
+				if (existsSync(paths.definition)) await bootstrap();
+			};
+		},
 		start: () => bootstrap(),
 		installed: () => existsSync(paths.definition),
-		loaded: async () => (await run(['print', target])) === 'done'
+		async diagnose() {
+			const name = 'launch_agent_loaded';
+			try {
+				const loaded = (await run(['print', target])) === 'done';
+				return [
+					{
+						name,
+						ok: loaded,
+						detail: loaded ? `${label} is loaded` : `${label} is not loaded; run line-mcp install`
+					}
+				];
+			} catch (error) {
+				return [{ name, ok: false, detail: mapError(error, 'doctor').message }];
+			}
+		}
 	};
 }

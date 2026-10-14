@@ -51,6 +51,18 @@ export const notifyMac: Notify = (message) =>
 		);
 	});
 
+/**
+ * A desktop notification through notify-send with fixed text. Without
+ * notify-send, a session bus or a notification server it does nothing; the
+ * log stays the record.
+ */
+export const notifyLinux = (message: string): Promise<void> =>
+	new Promise<void>((resolve) => {
+		execFile('notify-send', ['--app-name=line-mcp', 'line-mcp', message], { timeout: 3000 }, () =>
+			resolve()
+		);
+	});
+
 const notices: Partial<Record<Health, string>> = {
 	needs_login: 'LINE ended the session. Run line-mcp login to scan a new QR code.',
 	storage_error: 'line-mcp cannot write its archive. Sync is stopped.'
@@ -101,11 +113,11 @@ const noop = () => {};
 export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> {
 	const log = options.log ?? stderrLog;
 	const now = options.now ?? Date.now;
-	const notify = options.notify ?? notifyMac;
+	const notify = options.notify ?? (process.platform === 'linux' ? notifyLinux : notifyMac);
 	const controller = new AbortController();
 	// Assigned once the session is open; a state change during startup is read from the session.
 	let update: () => void = noop;
-	// Routine RPC names stay out of the launchd log; errors and state changes do not.
+	// Routine RPC names stay out of the service log; errors and state changes do not.
 	const sessionLog: Log = (entry) => {
 		if (entry.event === 'upstream_call' || entry.event === 'long_poll_ended') return;
 		log(entry);
@@ -135,7 +147,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 	};
 
 	// `current` starts from the persisted state, so a restart in the same state
-	// (launchd KeepAlive) is not a transition and announces nothing.
+	// (launchd KeepAlive, systemd Restart) is not a transition and announces nothing.
 	update = () => {
 		const next = compute();
 		if (session.state() !== 'online') controller.abort();

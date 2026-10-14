@@ -7,7 +7,7 @@ import { mapError } from './errors.ts';
 import { lockInUse } from './lock.ts';
 import { databasePath } from './paths.ts';
 import type { Service } from './service/index.ts';
-import { isCellarPath, nodeVersion, selectNode, supportedNode } from './service/node.ts';
+import { nodeVersion, selectNode, supportedNode, versionedLayout } from './service/node.ts';
 import { device } from './session.ts';
 
 export interface Check {
@@ -46,14 +46,12 @@ export async function doctor(input: {
 			ok: isAbsolute(node) && existsSync(node) && supportedNode(runs),
 			detail: `${node} (v${runs ?? 'unknown'}, needs >= 24.18)`
 		},
-		isCellarPath(node)
-			? {
-					name: 'node_path',
-					ok: true,
-					warning: true,
-					detail: `${node} is a versioned Cellar path that brew upgrade removes; set LINE_MCP_NODE or install the node@24 opt link`
-				}
-			: { name: 'node_path', ok: true, detail: 'stable across Homebrew upgrades' }
+		pathCheck('node_path', node, 'set LINE_MCP_NODE to a Node outside it'),
+		pathCheck(
+			'cli_path',
+			input.cli,
+			'install line-mcp-server with a Node outside it, then run line-mcp install'
+		)
 	);
 
 	try {
@@ -114,34 +112,23 @@ export async function doctor(input: {
 
 	const { service } = input;
 	const { definition } = service.paths;
-	const expected = service.render({ node, cli: input.cli, env: input.env });
 	const installed = existsSync(definition) ? readFileSync(definition, 'utf-8') : undefined;
-	checks.push({
-		name: service.check,
-		ok: installed === expected,
-		detail:
-			installed === undefined
-				? `${definition} missing; run line-mcp install`
-				: installed === expected
-					? `${definition} matches this installation`
-					: `${definition} differs from this installation; run line-mcp install`
-	});
 	try {
-		const loaded = await service.loaded();
+		const expected = service.render({ node, cli: input.cli, env: input.env });
 		checks.push({
-			name: `${service.check}_loaded`,
-			ok: loaded,
-			detail: loaded
-				? `${service.label} is loaded`
-				: `${service.label} is not loaded; run line-mcp install`
+			name: service.check,
+			ok: installed === expected,
+			detail:
+				installed === undefined
+					? `${definition} missing; run line-mcp install`
+					: installed === expected
+						? `${definition} matches this installation`
+						: `${definition} differs from this installation; run line-mcp install`
 		});
 	} catch (error) {
-		checks.push({
-			name: `${service.check}_loaded`,
-			ok: false,
-			detail: mapError(error, 'doctor').message
-		});
+		checks.push({ name: service.check, ok: false, detail: mapError(error, 'doctor').message });
 	}
+	checks.push(...(await service.diagnose()));
 	const held = await lockInUse();
 	checks.push({
 		name: 'daemon',
@@ -151,6 +138,19 @@ export async function doctor(input: {
 			: 'no process holds the lock port'
 	});
 	return checks;
+}
+
+/** A warning when `path` lies in a versioned install layout, which `remedy` avoids. */
+function pathCheck(name: string, path: string, remedy: string): Check {
+	const layout = versionedLayout(path);
+	return layout
+		? {
+				name,
+				ok: true,
+				warning: true,
+				detail: `${path} is in a versioned ${layout} directory that goes away with that version; ${remedy}`
+			}
+		: { name, ok: true, detail: `${path} is not in a known versioned directory` };
 }
 
 function time(value: number | null): string {
