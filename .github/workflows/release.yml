@@ -104,6 +104,8 @@ jobs:
             runner: ubicloud-standard-2
           - os: macos
             runner: macos-latest
+          - os: windows
+            runner: windows-latest
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
