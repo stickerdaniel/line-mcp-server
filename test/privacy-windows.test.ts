@@ -12,9 +12,9 @@ import {
 	writeFileSync
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join, parse } from 'node:path';
+import { dirname, join, parse } from 'node:path';
 import { describe, expect, it, onTestFinished } from 'vitest';
-import { type AclDeps, checkPrivate, confine, exposuresOf } from '../src/acl.ts';
+import { type AclDeps, checkPrivate, confine, exposuresOf, remedy } from '../src/acl.ts';
 import { openDatabase, openReadOnly } from '../src/db.ts';
 import { databasePath, stateRoot } from '../src/paths.ts';
 import { statePrivacy } from '../src/privacy.ts';
@@ -187,6 +187,65 @@ describe.runIf(windows)('private state on Windows', { timeout: 60_000 }, () => {
 			expect(exposuresOf(printed, 'S-1-5-21-1-2-3-1001', { anchor: true })).toEqual([]);
 		}
 	);
+
+	it('prints fixes that PowerShell hands to icacls unchanged', () => {
+		const dir = tempRoot();
+		const path = join(dir, "it's $HOME (ü) x", 'line.db');
+		const user = 'S-1-5-21-1-2-3-1001';
+		const fixes = remedy(
+			{
+				path,
+				exists: true,
+				exposures: [
+					{ kind: 'owner', sid: 'BU' },
+					{ kind: 'grant', ace: '(A;;FR;;;WD)', sid: 'WD', inherited: false },
+					{ kind: 'grant', ace: '(A;ID;FR;;;AU)', sid: 'AU', inherited: true }
+				]
+			},
+			user
+		);
+		// `icacls` resolves to a function that records the arguments it receives.
+		const printer = join(dir, 'argv.cjs');
+		const received = join(dir, 'argv.jsonl');
+		writeFileSync(
+			printer,
+			"require('node:fs').appendFileSync(process.env.ARGV_OUT, JSON.stringify(process.argv.slice(2)) + '\\n');"
+		);
+		const script = [
+			'function icacls { & $env:ARGV_NODE $env:ARGV_PRINTER @args }',
+			...fixes.split(', then ')
+		].join('\n');
+		const { PSModulePath: _modules, ...env } = process.env;
+		execFileSync(
+			'powershell.exe',
+			[
+				'-NoProfile',
+				'-NonInteractive',
+				'-EncodedCommand',
+				Buffer.from(script, 'utf16le').toString('base64')
+			],
+			{ env: { ...env, ARGV_NODE: process.execPath, ARGV_PRINTER: printer, ARGV_OUT: received } }
+		);
+
+		const calls = readFileSync(received, 'utf-8')
+			.trimEnd()
+			.split('\n')
+			.map((line): unknown => JSON.parse(line));
+		expect(calls).toEqual([
+			[path, '/setowner', `*${user}`],
+			[path, '/remove:g', '*S-1-1-0'],
+			[
+				dirname(path),
+				'/inheritance:r',
+				'/grant:r',
+				`*${user}:(OI)(CI)F`,
+				'*S-1-5-18:(OI)(CI)F',
+				'*S-1-5-32-544:(OI)(CI)F',
+				'/Q'
+			],
+			[path, '/reset']
+		]);
+	});
 
 	it('keeps SQLite temporary storage in memory', async () => {
 		const root = join(tempRoot(), 'line-mcp');

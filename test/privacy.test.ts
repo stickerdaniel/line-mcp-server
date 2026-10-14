@@ -4,6 +4,7 @@ import {
 	existsSync,
 	lstatSync,
 	mkdirSync,
+	readdirSync,
 	readFileSync,
 	realpathSync,
 	symlinkSync,
@@ -81,6 +82,22 @@ function profile(): string {
 }
 
 const depsFor = (home: string, runner: ToolRunner): AclDeps => ({ home, env: {}, runner });
+
+/** Doctor on `root` with the privacy guard of `platform` and no service backend. */
+const doctorOn = (root: string, platform: NodeJS.Platform, home: string, runner: ToolRunner) =>
+	doctor({
+		root,
+		service: serviceFor('win32', { home, env: {}, runner }),
+		privacy: statePrivacy(platform, depsFor(home, runner)),
+		env: {},
+		cli: '/opt/line-mcp/dist/cli.js',
+		node: process.execPath,
+		nodeVersion: '24.18.0'
+	});
+
+/** Doctor's checks of the state: privacy, permissions and the archive. */
+const stateChecks = (checks: Awaited<ReturnType<typeof doctor>>) =>
+	checks.filter(({ name }) => ['privacy', 'permissions', 'archive'].includes(name));
 
 describe('the private predicate', () => {
 	it.each([
@@ -519,18 +536,10 @@ describe('the Windows state guard', () => {
 			return protectedDir;
 		});
 
-		const checks = await doctor({
-			root,
-			service: serviceFor('win32', { home, env: {}, runner: fake.runner }),
-			privacy: statePrivacy('win32', depsFor(home, fake.runner)),
-			env: {},
-			cli: '/opt/line-mcp/dist/cli.js',
-			node: process.execPath,
-			nodeVersion: '24.18.0'
-		});
+		const checks = await doctorOn(root, 'win32', home, fake.runner);
 
 		const protect = (dir: string) =>
-			`icacls "${dir}" /inheritance:r /grant:r *${user}:(OI)(CI)F *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /Q`;
+			`icacls '${dir}' /inheritance:r /grant:r '*${user}:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /Q`;
 		expect(checks.filter(({ name }) => name === 'privacy')).toEqual([
 			{
 				name: 'privacy',
@@ -538,18 +547,90 @@ describe('the Windows state guard', () => {
 				detail:
 					`${root} is not private: its owner ${other} is not you, SYSTEM or Administrators; ` +
 					'it grants WD access: (A;OICIIO;FR;;;WD). ' +
-					`Fix: icacls "${root}" /setowner *${user}, then icacls "${root}" /remove:g *S-1-1-0`
+					`Fix (PowerShell): icacls '${root}' /setowner '*${user}', then icacls '${root}' /remove:g '*S-1-1-0'`
 			},
 			{
 				name: 'privacy',
 				ok: false,
 				detail:
 					`${db} is not private: it grants WD access through inheritance: (A;ID;FR;;;WD). ` +
-					`Fix: ${protect(root)}, then icacls "${db}" /reset`
+					`Fix (PowerShell): ${protect(root)}, then icacls '${db}' /reset`
 			}
 		]);
 		expect(checks.map(({ name }) => name)).not.toContain('account');
 		// Only the privacy check ran a tool: no service manager call.
 		expect(new Set(fake.calls.map(({ tool }) => tool))).toEqual(new Set(['powershell.exe']));
+	});
+
+	it('gives doctor the remedy for an exposed root before the first login, creating nothing', async () => {
+		const home = profile();
+		const root = join(home, 'line-mcp');
+		mkdirSync(root);
+		const fake = fakeWindows((path) =>
+			path === root ? `O:${user}D:PAI(A;OICI;FA;;;${user})(A;OICI;FR;;;WD)` : protectedDir
+		);
+
+		const checks = await doctorOn(root, 'win32', home, fake.runner);
+
+		expect(stateChecks(checks)).toEqual([
+			{
+				name: 'privacy',
+				ok: false,
+				detail:
+					`${root} is not private: it grants WD access: (A;OICI;FR;;;WD). ` +
+					`Fix (PowerShell): icacls '${root}' /remove:g '*S-1-1-0'`
+			},
+			{
+				name: 'archive',
+				ok: false,
+				detail: `${databasePath(root)} does not exist; run line-mcp login`
+			}
+		]);
+		expect(readdirSync(root)).toEqual([]);
+	});
+
+	it('tells doctor which parts it checked when the root does not exist yet', async () => {
+		const home = profile();
+		const root = join(home, 'AppData', 'line-mcp');
+		const fake = fakeWindows();
+
+		const checks = await doctorOn(root, 'win32', home, fake.runner);
+
+		expect(stateChecks(checks)).toEqual([
+			{
+				name: 'privacy',
+				ok: true,
+				detail: `${root} does not exist yet; the directories above it in your profile that exist are private`
+			},
+			{
+				name: 'archive',
+				ok: false,
+				detail: `${databasePath(root)} does not exist; run line-mcp login`
+			}
+		]);
+		expect(existsSync(join(home, 'AppData'))).toBe(false);
+		expect(fake.calls.map(({ tool }) => tool)).toEqual(['powershell.exe']);
+	});
+});
+
+describe('doctor on macOS and Linux', () => {
+	it('checks permissions only once the database exists', async () => {
+		const home = profile();
+		const root = join(home, 'line-mcp');
+		const fake = fakeWindows();
+
+		const before = await doctorOn(root, 'linux', home, fake.runner);
+		seedLive(root, selfMid, { authToken: 'token' });
+		const after = await doctorOn(root, 'linux', home, fake.runner);
+
+		expect(stateChecks(before)).toEqual([
+			{
+				name: 'archive',
+				ok: false,
+				detail: `${databasePath(root)} does not exist; run line-mcp login`
+			}
+		]);
+		expect(stateChecks(after).map(({ name }) => name)).toEqual(['permissions']);
+		expect(fake.calls).toEqual([]);
 	});
 });

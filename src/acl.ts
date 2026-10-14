@@ -395,12 +395,20 @@ export function protectArgs(dir: string, user: string): string[] {
 	];
 }
 
+/**
+ * An icacls call to paste into PowerShell, the default Windows shell. Every
+ * argument but a plain switch goes in single quotes, inside which PowerShell
+ * expands nothing (`$`, parentheses), with an embedded `'` doubled.
+ */
 const command = (args: string[]) =>
-	['icacls', ...args.map((arg, index) => (index === 0 ? `"${arg}"` : arg))].join(' ');
+	[
+		'icacls',
+		...args.map((arg) => (/^\/[\w:]+$/.test(arg) ? arg : `'${arg.replaceAll("'", "''")}'`))
+	].join(' ');
 
 /**
- * The commands that make `object` private, for doctor. Nothing runs them:
- * line-mcp never changes an access list it did not create.
+ * The PowerShell commands that make `object` private, for doctor. Nothing
+ * runs them: line-mcp never changes an access list it did not create.
  */
 export function remedy({ path, exposures }: Inspected, user: string): string {
 	const steps: string[] = [];
@@ -417,7 +425,9 @@ export function remedy({ path, exposures }: Inspected, user: string): string {
 		if (sids.every((sid) => sid !== undefined)) {
 			steps.push(command([path, '/remove:g', ...sids.map((sid) => `*${sid}`)]));
 		} else
-			steps.push(`remove the entries for ${explicit.join(', ')} with icacls "${path}" /remove:g`);
+			steps.push(
+				`remove the entries for ${explicit.join(', ')} with ${command([path, '/remove:g'])}`
+			);
 	}
 	if (grants.some((grant) => grant.inherited)) {
 		steps.push(`${command(protectArgs(dirname(path), user))}, then ${command([path, '/reset'])}`);

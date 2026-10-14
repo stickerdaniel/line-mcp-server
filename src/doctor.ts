@@ -64,6 +64,10 @@ export async function doctor(input: {
 		checks.push({ name: 'fts5_trigram', ok: false, detail: 'SQLite lacks FTS5 trigram' });
 	}
 
+	// Before the archive exists too: a first login on Windows refuses an
+	// exposed state root and points here.
+	const privacy = await input.privacy.diagnose(input.root);
+	checks.push(...privacy.checks);
 	const path = databasePath(input.root);
 	if (!existsSync(path)) {
 		checks.push({
@@ -71,11 +75,9 @@ export async function doctor(input: {
 			ok: false,
 			detail: `${path} does not exist; run line-mcp login`
 		});
-	} else {
-		const privacy = await input.privacy.diagnose(input.root);
-		checks.push(...privacy.checks);
+	} else if (privacy.readable) {
 		// On Windows an archive that is not private is not read.
-		if (privacy.readable) checks.push(...archiveChecks(input.root));
+		checks.push(...archiveChecks(input.root));
 	}
 
 	const { service } = input;

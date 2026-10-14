@@ -635,10 +635,27 @@ describe.runIf(windows)('Windows without a service backend', { timeout: 15_000 }
 		expect(status.stdout).toBe('');
 		expect(doctor.code).toBe(1);
 		expect(doctor.stdout).toContain(
-			`FAIL privacy: ${exposure}. Fix: icacls "${state}" /remove:g *S-1-1-0\n`
+			`FAIL privacy: ${exposure}. Fix (PowerShell): icacls '${state}' /remove:g '*S-1-1-0'\n`
 		);
 		// The archive is not read until it is private.
 		expect(doctor.stdout).not.toContain('account:');
+	});
+
+	it('names the fix in doctor for an exposed root before the first login', async () => {
+		const home = tempRoot();
+		const state = join(home, 'state');
+		mkdirSync(state);
+		execFileSync('icacls', [state, '/grant', '*S-1-1-0:(OI)(CI)(R)']);
+
+		const doctor = await runCli(['doctor'], { home });
+
+		expect(doctor.code).toBe(1);
+		expect(doctor.stdout).toContain(
+			`FAIL privacy: ${state} is not private: it grants WD access: (A;OICI;FR;;;WD). ` +
+				`Fix (PowerShell): icacls '${state}' /remove:g '*S-1-1-0'\n` +
+				`FAIL archive: ${databasePath(state)} does not exist; run line-mcp login\n`
+		);
+		expect(readdirSync(state)).toEqual([]);
 	});
 });
 

@@ -1,8 +1,9 @@
-import { chmodSync, mkdirSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import {
 	type AclDeps,
 	checkPrivate,
+	type Confined,
 	confine,
 	createPrivate,
 	describeExposure,
@@ -35,8 +36,10 @@ export interface StatePrivacy {
 	/** Before a file inside a checked directory is returned. */
 	file(path: string): Promise<void>;
 	/**
-	 * Doctor's checks of the state in `root`, whose database exists; the
-	 * archive is read only when `readable`.
+	 * Doctor's checks of the state in `root`, which may not exist yet; creates
+	 * nothing. Doctor reads the archive only when it exists and `readable`.
+	 * Without a database, macOS and Linux give no check; Windows still checks
+	 * the chain, since a first login refuses an exposed one.
 	 */
 	diagnose(root: string): Promise<{ checks: Check[]; readable: boolean }>;
 }
@@ -52,6 +55,7 @@ const posixPrivacy: StatePrivacy = {
 	file: async () => {},
 	diagnose: async (root) => {
 		const path = databasePath(root);
+		if (!existsSync(path)) return { checks: [], readable: false };
 		return {
 			checks: [
 				{
@@ -97,12 +101,13 @@ function windowsPrivacy(deps: AclDeps): StatePrivacy {
 		diagnose: async (root) => {
 			const name = 'privacy';
 			let inspection: Inspection;
+			let confined: Confined;
 			try {
-				const { chain, anchor } = confine(root, deps.home);
+				confined = confine(root, deps.home);
 				inspection = await checkPrivate(
-					[...chain, ...databaseFiles(root), attachmentsDir(root)],
+					[...confined.chain, ...databaseFiles(root), attachmentsDir(root)],
 					deps,
-					anchor
+					confined.anchor
 				);
 			} catch (error) {
 				return {
@@ -112,12 +117,16 @@ function windowsPrivacy(deps: AclDeps): StatePrivacy {
 			}
 			const exposed = inspection.objects.filter((object) => object.exposures.length > 0);
 			if (exposed.length === 0) {
+				// The root is the last entry of the chain, which comes first.
+				const rootExists = inspection.objects[confined.chain.length - 1]!.exists;
 				return {
 					checks: [
 						{
 							name,
 							ok: true,
-							detail: `${root}, its parents in your profile, the database files and attachments are private`
+							detail: rootExists
+								? `${root}, its parents in your profile, and the database files and attachment cache that exist are private`
+								: `${root} does not exist yet; the directories above it in your profile that exist are private`
 						}
 					],
 					readable: true
@@ -129,7 +138,7 @@ function windowsPrivacy(deps: AclDeps): StatePrivacy {
 					ok: false,
 					detail:
 						`${object.path} is not private: ${object.exposures.map(describeExposure).join('; ')}. ` +
-						`Fix: ${remedy(object, inspection.user)}`
+						`Fix (PowerShell): ${remedy(object, inspection.user)}`
 				})),
 				readable: false
 			};
