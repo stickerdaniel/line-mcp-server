@@ -94,8 +94,8 @@ jobs:
         shell: powershell
         run: .\scripts\windows-leg.ps1
 
-  # The npm package as users install it, with the real LaunchAgent or systemd
-  # unit through the installed bin (test/service-e2e.test.ts).
+  # The npm package as users install it, with the real LaunchAgent, systemd
+  # unit or scheduled task through the installed bin (test/service-e2e.test.ts).
   package-os:
     name: package (${{ matrix.os }})
     strategy:
@@ -106,6 +106,8 @@ jobs:
             runner: ubicloud-standard-2
           - os: macos
             runner: macos-latest
+          - os: windows
+            runner: windows-latest
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:

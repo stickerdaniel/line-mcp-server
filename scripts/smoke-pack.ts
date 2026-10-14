@@ -87,7 +87,9 @@ async function main(tarballArg: string | undefined): Promise<number> {
 		const prefix = join(work, 'prefix');
 		writeFileSync(join(work, 'npmrc'), '');
 		writeFileSync(join(work, 'npmrc-global'), '');
-		// os.homedir() reads USERPROFILE on Windows; npm keeps its cache under LOCALAPPDATA there.
+		// npm keeps its cache under LOCALAPPDATA on Windows. os.homedir() reads
+		// USERPROFILE there, which stays the runner's: line-mcp keeps state only
+		// inside the profile, and the temporary directories are in it.
 		const appData = windows
 			? { APPDATA: join(home, 'AppData', 'Roaming'), LOCALAPPDATA: join(home, 'AppData', 'Local') }
 			: {};
@@ -95,7 +97,6 @@ async function main(tarballArg: string | undefined): Promise<number> {
 		const env: NodeJS.ProcessEnv = {
 			...process.env,
 			HOME: home,
-			USERPROFILE: home,
 			...appData,
 			npm_config_userconfig: join(work, 'npmrc'),
 			npm_config_globalconfig: join(work, 'npmrc-global'),
@@ -133,7 +134,8 @@ async function main(tarballArg: string | undefined): Promise<number> {
 			throw new Error(`sync-status without a daemon exited ${status.status}: ${status.stderr}`);
 		}
 
-		// Tests start the CLI as `node <entry>`: the bin link on Unix, its script on Windows.
+		// Tests start the CLI as `node <entry>`: the bin link on Unix, its script on
+		// Windows. LINE_MCP_TEST_BIN is the bin itself, the `.cmd` shim on Windows.
 		const tests = spawnSync(
 			process.execPath,
 			[
@@ -143,7 +145,11 @@ async function main(tarballArg: string | undefined): Promise<number> {
 				'test/cli-tools.test.ts',
 				'test/service-e2e.test.ts'
 			],
-			{ cwd: repo, stdio: 'inherit', env: { ...env, LINE_MCP_TEST_CLI: windows ? cli : bin } }
+			{
+				cwd: repo,
+				stdio: 'inherit',
+				env: { ...env, LINE_MCP_TEST_CLI: windows ? cli : bin, LINE_MCP_TEST_BIN: bin }
+			}
 		);
 		return tests.status ?? 1;
 	} finally {

@@ -8,7 +8,8 @@
 // - prepare (standard account): its state roots, recorded in prepare.json;
 // - plant <account> (runner user): files in those roots owned by <account>,
 //   another standard account;
-// - assert (standard account): the checks; exits 1 on the first failure.
+// - assert (standard account): the checks; exits 1 on the first failure;
+// - service (standard account): its own scheduled task through the backend.
 //
 // Each phase prints what it did as one JSON line.
 import assert from 'node:assert/strict';
@@ -17,11 +18,13 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { createServer, type AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { checkPrivate, confine } from '../src/acl.ts';
 import { openDatabase } from '../src/db.ts';
-import { databasePath, stateRoot } from '../src/paths.ts';
+import { databasePath, serviceTemplate, stateRoot } from '../src/paths.ts';
 import { statePrivacy } from '../src/privacy.ts';
 import { toolRunner } from '../src/service/runner.ts';
+import { taskScheduler } from '../src/service/task-scheduler.ts';
 import { openSession } from '../src/session.ts';
 
 interface Prepared {
@@ -76,6 +79,30 @@ async function refusesOpen(root: string, journal: string, message: string | RegE
 		message
 	});
 	assert.deepEqual(readFileSync(journal), before);
+}
+
+/** This account's task as service/task-state.js reads it through Schedule.Service. */
+function taskState(): Record<string, unknown> {
+	const system32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
+	const csv = execFileSync(join(system32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
+		encoding: 'utf-8'
+	});
+	const sid = /"(S-1-\d+(?:-\d+)+)"\s*$/.exec(csv)?.[1];
+	assert(sid, `whoami printed no SID: ${csv}`);
+	const answer = execFileSync(
+		join(system32, 'cscript.exe'),
+		['//Nologo', '//E:JScript', fileURLToPath(serviceTemplate('task-state.js')), `line-mcp-${sid}`],
+		{ encoding: 'utf-8' }
+	);
+	return JSON.parse(answer) as Record<string, unknown>;
+}
+
+/** Fails unless the task has each of the `expected` values. */
+function expectTask(expected: Record<string, unknown>): void {
+	const task = taskState();
+	for (const [name, value] of Object.entries(expected)) {
+		assert.equal(task[name], value, `${name} in ${JSON.stringify(task)}`);
+	}
 }
 
 const phases: Record<string, () => Promise<Record<string, unknown>>> = {
@@ -205,6 +232,29 @@ const phases: Record<string, () => Promise<Record<string, unknown>>> = {
 				`${journal} is not private: its owner ${other} is not you, SYSTEM or Administrators. Run line-mcp doctor for the fix`
 			);
 		});
+		return { passed };
+	},
+
+	// Without an interactive logon the account's task cannot run (P1), so
+	// install stops at the start; the rest of the backend works on the task.
+	async service() {
+		const env = { ...process.env, LINE_MCP_LOCK_PORT: String(await freePort()) };
+		const service = taskScheduler({ home: homedir(), env, runner: toolRunner({}) });
+		const definition = service.render({ node: process.execPath, cli: process.argv[1]!, env });
+		const passed: string[] = [];
+
+		await assert.rejects(service.install(definition), { code: 'start_failed' });
+		expectTask({ exists: true, enabled: true, instances: 0 });
+		passed.push('install rejects with start_failed and leaves the task registered and enabled');
+		const restore = await service.stop();
+		expectTask({ state: 1, enabled: false, instances: 0 });
+		passed.push('stop() reaches state 1');
+		await restore();
+		expectTask({ state: 3, enabled: true });
+		passed.push('restore() of an enabled, idle task gives state 3');
+		await service.uninstall();
+		assert.deepEqual(taskState(), { exists: false });
+		passed.push('uninstall leaves no task');
 		return { passed };
 	}
 };
