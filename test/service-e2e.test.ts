@@ -5,7 +5,7 @@
 // package scripts/smoke-pack.ts installed; everywhere else it skips. It never
 // logs in and never contacts LINE: the archive's session already ended.
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -63,7 +63,9 @@ describe.skipIf(!enabled)('real LaunchAgent (CI with LINE_MCP_E2E_SERVICE=1 on m
 		// The bin npm installed; the sources would not prove the package works.
 		const bin = process.env.LINE_MCP_TEST_CLI;
 		expect(bin, 'LINE_MCP_TEST_CLI names the installed bin').toBeTruthy();
-		const home = tempRoot();
+		// launchd must take the space in the agent's plist, log and state paths.
+		const home = join(tempRoot(), 'a home');
+		mkdirSync(home);
 		const state = join(home, 'state');
 		seedLive(state, selfMid, { authToken: 'token' });
 		const db = openDatabase(state);

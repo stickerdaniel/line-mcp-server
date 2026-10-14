@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { planPublish, planRelease } from '../scripts/release-plan.ts';
@@ -85,7 +85,7 @@ writeFileSync(${JSON.stringify(join(dir, 'args'))}, process.argv.slice(2).map((a
 process.stdout.write(process.env.NPM_VIEW);
 process.exitCode = Number(process.env.NPM_EXIT);
 `;
-	writeFileSync(join(dir, 'npm'), `#!${process.execPath}\n${stub}`);
+	writeFileSync(join(dir, 'npm'), `#!/usr/bin/env node\n${stub}`);
 	chmodSync(join(dir, 'npm'), 0o755);
 	writeFileSync(join(dir, 'npm.cmd'), '@node "%~dp0node_modules\\npm\\bin\\npm-cli.js" %*\r\n');
 	mkdirSync(join(dir, 'node_modules', 'npm', 'bin'), { recursive: true });
@@ -94,7 +94,8 @@ process.exitCode = Number(process.env.NPM_EXIT);
 	const env = Object.fromEntries(
 		Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'PATH')
 	);
-	return { ...env, PATH: `${dir}${delimiter}${process.env.PATH}` };
+	// Both shims find this Node by name: a shebang cannot hold a path with a space.
+	return { ...env, PATH: [dir, dirname(process.execPath), process.env.PATH].join(delimiter) };
 }
 
 describe('release-plan.ts', () => {

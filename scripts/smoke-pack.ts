@@ -67,7 +67,8 @@ async function freePort(): Promise<number> {
 }
 
 async function main(tarballArg: string | undefined): Promise<number> {
-	const work = mkdtempSync(join(tmpdir(), 'line-mcp-smoke-'));
+	// The space puts one in every path the package sees: its bin, home and state.
+	const work = mkdtempSync(join(tmpdir(), 'line-mcp smoke-'));
 	try {
 		let tarball: string;
 		if (tarballArg) tarball = resolve(tarballArg);
