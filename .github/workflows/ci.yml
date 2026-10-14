@@ -67,7 +67,8 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: bun run test
 
-  # The npm package as users install it, on macOS like the LaunchAgent it installs.
+  # The npm package as users install it. macOS also runs the real LaunchAgent
+  # through the installed bin (test/service-e2e.test.ts).
   package-os:
     name: package (${{ matrix.os }})
     strategy:
@@ -98,6 +99,8 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Pack, install and test the package
+        env:
+          LINE_MCP_E2E_SERVICE: '1'
         run: node scripts/smoke-pack.ts
 
   # Branch protection requires `verify` and `package`. These pass only when

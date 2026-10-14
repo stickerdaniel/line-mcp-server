@@ -1,6 +1,7 @@
-// Installs the npm package as a user would and runs test/cli.test.ts and
-// test/cli-tools.test.ts against its `line-mcp` bin, including the daemon
-// serving a cache-only archive and the tool commands calling a test server.
+// Installs the npm package as a user would and runs test/cli.test.ts,
+// test/cli-tools.test.ts and test/service-e2e.test.ts against its `line-mcp`
+// bin, including the daemon serving a cache-only archive and the tool commands
+// calling a test server.
 //
 //   node scripts/smoke-pack.ts [tarball]
 //     without a tarball it packs this checkout
@@ -8,7 +9,8 @@
 // Everything runs under a temporary home, npm prefix and state root, with an
 // empty npm config (no JSR registry), free ports and the service runner
 // fixture in place of the service manager; the real service, archive and LINE
-// stay untouched.
+// stay untouched. Only test/service-e2e.test.ts reaches the real launchd, and
+// only on a CI runner with LINE_MCP_E2E_SERVICE=1.
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
 import {
 	existsSync,
@@ -137,7 +139,8 @@ async function main(tarballArg: string | undefined): Promise<number> {
 				join(repo, 'node_modules', 'vitest', 'vitest.mjs'),
 				'--run',
 				'test/cli.test.ts',
-				'test/cli-tools.test.ts'
+				'test/cli-tools.test.ts',
+				'test/service-e2e.test.ts'
 			],
 			{ cwd: repo, stdio: 'inherit', env: { ...env, LINE_MCP_TEST_CLI: windows ? cli : bin } }
 		);
