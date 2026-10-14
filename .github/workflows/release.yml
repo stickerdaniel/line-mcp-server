@@ -122,9 +122,10 @@ jobs:
           path: ${{ runner.temp }}/package
 
       - name: Install and test the package
+        shell: bash
         env:
           VERSION: ${{ needs.detect.outputs.version }}
-        run: scripts/smoke-pack.sh "$RUNNER_TEMP/package/line-mcp-server-$VERSION.tgz"
+        run: node scripts/smoke-pack.ts "$RUNNER_TEMP/package/line-mcp-server-$VERSION.tgz"
 
   # Trusted publishing: npm trusts this workflow file in the `npm` environment
   # through OIDC, so there is no npm token. OIDC needs a GitHub-hosted runner.
