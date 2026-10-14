@@ -59,7 +59,8 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 	 * daemon is still shutting down, and until it is gone a `bootstrap` fails
 	 * (5) and a login finds the lock held. A bootout that failed or timed out
 	 * may still take effect, so launchd's view decides then too: it fails only
-	 * while the agent stays loaded.
+	 * while the agent stays loaded, and with `service_state_unknown` when
+	 * `print` fails.
 	 */
 	async function bootout({ dryRun }: DryRun = {}): Promise<void> {
 		const args = ['bootout', target];
@@ -73,12 +74,18 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 		} catch (error) {
 			failure = error;
 		}
-		// When launchd cannot tell either, the bootout's own failure says more.
 		const loaded = () =>
 			run(['print', target]).then(
 				(state) => state === 'done',
 				(error: unknown) => {
-					throw failure ?? error;
+					const after =
+						failure === undefined ? '' : `${mapError(failure, 'service').message}, and `;
+					throw new LineMcpError(
+						'service_state_unknown',
+						`${after}${mapError(error, 'service').message}, so it is unknown whether launchd ` +
+							`still has ${label} loaded. Run line-mcp doctor`,
+						{ cause: error }
+					);
 				}
 			);
 		const deadline = Date.now() + stopTimeoutMs;
@@ -139,7 +146,24 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 			else rmSync(paths.definition, { force: true });
 		},
 		async stop() {
-			await bootout();
+			try {
+				await bootout();
+			} catch (error) {
+				if (!(error instanceof LineMcpError) || error.code !== 'service_state_unknown') throw error;
+				// launchd may have let the agent go without saying so. Loading it
+				// again puts it back; while it is still loaded that fails, and the
+				// state stays unknown.
+				try {
+					await bootstrap();
+				} catch {
+					throw error;
+				}
+				throw new LineMcpError(
+					'launchctl_failed',
+					`launchd could not confirm that ${label} stopped, so line-mcp loaded it again; the service is unchanged`,
+					{ cause: error }
+				);
+			}
 			// Today's handoff: bootstrap again whenever the plist is there.
 			return async () => {
 				if (existsSync(paths.definition)) await bootstrap();

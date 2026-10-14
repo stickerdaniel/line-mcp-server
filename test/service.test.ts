@@ -19,14 +19,17 @@ const exit = (code: ToolResult['exit']) => ({ exit: code, stdout: '' });
  * the agent, launchd keeps it loaded for `unloadPolls` more `print` calls, as
  * while the daemon shuts down, and a bootstrap until then fails with 5, as the
  * real one does. Only 3 and 113 mean it was not loaded; a bootout exiting
- * anything else still takes effect.
+ * anything else still takes effect. A bootstrap that succeeds loads it again.
+ * `print`, when given, is the exit of every `print`, whatever launchd holds.
  */
 function fakeLaunchd({
 	bootout = 0,
-	unloadPolls = 0
+	unloadPolls = 0,
+	print
 }: {
 	bootout?: ToolResult['exit'];
 	unloadPolls?: number;
+	print?: ToolResult['exit'];
 }) {
 	const calls: string[][] = [];
 	let loadedFor = 0;
@@ -38,18 +41,21 @@ function fakeLaunchd({
 					if (bootout !== 3 && bootout !== 113) loadedFor = unloadPolls;
 					return exit(bootout);
 				case 'print':
+					if (print !== undefined) return exit(print);
 					if (loadedFor === 0) return exit(113);
 					loadedFor--;
 					return exit(0);
 				case 'bootstrap':
-					return exit(loadedFor > 0 ? 5 : 0);
+					if (loadedFor > 0) return exit(5);
+					loadedFor = Number.POSITIVE_INFINITY;
+					return exit(0);
 				default:
 					return exit(0);
 			}
 		},
 		describe: (tool, args) => [tool, ...args].join(' ')
 	};
-	return { calls, launchctl };
+	return { calls, launchctl, loaded: () => loadedFor > 0 };
 }
 
 const windows = process.platform === 'win32';
@@ -162,6 +168,27 @@ describe('launchd', () => {
 		await service.stop();
 
 		await expect(service.start()).resolves.toBeUndefined();
+	});
+
+	it('loads the agent again when launchd cannot say whether it stopped', async () => {
+		const fake = fakeLaunchd({ print: 5 });
+		const service = serviceFor('darwin', { home: '/Users/me', env: {}, runner: fake.launchctl });
+
+		await expect(service.stop()).rejects.toMatchObject({
+			code: 'launchctl_failed',
+			message: expect.stringContaining('loaded it again')
+		});
+		expect(fake.loaded()).toBe(true);
+	});
+
+	it('fails as unknown when launchd cannot say and the agent does not load again', async () => {
+		const fake = fakeLaunchd({ unloadPolls: Number.POSITIVE_INFINITY, print: 5 });
+		const service = serviceFor('darwin', { home: '/Users/me', env: {}, runner: fake.launchctl });
+
+		await expect(service.stop()).rejects.toMatchObject({
+			code: 'service_state_unknown',
+			message: expect.stringContaining('launchctl print failed (5)')
+		});
 	});
 
 	it('fails the stop when a failed bootout leaves the agent loaded', async () => {
