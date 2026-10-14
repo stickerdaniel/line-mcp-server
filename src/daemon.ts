@@ -253,14 +253,21 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 		if (readSnapshotResets !== talkResets || now() >= readSnapshotDueAt) {
 			const started = now();
 			const resets = talkResets;
-			const succeeded = await phase('read_state', () => snapshotTalkReadState(context, pool));
-			readSnapshotResets = resets;
-			if (succeeded) {
-				readSnapshotDueAt = started + readSnapshotIntervalMs;
-				readSnapshotBackoffMs = readSnapshotRetryMs;
-			} else {
-				readSnapshotDueAt = now() + readSnapshotBackoffMs;
-				readSnapshotBackoffMs = Math.min(readSnapshotBackoffMs * 2, readSnapshotIntervalMs);
+			let succeeded = false;
+			// A transient failure still ends this worker round, but it counts as a
+			// failed attempt: the backoff applies, and the next round goes on to
+			// the other phases and backfill instead of retrying the snapshot.
+			try {
+				succeeded = await phase('read_state', () => snapshotTalkReadState(context, pool));
+			} finally {
+				readSnapshotResets = resets;
+				if (succeeded) {
+					readSnapshotDueAt = started + readSnapshotIntervalMs;
+					readSnapshotBackoffMs = readSnapshotRetryMs;
+				} else {
+					readSnapshotDueAt = now() + readSnapshotBackoffMs;
+					readSnapshotBackoffMs = Math.min(readSnapshotBackoffMs * 2, readSnapshotIntervalMs);
+				}
 			}
 		}
 		if (listGaps(db, { service: 'talk', status: 'open' }).length > 0) {

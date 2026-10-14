@@ -422,9 +422,12 @@ export async function snapshotTalkReadState(context: SyncContext, pool: Pool): P
 	const seen = new Set<string>();
 	let minChatId: string | undefined;
 	for (let page = 0; page < 100; page++) {
-		const at = context.now();
-		const list = await pool.run(() =>
-			base.talk.getMessageBoxes({
+		// The request time is taken once a pool slot is free, right before the
+		// request goes out (properties evaluate in order), not while the page
+		// waits for a slot.
+		const { at, list } = await pool.run(async () => ({
+			at: context.now(),
+			list: await base.talk.getMessageBoxes({
 				messageBoxListRequest: {
 					minChatId,
 					messageBoxCountLimit: 100,
@@ -435,7 +438,7 @@ export async function snapshotTalkReadState(context: SyncContext, pool: Pool): P
 				},
 				syncReason: 'INTERNAL'
 			})
-		);
+		}));
 		const fresh = (list?.messageBoxes ?? []).filter((box) => box?.id && !seen.has(box.id));
 		transaction(db, () => {
 			for (const box of fresh) {

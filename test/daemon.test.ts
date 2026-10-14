@@ -744,6 +744,37 @@ describe('daemon', () => {
 		await until(() => attempts === 6, 'a retry 10 minutes after the fifth failure');
 	});
 
+	it('backs off a Talk read snapshot that fails transiently and backfills meanwhile', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const message = textMessage('800000000000000003', 'history');
+		const clock = 1_900_000_000_000;
+		let now = clock;
+		let attempts = 0;
+		const { daemon } = await start(
+			root,
+			{
+				sync: () => ({}),
+				getMessageBoxes: (value) => {
+					if (!field(value, 2, 5)) {
+						return { messageBoxes: [{ id: otherMid, midType: 'USER' }], hasNext: false };
+					}
+					attempts++;
+					throw new TypeError('fetch failed');
+				},
+				getContactsV2: () => ({ contacts: {} }),
+				getRecentMessagesV2: () => [message],
+				getPreviousMessagesV2WithRequest: () => [message]
+			},
+			{ notify: () => {}, now: () => now, backfillPageMs: 0 }
+		);
+
+		await until(() => daemon.status().backfill.complete === 1, 'backfill to complete');
+		expect(attempts).toBe(1);
+		now = clock + 60_000;
+		await until(() => attempts === 2, 'a retry after 1 minute');
+	});
+
 	it('takes the Talk read snapshot again when a reset arrives while it runs', async () => {
 		const root = tempRoot();
 		seedLive(root, selfMid, { authToken: 'token' });

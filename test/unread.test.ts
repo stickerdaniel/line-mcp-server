@@ -595,6 +595,32 @@ describe('read positions from Talk', () => {
 			{ line_unread_count: 3, line_unread_as_of: renderTime(clock + 1000) }
 		]);
 	});
+
+	it("dates LINE's count by when its request went out, not when it waited for a slot", async () => {
+		const served = await serve({
+			getMessageBoxes: boxes(() => [
+				{ id: otherMid, midType: 'USER', lastSeenMessageId: 10n, unreadCount: 2n }
+			])
+		});
+		upsertChat(served.session.db, { service: 'talk', chatId: otherMid, type: 'user' });
+		let now = clock;
+		const pool = new Pool(1);
+		const { promise: busy, resolve: free } = Promise.withResolvers<void>();
+		const occupied = pool.run(() => busy);
+
+		const snapshot = snapshotTalkReadState(
+			contextOf(served, () => now),
+			pool
+		);
+		now += 120_000;
+		free();
+		await occupied;
+		await snapshot;
+
+		expect((await unread(served)).chats).toMatchObject([
+			{ line_unread_count: 2, line_unread_as_of: renderTime(clock + 120_000) }
+		]);
+	});
 });
 
 describe('read positions from OpenChat', () => {
