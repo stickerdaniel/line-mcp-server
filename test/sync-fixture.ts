@@ -4,11 +4,11 @@ import type { Message, SquareEvent } from '@evex/linejs-types';
 import type { NestedArray } from '@evex/linejs/thrift';
 import { afterEach } from 'vitest';
 import type { SyncContext } from '../src/sync/loop.ts';
-import { openSession, type Session } from '../src/session.ts';
+import type { Session } from '../src/session.ts';
 import {
 	type FakeUpstream,
 	fakeUpstream,
-	freePort,
+	fixtureSession,
 	type Handler,
 	otherMid,
 	seedLive,
@@ -34,12 +34,7 @@ export async function syncFixture(
 ): Promise<SyncFixture> {
 	seedLive(root, selfMid, { authToken: 'token' });
 	const upstream = fakeUpstream({ getProfile: () => ({ mid: selfMid }), ...handlers });
-	const session = await openSession({
-		root,
-		lockPort: await freePort(),
-		createClient: upstream.createClient,
-		log: () => {}
-	});
+	const session = await fixtureSession(root, upstream);
 	open.push(session);
 	return {
 		root,

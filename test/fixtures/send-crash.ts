@@ -6,10 +6,9 @@ import { Buffer } from 'node:buffer';
 import { archiveStatus } from '../../src/archive.ts';
 import { startMcpServer } from '../../src/mcp/server.ts';
 import { attachmentsDir } from '../../src/paths.ts';
-import { statePrivacy } from '../../src/privacy.ts';
 import { openSession } from '../../src/session.ts';
 import { Pool } from '../../src/sync/loop.ts';
-import { fakeUpstream, otherMid, selfMid } from '../fake-line.ts';
+import { fakeUpstream, modePrivacy, otherMid, selfMid } from '../fake-line.ts';
 
 const [root, lockPort, mode] = process.argv.slice(2) as [string, string, string];
 const stall = (line: string) => {
@@ -29,7 +28,9 @@ const session = await openSession({
 	root,
 	lockPort: Number(lockPort),
 	createClient: upstream.createClient,
-	log: () => {}
+	log: () => {},
+	// The crash is under test, not the Windows privacy check and its PowerShell start.
+	privacy: modePrivacy
 });
 const server = await startMcpServer(
 	{
@@ -38,7 +39,7 @@ const server = await startMcpServer(
 		selfMid,
 		pool: new Pool(2),
 		attachments: attachmentsDir(root),
-		privacy: statePrivacy(),
+		privacy: modePrivacy,
 		status: () => archiveStatus(session.db),
 		log: () => {}
 	},
