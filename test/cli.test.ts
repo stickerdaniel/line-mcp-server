@@ -42,6 +42,7 @@ function npxCopy(): string {
 }
 
 const windows = process.platform === 'win32';
+const linux = process.platform === 'linux';
 
 interface Run {
 	code: number;
@@ -51,33 +52,44 @@ interface Run {
 
 const serviceRunner = fileURLToPath(new URL('fixtures/service-runner.ts', import.meta.url));
 
+interface Reply {
+	exit?: number;
+	stdout?: string;
+}
+
 interface RunOptions {
 	home?: string;
 	env?: NodeJS.ProcessEnv;
-	/** Exit codes of the fake launchctl by subcommand. */
+	/** Exit codes of the fake service manager tools by subcommand. */
 	exits?: Record<string, number>;
+	/** Full replies by subcommand, a list for successive calls (test/fixtures/service-runner.ts). */
+	replies?: Record<string, Reply | Reply[]>;
 	/** The CLI entry to run; the CLI under test by default. */
 	script?: string;
 	cwd?: string;
 }
 
 /**
- * Runs the CLI with a temporary home and state root. Every launchctl call goes
- * to the service runner fixture, which only records it, so the test proves dry
- * runs execute nothing. It exits 0, except with the code `exits` names for a
- * subcommand; `print` defaults to 113, launchctl's answer for a service that
- * is not loaded.
+ * Runs the CLI with a temporary home and state root. Every service manager
+ * call goes to the service runner fixture, which only records it, so the test
+ * proves dry runs execute nothing. It exits 0, except with the code `exits`
+ * names for a subcommand or the reply `replies` gives; `print` defaults to
+ * 113, launchctl's answer for a service that is not loaded. XDG directories
+ * default to the temporary home.
  */
 async function runCli(
 	args: string[],
-	{ home = tempRoot(), env = {}, exits = {}, script = cliEntry, cwd }: RunOptions = {}
+	{ home = tempRoot(), env = {}, exits = {}, replies = {}, script = cliEntry, cwd }: RunOptions = {}
 ) {
 	const state = join(home, 'state');
 	const calls = join(home, 'service-calls');
 	const lockPort = await freePort();
-	const replies = Object.fromEntries(
-		Object.entries(exits).map(([command, exit]) => [command, { exit }])
-	);
+	const serviceScript = {
+		...Object.fromEntries(Object.entries(exits).map(([command, exit]) => [command, { exit }])),
+		...replies
+	};
+	const base: NodeJS.ProcessEnv = { ...process.env };
+	for (const name of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) delete base[name];
 	const run = await new Promise<Run>((resolve) => {
 		execFile(
 			process.execPath,
@@ -85,7 +97,7 @@ async function runCli(
 			{
 				cwd,
 				env: {
-					...process.env,
+					...base,
 					// os.homedir() reads USERPROFILE on Windows.
 					HOME: home,
 					USERPROFILE: home,
@@ -93,7 +105,7 @@ async function runCli(
 					LINE_MCP_LOCK_PORT: String(lockPort),
 					LINE_MCP_SERVICE_RUNNER: serviceRunner,
 					LINE_MCP_SERVICE_CALLS: calls,
-					LINE_MCP_SERVICE_SCRIPT: JSON.stringify(replies),
+					LINE_MCP_SERVICE_SCRIPT: JSON.stringify(serviceScript),
 					...env
 				}
 			},
@@ -115,6 +127,54 @@ const agent = `${domain}/io.github.stickerdaniel.line-mcp`;
 // The launchd backend joins its paths with `/` on every OS.
 const plistIn = (home: string) =>
 	posix.join(home, 'Library', 'LaunchAgents', 'io.github.stickerdaniel.line-mcp.plist');
+const unitIn = (home: string) => posix.join(home, '.config', 'systemd', 'user', 'line-mcp.service');
+
+/** `systemctl --user show` output for the unit. */
+function unitState(load: string, active: string, fragment = ''): Reply {
+	return {
+		stdout:
+			`LoadState=${load}\nActiveState=${active}\nUnitFileState=\n` +
+			`FragmentPath=${fragment}\nNeedDaemonReload=no\n`
+	};
+}
+
+/**
+ * The CLI's service manager on this OS: systemd on Linux, launchd everywhere
+ * else until Windows gets its own backend. Each gives the definition path,
+ * the text that runs a Node and a CLI, and the fixture replies and calls of an
+ * install under `home`.
+ */
+const host = linux
+	? {
+			definitionIn: unitIn,
+			starts: (node: string) => `\nExecStart="${node}" `,
+			runs: (entry: string) => ` "${entry}" daemon\n`,
+			install: (home: string) => ({
+				replies: {
+					show: [unitState('not-found', 'inactive'), unitState('loaded', 'inactive', unitIn(home))]
+				},
+				calls: [
+					['systemctl', '--user', 'show', 'line-mcp.service', expect.any(String)],
+					['systemctl', '--user', 'daemon-reload'],
+					['systemctl', '--user', 'show', 'line-mcp.service', expect.any(String)],
+					['systemctl', '--user', 'enable', 'line-mcp.service'],
+					['systemctl', '--user', 'start', 'line-mcp.service']
+				]
+			})
+		}
+	: {
+			definitionIn: plistIn,
+			starts: (node: string) =>
+				`<key>ProgramArguments</key>\n\t<array>\n\t\t<string>${node}</string>`,
+			runs: (entry: string) => `<string>${entry}</string>\n\t\t<string>daemon</string>`,
+			install: (home: string) => ({
+				replies: {},
+				calls: [
+					['launchctl', 'bootout', agent],
+					['launchctl', 'bootstrap', domain, plistIn(home)]
+				]
+			})
+		};
 
 /** `uninstall` over an installed plist, with launchctl's `bootout` exiting `bootout`. */
 async function uninstall(bootout: number) {
@@ -128,61 +188,105 @@ async function uninstall(bootout: number) {
 
 // Each CLI run is a cold Node start that loads the whole server; under load it can pass 5 s.
 describe('install and uninstall', { timeout: 15_000 }, () => {
-	it('prints the LaunchAgent and launchctl commands on a dry run and changes nothing', async () => {
-		const result = await runCli(['install', '--dry-run'], { env: { LINE_MCP_PORT: '47900' } });
+	// launchd is the backend on every OS but Linux until Windows gets its own.
+	it.skipIf(linux)(
+		'prints the LaunchAgent and launchctl commands on a dry run and changes nothing',
+		async () => {
+			const result = await runCli(['install', '--dry-run'], { env: { LINE_MCP_PORT: '47900' } });
 
-		expect(result.code).toBe(0);
-		// Not even a read-only launchctl call, let alone bootout or bootstrap.
-		expect(result.calls).toEqual([]);
-		expect(readdirSync(result.home)).toEqual([]);
-		const plist = result.stdout;
-		for (const setting of [
-			'<string>io.github.stickerdaniel.line-mcp</string>',
-			`<string>${cli}</string>`,
-			'<string>daemon</string>',
-			'<key>RunAtLoad</key>\n\t<true/>',
-			'<key>KeepAlive</key>\n\t<true/>',
-			'<key>ThrottleInterval</key>\n\t<integer>30</integer>',
-			'<key>Umask</key>\n\t<integer>63</integer>',
-			`<key>LINE_MCP_HOME</key>\n\t\t<string>${result.state}</string>`,
-			'<key>LINE_MCP_PORT</key>\n\t\t<string>47900</string>',
-			posix.join(result.home, 'Library', 'Logs', 'line-mcp', 'daemon.log')
-		]) {
-			expect(plist).toContain(setting);
+			expect(result.code).toBe(0);
+			// Not even a read-only launchctl call, let alone bootout or bootstrap.
+			expect(result.calls).toEqual([]);
+			expect(readdirSync(result.home)).toEqual([]);
+			const plist = result.stdout;
+			for (const setting of [
+				'<string>io.github.stickerdaniel.line-mcp</string>',
+				`<string>${cli}</string>`,
+				'<string>daemon</string>',
+				'<key>RunAtLoad</key>\n\t<true/>',
+				'<key>KeepAlive</key>\n\t<true/>',
+				'<key>ThrottleInterval</key>\n\t<integer>30</integer>',
+				'<key>Umask</key>\n\t<integer>63</integer>',
+				`<key>LINE_MCP_HOME</key>\n\t\t<string>${result.state}</string>`,
+				'<key>LINE_MCP_PORT</key>\n\t\t<string>47900</string>',
+				posix.join(result.home, 'Library', 'Logs', 'line-mcp', 'daemon.log')
+			]) {
+				expect(plist).toContain(setting);
+			}
+			expect(plist).not.toContain('{{');
+			// The Node path must survive `brew upgrade`: never a versioned Cellar directory.
+			expect(plist).not.toMatch(/<string>[^<]*\/Cellar\/[^<]*<\/string>/);
+			const launchctl = `${process.execPath} ${serviceRunner} launchctl`;
+			expect(plist).toContain(
+				`\nwould run: ${launchctl} bootout ${agent}\n` +
+					`would run: ${launchctl} bootstrap ${domain} ${plistIn(result.home)}\n`
+			);
 		}
-		expect(plist).not.toContain('{{');
-		// The Node path must survive `brew upgrade`: never a versioned Cellar directory.
-		expect(plist).not.toMatch(/<string>[^<]*\/Cellar\/[^<]*<\/string>/);
-		const launchctl = `${process.execPath} ${serviceRunner} launchctl`;
-		expect(plist).toContain(
-			`\nwould run: ${launchctl} bootout ${agent}\n` +
-				`would run: ${launchctl} bootstrap ${domain} ${plistIn(result.home)}\n`
-		);
+	);
+
+	it.runIf(linux)(
+		'prints the unit and systemctl commands on a dry run and changes nothing',
+		async () => {
+			const result = await runCli(['install', '--dry-run'], { env: { LINE_MCP_PORT: '47900' } });
+
+			expect(result.code).toBe(0);
+			// Not even the read-only show.
+			expect(result.calls).toEqual([]);
+			expect(readdirSync(result.home)).toEqual([]);
+			const log = posix.join(result.home, '.local', 'state', 'line-mcp', 'daemon.log');
+			for (const line of [
+				`would write ${unitIn(result.home)}:\n[Unit]\n`,
+				`\nExecStart="${process.execPath}" "${cli}" daemon\n`,
+				`\nEnvironment="LINE_MCP_HOME=${result.state}"\n`,
+				'\nEnvironment="LINE_MCP_PORT=47900"\n',
+				`\nStandardOutput=append:${log}\n`,
+				'\nRestart=always\n',
+				'\nUMask=0077\n'
+			]) {
+				expect(result.stdout).toContain(line);
+			}
+			const systemctl = `${process.execPath} ${serviceRunner} systemctl --user`;
+			expect(result.stdout).toContain(
+				`would run: ${systemctl} stop line-mcp.service\n` +
+					`would run: ${systemctl} daemon-reload\n` +
+					`would run: ${systemctl} enable line-mcp.service\n` +
+					`would run: ${systemctl} start line-mcp.service\n`
+			);
+		}
+	);
+
+	// The service starts in another directory, where a relative root names another archive.
+	it('refuses a relative LINE_MCP_HOME', async () => {
+		const result = await runCli(['install', '--dry-run'], {
+			env: { LINE_MCP_HOME: join('relative', 'state') }
+		});
+
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain('"code":"invalid_state_root"');
+		expect(result.stdout).not.toContain('would write');
+		expect(result.launched).toBe(false);
 	});
 
 	// npm installs global bins on Windows as .cmd shims, and a symlink there needs a privilege.
 	it.skipIf(windows)(
 		'installs the real CLI file when started through a global bin symlink',
 		async () => {
+			const home = tempRoot();
 			const bin = join(tempRoot(), 'bin', 'line-mcp');
 			mkdirSync(dirname(bin));
 			symlinkSync(cliEntry, bin);
+			const { replies, calls } = host.install(home);
 
-			const result = await runCli(['install'], { script: bin });
+			const result = await runCli(['install'], { home, script: bin, replies });
 
 			expect(result.code).toBe(0);
-			expect(readFileSync(plistIn(result.home), 'utf-8')).toContain(
-				`<string>${cli}</string>\n\t\t<string>daemon</string>`
-			);
-			expect(result.calls.filter(([, command]) => command !== 'print')).toEqual([
-				['launchctl', 'bootout', agent],
-				['launchctl', 'bootstrap', domain, plistIn(result.home)]
-			]);
+			expect(readFileSync(host.definitionIn(home), 'utf-8')).toContain(host.runs(cli));
+			// launchd's `print` only reads, so the mutations are what counts.
+			expect(result.calls.filter(([, command]) => command !== 'print')).toEqual(calls);
 		}
 	);
 
-	// The npx guard matches `/` separators; Windows paths get it with the Windows backend.
-	it.skipIf(windows)('refuses to install from the npx cache, which npm may delete', async () => {
+	it('refuses to install from the npx cache, which npm may delete', async () => {
 		const install = await runCli(['install'], { script: npxCopy() });
 
 		expect(install.code).toBe(1);
@@ -191,24 +295,20 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(readdirSync(install.home)).toEqual([]);
 	});
 
-	// As above: the npx guard matches `/` separators only.
-	it.skipIf(windows)(
-		'still shows the LaunchAgent on a dry run from the npx cache, with the same advice',
-		async () => {
-			const copy = npxCopy();
+	it('still shows the service definition on a dry run from the npx cache, with the same advice', async () => {
+		const copy = npxCopy();
 
-			const dryRun = await runCli(['install', '--dry-run'], { script: copy });
+		const dryRun = await runCli(['install', '--dry-run'], { script: copy });
 
-			expect(dryRun.code).toBe(0);
-			expect(dryRun.stderr).toContain('npm i -g line-mcp-server');
-			expect(dryRun.stdout).toContain(`<string>${realpathSync(copy)}</string>`);
-			expect(dryRun.launched).toBe(false);
-		}
-	);
+		expect(dryRun.code).toBe(0);
+		expect(dryRun.stderr).toContain('npm i -g line-mcp-server');
+		expect(dryRun.stdout).toContain(host.runs(realpathSync(copy)));
+		expect(dryRun.launched).toBe(false);
+	});
 
 	// One CLI process per case: two in one test can outlast the default timeout on a loaded machine.
 	it.each(['--node', 'LINE_MCP_NODE'])(
-		'writes a validated Node override from %s into the LaunchAgent',
+		'writes a validated Node override from %s into the service definition',
 		async (source) => {
 			const node = nodeAt(join(tempRoot(), 'bin'));
 
@@ -218,9 +318,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 					: await runCli(['install', '--dry-run'], { env: { LINE_MCP_NODE: node } });
 
 			expect(result.code).toBe(0);
-			expect(result.stdout).toContain(
-				`<key>ProgramArguments</key>\n\t<array>\n\t\t<string>${node}</string>`
-			);
+			expect(result.stdout).toContain(host.starts(node));
 		}
 	);
 
@@ -282,7 +380,33 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(existsSync(databasePath(result.state))).toBe(true);
 	});
 
-	it('runs doctor offline and reports the missing LaunchAgent', async () => {
+	it.runIf(linux)('runs doctor offline and reports the missing unit', async () => {
+		const home = tempRoot();
+		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
+
+		const result = await runCli(['doctor'], {
+			home,
+			replies: {
+				show: unitState('not-found', 'inactive'),
+				'show-user': { stdout: 'Linger=yes\n' }
+			}
+		});
+
+		expect(result.code).toBe(1);
+		expect(result.stdout).toContain(
+			`FAIL systemd_unit: ${unitIn(home)} missing; run line-mcp install\n` +
+				'FAIL systemd_unit_loaded: line-mcp.service is not-found; run line-mcp install\n' +
+				'FAIL systemd_unit_active: line-mcp.service is inactive'
+		);
+		expect(result.stdout).toContain('ok   linger: on');
+		// Only queries: doctor never starts, stops or reloads anything.
+		expect(result.calls.map((call) => call.slice(0, 3))).toEqual([
+			['systemctl', '--user', 'show'],
+			['loginctl', 'show-user', String(userInfo().uid)]
+		]);
+	});
+
+	it.skipIf(linux)('runs doctor offline and reports the missing LaunchAgent', async () => {
 		const home = tempRoot();
 		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
 
@@ -298,7 +422,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(result.calls).toEqual([['launchctl', 'print', agent]]);
 	});
 
-	it.each([
+	it.skipIf(linux).each([
 		[0, 'ok   launch_agent_loaded: io.github.stickerdaniel.line-mcp is loaded'],
 		[113, 'FAIL launch_agent_loaded: io.github.stickerdaniel.line-mcp is not loaded'],
 		[5, 'FAIL launch_agent_loaded: launchctl print failed (5)']
@@ -314,7 +438,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		}
 	);
 
-	it.each([3, 113])(
+	it.skipIf(linux).each([3, 113])(
 		'treats a not-loaded agent as booted out (bootout exits %i)',
 		async (bootout) => {
 			const result = await uninstall(bootout);
@@ -324,7 +448,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		}
 	);
 
-	it('surfaces other launchctl errors on uninstall and keeps the plist', async () => {
+	it.skipIf(linux)('surfaces other launchctl errors on uninstall and keeps the plist', async () => {
 		const failed = await uninstall(5);
 
 		expect(failed.code).toBe(1);
@@ -333,20 +457,89 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(failed.plistKept).toBe(true);
 	});
 
-	// As above: a Cellar path has `/` separators.
-	it.skipIf(windows)(
-		'warns in doctor when the selected Node is a versioned Cellar path',
-		async () => {
-			const home = tempRoot();
-			seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
-			const node = nodeAt(join(tempRoot(), 'Cellar', 'node@24', '24.18.0', 'bin'));
+	it('warns in doctor when the selected Node is in a versioned directory', async () => {
+		const home = tempRoot();
+		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
+		const node = nodeAt(join(tempRoot(), '.nvm', 'versions', 'node', 'v24.18.0', 'bin'));
 
-			const result = await runCli(['doctor'], { home, env: { LINE_MCP_NODE: node } });
+		const result = await runCli(['doctor'], { home, env: { LINE_MCP_NODE: node } });
 
-			expect(result.stdout).toContain(`ok   node: ${node}`);
-			expect(result.stdout).toContain(`warn node_path: ${node} is a versioned Cellar path`);
+		expect(result.stdout).toContain(`ok   node: ${node}`);
+		expect(result.stdout).toContain(`warn node_path: ${node} is in a versioned nvm directory`);
+	});
+
+	it.each([
+		['installed', true],
+		['not installed', false]
+	])('hands the lock over around a login while the service is %s', async (_kind, installed) => {
+		const home = tempRoot();
+		if (installed) {
+			mkdirSync(dirname(host.definitionIn(home)), { recursive: true });
+			writeFileSync(host.definitionIn(home), '');
 		}
-	);
+		// A held lock fails the login before it reaches LINE.
+		const holder = createServer();
+		const port = await freePort();
+		await new Promise<void>((resolve) => holder.listen(port, '127.0.0.1', resolve));
+		let result: Awaited<ReturnType<typeof runCli>>;
+		try {
+			result = await runCli(['login'], {
+				home,
+				env: { LINE_MCP_LOCK_PORT: String(port) },
+				replies: { show: unitState('loaded', 'active', unitIn(home)) }
+			});
+		} finally {
+			holder.close();
+		}
+
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain('"code":"lock_held"');
+		const stopAndRestore = linux
+			? [
+					['systemctl', '--user', 'show', 'line-mcp.service', expect.any(String)],
+					['systemctl', '--user', 'stop', 'line-mcp.service'],
+					['systemctl', '--user', 'start', 'line-mcp.service']
+				]
+			: [
+					['launchctl', 'bootout', agent],
+					['launchctl', 'bootstrap', domain, plistIn(home)]
+				];
+		expect(result.calls.filter(([, command]) => command !== 'print')).toEqual(
+			installed ? stopAndRestore : []
+		);
+	});
+
+	it('fails with service_restore_failed when the service does not come back', async () => {
+		const home = tempRoot();
+		mkdirSync(dirname(host.definitionIn(home)), { recursive: true });
+		writeFileSync(host.definitionIn(home), '');
+		const holder = createServer();
+		const port = await freePort();
+		await new Promise<void>((resolve) => holder.listen(port, '127.0.0.1', resolve));
+		let result: Awaited<ReturnType<typeof runCli>>;
+		try {
+			result = await runCli(['login'], {
+				home,
+				env: { LINE_MCP_LOCK_PORT: String(port) },
+				// systemd: active before the stop, still inactive after the failed start.
+				replies: {
+					show: [unitState('loaded', 'active', unitIn(home)), unitState('loaded', 'inactive')],
+					start: { exit: 1 },
+					bootstrap: { exit: 5 }
+				}
+			});
+		} finally {
+			holder.close();
+		}
+
+		expect(result.code).toBe(1);
+		const error = JSON.parse(result.stderr.trim().split('\n').at(-1)!) as Record<string, string>;
+		expect(error.code).toBe('service_restore_failed');
+		expect(error.message).toContain('Run line-mcp install');
+		expect(error.message).toContain(
+			'The login failed too: Another process holds the line-mcp lock port'
+		);
+	});
 });
 
 // One cold CLI start per test, as above.

@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { userInfo } from 'node:os';
 import { posix } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { LineMcpError } from '../errors.ts';
+import { LineMcpError, mapError } from '../errors.ts';
 import { serviceTemplate } from '../paths.ts';
 import type { DryRun, Service, ServiceDeps } from './index.ts';
 
@@ -121,9 +121,29 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 			if (dryRun) console.log(`would remove ${paths.definition}`);
 			else rmSync(paths.definition, { force: true });
 		},
-		stop: () => bootout(),
+		async stop() {
+			await bootout();
+			// Today's handoff: bootstrap again whenever the plist is there.
+			return async () => {
+				if (existsSync(paths.definition)) await bootstrap();
+			};
+		},
 		start: () => bootstrap(),
 		installed: () => existsSync(paths.definition),
-		loaded: async () => (await run(['print', target])) === 'done'
+		async diagnose() {
+			const name = 'launch_agent_loaded';
+			try {
+				const loaded = (await run(['print', target])) === 'done';
+				return [
+					{
+						name,
+						ok: loaded,
+						detail: loaded ? `${label} is loaded` : `${label} is not loaded; run line-mcp install`
+					}
+				];
+			} catch (error) {
+				return [{ name, ok: false, detail: mapError(error, 'doctor').message }];
+			}
+		}
 	};
 }

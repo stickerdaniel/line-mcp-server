@@ -41,8 +41,23 @@ export function supportedNode(version: string | undefined): boolean {
 	return major > 24 || (major === 24 && minor >= 18);
 }
 
-export function isCellarPath(path: string): boolean {
-	return path.includes('/Cellar/');
+/**
+ * Install layouts that keep each Node version in its own directory, which
+ * goes away when that version is upgraded or removed; a service that runs a
+ * Node or CLI path inside one then fails to start.
+ */
+const versionedLayouts: [name: string, pattern: RegExp][] = [
+	['Homebrew Cellar', /[\\/]Cellar[\\/]/],
+	['nvm', /[\\/]\.nvm[\\/]versions[\\/]/],
+	['fnm', /[\\/](?:node-versions|fnm_multishells)[\\/]/],
+	['Volta', /[\\/]tools[\\/]image[\\/]node[\\/]/],
+	['asdf', /[\\/]installs[\\/]nodejs[\\/]/],
+	['snap', /[\\/]snap[\\/]node[\\/]x?\d+[\\/]/]
+];
+
+/** The versioned install layout `path` lies in, such as `nvm`, or undefined. */
+export function versionedLayout(path: string): string | undefined {
+	return versionedLayouts.find(([, pattern]) => pattern.test(path))?.[0];
 }
 
 /**

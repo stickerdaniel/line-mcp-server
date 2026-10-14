@@ -1,5 +1,8 @@
+import type { Check } from '../doctor.ts';
+import { LineMcpError, mapError } from '../errors.ts';
 import { launchd } from './launchd.ts';
 import type { ToolRunner } from './runner.ts';
+import { systemd } from './systemd.ts';
 
 export interface ServicePaths {
 	/** The definition file the service manager reads. */
@@ -22,6 +25,9 @@ export interface DryRun {
 	dryRun?: boolean;
 }
 
+/** Returns the service to the state it had before `stop()`. */
+export type Restore = () => Promise<void>;
+
 /**
  * The per-user service manager that keeps `line-mcp daemon` running. Every
  * failure rejects; an absent service counts as stopped only when the manager
@@ -30,30 +36,69 @@ export interface DryRun {
 export interface Service {
 	/** The manager's name for the service, as messages show it. */
 	readonly label: string;
-	/** Doctor's check for the definition; `<check>_loaded` checks the manager. */
+	/** Doctor's check for the definition. */
 	readonly check: string;
 	readonly paths: ServicePaths;
-	/** The definition for this Node, CLI entry and the variables `install` forwards. */
+	/**
+	 * The definition for this Node, CLI entry and the variables `install`
+	 * forwards. Rejects values the manager cannot run.
+	 */
 	render(input: { node: string; cli: string; env: NodeJS.ProcessEnv }): string;
 	/** Writes `definition` and restarts the service from it. */
 	install(definition: string, options?: DryRun): Promise<void>;
 	/** Stops the service and removes its definition. */
 	uninstall(options?: DryRun): Promise<void>;
-	/** Stops the service so another process can take the lock. */
-	stop(): Promise<void>;
-	/** Starts the installed service again after `stop`. */
+	/**
+	 * Stops the service so another process can take the lock. Either the
+	 * service ends up stopped, or it rejects having changed nothing.
+	 */
+	stop(): Promise<Restore>;
+	/** Starts the installed service; `install` uses it. */
 	start(): Promise<void>;
 	/** Whether the definition file exists. */
 	installed(): boolean;
-	/** Whether the manager has the service loaded. Read-only. */
-	loaded(): Promise<boolean>;
+	/** Doctor's read-only checks of the manager's view of the service. */
+	diagnose(): Promise<Check[]>;
 }
 
 const backends: Partial<Record<NodeJS.Platform, (deps: ServiceDeps) => Service>> = {
-	darwin: launchd
+	darwin: launchd,
+	linux: systemd
 };
 
-/** The backend for `platform`; until Linux and Windows get their own, launchd's. */
+/** The backend for `platform`; until Windows gets its own, launchd's. */
 export function serviceFor(platform: NodeJS.Platform, deps: ServiceDeps): Service {
 	return (backends[platform] ?? launchd)(deps);
+}
+
+/**
+ * Runs `body` with an installed service stopped, then returns the service to
+ * its prior state. A failed restore rejects with `service_restore_failed`
+ * after `body` printed its own result; when `body` failed too, the message
+ * carries its failure as well.
+ */
+export async function withServiceStopped<T>(service: Service, body: () => Promise<T>): Promise<T> {
+	const restore = service.installed() ? await service.stop() : undefined;
+	let outcome: { value: T } | { error: unknown };
+	try {
+		outcome = { value: await body() };
+	} catch (error) {
+		outcome = { error };
+	}
+	try {
+		await restore?.();
+	} catch (error) {
+		const also =
+			'error' in outcome
+				? ` The login failed too: ${mapError(outcome.error, 'login').message}`
+				: '';
+		throw new LineMcpError(
+			'service_restore_failed',
+			`${service.label} did not return to its state before the login: ` +
+				`${mapError(error, 'login').message}. Run line-mcp install to start it.${also}`,
+			{ cause: error }
+		);
+	}
+	if ('error' in outcome) throw outcome.error;
+	return outcome.value;
 }
