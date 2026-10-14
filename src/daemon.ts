@@ -184,13 +184,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 	let mcp: McpServer | undefined;
 	if (options.mcpPort !== false) {
 		try {
+			const root = options.root ?? stateRoot();
 			mcp = await startMcpServer(
 				{
 					db,
+					root,
 					base: session.base,
 					selfMid: session.account.mid,
 					pool,
-					attachments: attachmentsDir(options.root ?? stateRoot()),
+					attachments: attachmentsDir(root),
 					privacy,
 					status,
 					log

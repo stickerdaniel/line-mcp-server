@@ -11,8 +11,9 @@ import { findMessage, readEnvelope, type Service } from '../../archive.ts';
 import { LineMcpError, mapError } from '../../errors.ts';
 import { decryptMessage } from '../../keys.ts';
 import { decimal } from '../../probe.ts';
-import { describeMessage, findChat, personName, renderTime } from '../../queries.ts';
+import { describeMessage, findChat, personName } from '../../queries.ts';
 import { decodeEnvelope, millis } from '../../sync/normalize.ts';
+import { renderTime } from '../../time.ts';
 import { chatId, defineTool, messageId, service, type ToolContext } from '../tool.ts';
 
 // Tools that may ask LINE. Every request runs in the session's bounded pool

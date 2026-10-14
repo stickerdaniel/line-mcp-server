@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Buffer } from 'node:buffer';
 import { addSquareSelfMember, upsertChat } from '../src/archive.ts';
 import { openDatabase, transaction } from '../src/db.ts';
-import { renderTime, sizeCap } from '../src/queries.ts';
+import { sizeCap } from '../src/queries.ts';
 import { advanceMarker, observeSnapshot } from '../src/read-state.ts';
 import type { LogEntry } from '../src/session.ts';
 import { snapshotTalkReadState } from '../src/sync/backfill.ts';
@@ -12,6 +12,7 @@ import { Pool } from '../src/sync/loop.ts';
 import { applyChanges, type Change, type MessageRow } from '../src/sync/normalize.ts';
 import { drainTarget, sweepSquareChats, syncSquareOnce } from '../src/sync/square.ts';
 import { syncTalkOnce } from '../src/sync/talk.ts';
+import { renderTime } from '../src/time.ts';
 import { toolCommands } from '../src/tool-cli.ts';
 import {
 	dropNonTextColumns,

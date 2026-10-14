@@ -6,7 +6,7 @@
 
 ## Stack
 
-Node 24 runs the TypeScript sources directly (type stripping) in development and tests. The npm package ships `dist/cli.js`, which `bun run build` bundles from `src/` and the JSR packages; every package in `dependencies` stays external, so a new runtime dependency of the JSR packages must be added there or the build fails. Bun is the package manager. LINE access goes through `@evex/linejs` from JSR, the MCP server through `@prefecthq/fastmcp-ts`. When a dependency's behaviour matters, read its source at the version pinned in `bun.lock`.
+Node 24 runs the TypeScript sources directly (type stripping) in development and tests. The npm package ships `dist/cli.js` and the `query` tool's runner `dist/query-runner.js`, which `bun run build` bundles from `src/` and the JSR packages; every package in `dependencies` stays external, so a new runtime dependency of the JSR packages must be added there or the build fails. Bun is the package manager. LINE access goes through `@evex/linejs` from JSR, the MCP server through `@prefecthq/fastmcp-ts`. When a dependency's behaviour matters, read its source at the version pinned in `bun.lock`.
 
 ## Invariants
 

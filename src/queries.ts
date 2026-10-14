@@ -21,6 +21,7 @@ import {
 import { LineMcpError } from './errors.ts';
 import type { NonTextFields } from './non-text.ts';
 import { idOrder } from './read-state.ts';
+import { renderTime } from './time.ts';
 
 // The read side of the MCP tools: pages over the archive with display names,
 // opaque keyset cursors, times with the daemon's offset and a size cap per result.
@@ -29,32 +30,6 @@ export const defaultLimit = 50;
 export const maxLimit = 200;
 /** Item bytes one result carries; a fuller page ends early with a continuation. */
 export const sizeCap = 64 * 1024;
-
-const pad = (value: number, width = 2) => String(value).padStart(width, '0');
-
-/**
- * UTC milliseconds as ISO 8601 at millisecond precision in the daemon's system
- * time zone with its numeric offset, for example `2026-10-12T10:15:00.000+05:45`,
- * so the string names one instant. The zone is read on every call, so a changed
- * `TZ` applies without a restart.
- */
-export function renderTime(ms: number | null | undefined): string | null {
-	if (ms === null || ms === undefined || !Number.isFinite(ms) || ms <= 0) return null;
-	const date = new Date(ms);
-	const offset = -date.getTimezoneOffset();
-	const sign = offset < 0 ? '-' : '+';
-	return (
-		`${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-		`T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}` +
-		`.${pad(date.getMilliseconds(), 3)}` +
-		`${sign}${pad(Math.trunc(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`
-	);
-}
-
-/** The IANA time zone that times are rendered in right now. */
-export function timeZone(): string {
-	return Intl.DateTimeFormat().resolvedOptions().timeZone;
-}
 
 /** The fields of `T` that may be null become optional and never null. */
 type Present<T> = { [K in keyof T as null extends T[K] ? never : K]: T[K] } & {

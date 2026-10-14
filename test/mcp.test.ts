@@ -11,6 +11,7 @@ import type { Message } from '@evex/linejs-types';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { archiveStatus, upsertChat, upsertParticipant } from '../src/archive.ts';
 import { transaction } from '../src/db.ts';
+import { QueryRunner } from '../src/mcp/tools/query.ts';
 import { getAttachment, writeAll } from '../src/mcp/tools/upstream.ts';
 import { Outbox } from '../src/outbox.ts';
 import { statePrivacy } from '../src/privacy.ts';
@@ -1756,6 +1757,7 @@ describe('upstream tools', () => {
 		const cancel = new AbortController();
 		const context = {
 			db: session.db,
+			root,
 			base: session.base,
 			selfMid,
 			pool,
@@ -1763,7 +1765,9 @@ describe('upstream tools', () => {
 			privacy: statePrivacy(),
 			status: () => archiveStatus(session.db),
 			log: () => {},
-			outbox: new Outbox(session.db, { log: () => {} })
+			outbox: new Outbox(session.db, { log: () => {} }),
+			// Never started: no query runs here.
+			queries: new QueryRunner({ root, privacy: statePrivacy() })
 		};
 		const call = getAttachment.run(
 			{ service: 'talk', chat_id: otherMid, message_id: '74' },

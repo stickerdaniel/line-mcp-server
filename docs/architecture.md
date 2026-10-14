@@ -11,7 +11,7 @@ line-mcp works with one personal LINE account:
 
 ## Runtime
 
-Node 24.18 or later runs the TypeScript sources directly through type stripping. The npm package ships one bundle, `dist/cli.js`, built with Bun from `src/` and the JSR packages; npm installs the other dependencies. Bun manages packages. Tests run with Vitest and never contact LINE.
+Node 24.18 or later runs the TypeScript sources directly through type stripping. The npm package ships two bundles built with Bun from `src/` and the JSR packages: `dist/cli.js` and, beside it, `dist/query-runner.js`, the process the `query` tool runs SQL in; npm installs the other dependencies. Bun manages packages. Tests run with Vitest and never contact LINE.
 
 ## Principles
 
@@ -244,6 +244,16 @@ Every time is one ISO 8601 string at millisecond precision with the numeric offs
 ## Read tools
 
 The archive tools (`status`, `list_chats`, `list_unread`, `read_messages`, `search_messages`, `list_changes`) read only the local copy. `list_chats` gives each chat its newest message as `last_message`, the one `read_messages` shows last with threads included, found by one `message_chat_order` lookup per chat; its text is cut to 200 code points plus `…` with `text_truncated`, and the size cap counts it. `get_attachment`, `get_announcements` and `get_profile` ask LINE through the shared pool. `get_attachment` decrypts only messages whose exact key generations were verified, refuses unsent messages, and streams a download of at most 100 MiB into a private cache (`0700`) under the state directory. An E2EE file keeps its name inside the encrypted payload, so `get_attachment` decrypts the payload in the pool to report it, with or without a download; that costs at most the read-only key lookups, and a failed lookup leaves the name out.
+
+## SQL query tool
+
+`query` runs one read-only SQL statement over the archive (`src/query/`). `src/query/surface.ts` declares the readable relations and columns, the notes on what they mean and the caps; the guard's allowlist and the tool description both come from it, so a column is readable exactly when the description lists it.
+
+**Guard.** One read-only connection with SQLite limits (SQL 20,000 bytes, values 1 MiB) and an authorizer. It allows SELECT, recursive CTEs, built-in functions except `load_extension`, `local_time` (which is `renderTime`) and `PRAGMA data_version`. A listed column reads; an unlisted column of a listed table reads as NULL; any other table, the schema tables, `dbstat` and table-valued pragmas are denied, and so are writes, ATTACH, TEMP objects, transactions and other pragmas. FTS5's shadow tables keep trigrams of unsent text, so agent SQL never reads them. They are readable only while a statement steps, when the authorizer sees FTS5's own statements, and during a fixed zero-row warm-up before every agent statement, which reconnects `message_fts` after another connection changed the schema. A FROM item whose columns go unused (`count(*)`) may be a CTE, which SQLite names before it looks into it; it passes unless the name is a stored table or a virtual table module.
+
+**Runner.** node:sqlite cannot interrupt a statement, so SQL runs in a separate process, started on the first query and kept. Its main thread owns the 5 s limit and kills its own process at the limit or when its IPC channel closes, so a runaway statement never outlives the daemon; a worker thread holds the guard. The daemon runs one query at a time with at most 4 waiting (`query_busy` beyond), checks privacy before every start, starts a new runner when `TZ` changed, and kills the runner when a caller goes away. `McpServer.close()` ends it.
+
+**Results and logs.** A result has at most 200 rows and 64 KiB for the serialized `{ columns, rows, truncated }`; column names alone over 64 KiB fail. An error result stays under 4 KiB, SQLite's message cut to fit. That message can quote archive data, so it reaches only the tool result: every failure logs `tool_failed` with its code, and a denial logs `query_denied` with the action and an object from the surface's names, otherwise `other`.
 
 ## Read state
 

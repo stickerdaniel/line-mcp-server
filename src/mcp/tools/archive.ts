@@ -6,10 +6,9 @@ import {
 	listChatsPage,
 	listUnreadPage,
 	readMessagesPage,
-	renderTime,
-	searchMessagesPage,
-	timeZone
+	searchMessagesPage
 } from '../../queries.ts';
+import { renderTime, timeZone } from '../../time.ts';
 import { chatId, cursor, defineTool, limit, messageId, service } from '../tool.ts';
 
 // Tools that read only the local archive; none of them calls LINE.

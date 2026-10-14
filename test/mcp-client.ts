@@ -40,6 +40,7 @@ export interface Served {
 
 export interface ServeOptions {
 	maxAttachmentBytes?: number;
+	queryTimeoutMs?: number;
 	/** An existing state root, as left by an earlier server; a fresh one by default. */
 	root?: string;
 	/** Answers instead of `handlers` and `fetch`, for example at the HTTP layer. */
@@ -66,12 +67,14 @@ export async function serve(
 	const server = await startMcpServer(
 		{
 			db: session.db,
+			root,
 			base: session.base,
 			selfMid,
 			pool: options.pool ?? new Pool(2),
 			attachments: attachmentsDir(root),
 			privacy,
 			...(options.maxAttachmentBytes ? { maxAttachmentBytes: options.maxAttachmentBytes } : {}),
+			...(options.queryTimeoutMs ? { queryTimeoutMs: options.queryTimeoutMs } : {}),
 			status: () => archiveStatus(session.db),
 			log: (entry) => void logs.push(entry)
 		},
@@ -178,6 +181,7 @@ export async function listTools(port: number) {
 
 export interface Tool {
 	name: string;
+	description?: string;
 	inputSchema: {
 		type: 'object';
 		properties?: Record<string, { type?: string; anyOf?: unknown[] }>;
