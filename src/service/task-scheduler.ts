@@ -427,7 +427,6 @@ export function taskScheduler({
 	}
 
 	return {
-		supported: true,
 		label: 'the scheduled task',
 		check: 'service_launcher',
 		paths,

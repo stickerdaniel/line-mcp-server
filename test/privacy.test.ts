@@ -85,7 +85,6 @@ const depsFor = (home: string, runner: ToolRunner): AclDeps => ({ home, env: {},
 
 /** A service backend with nothing to check, which runs no tool. */
 const noService: Service = {
-	supported: false,
 	label: 'none',
 	check: 'service',
 	paths: { definition: '', logDir: '', log: '' },

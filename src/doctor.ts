@@ -81,9 +81,7 @@ export async function doctor(input: {
 	}
 
 	const { service } = input;
-	// A backend that installs nothing has no definition to compare; diagnose says so.
-	if (service.supported)
-		checks.push(await definitionCheck(service, { node, cli: input.cli, env: input.env }));
+	checks.push(await definitionCheck(service, { node, cli: input.cli, env: input.env }));
 	checks.push(...(await service.diagnose()));
 	const held = await lockInUse();
 	checks.push({

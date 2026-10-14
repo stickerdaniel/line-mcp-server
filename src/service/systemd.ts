@@ -206,7 +206,6 @@ export function systemd({ home, env, runner }: ServiceDeps): Service {
 	}
 
 	return {
-		supported: true,
 		label: unit,
 		check: 'systemd_unit',
 		paths,

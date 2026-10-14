@@ -111,7 +111,6 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 	}
 
 	return {
-		supported: true,
 		label,
 		check: 'launch_agent',
 		paths,

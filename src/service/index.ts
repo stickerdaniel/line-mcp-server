@@ -40,8 +40,6 @@ export type Restore = () => Promise<void>;
  * said so.
  */
 export interface Service {
-	/** Whether the backend installs a service; doctor compares its definition only then. */
-	readonly supported: boolean;
 	/** The manager's name for the service, as messages show it. */
 	readonly label: string;
 	/** Doctor's check for the definition. */
