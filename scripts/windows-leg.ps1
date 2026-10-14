@@ -58,3 +58,4 @@ Invoke-Admin 'admin'
 Invoke-Standard 'prepare'
 Invoke-Admin 'plant' @('lmcp-other')
 Invoke-Standard 'assert'
+Invoke-Standard 'service'

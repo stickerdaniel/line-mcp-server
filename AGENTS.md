@@ -2,7 +2,7 @@
 
 > `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md`.
 
-`line-mcp` mirrors one personal LINE account into local SQLite and serves it to coding agents as an MCP server. A Node 24 daemon, run by launchd on macOS and by a systemd user unit on Linux, owns the only LINE session. Architecture and invariants: [`docs/architecture.md`](docs/architecture.md). Read it before changing session, sync, storage or tool code.
+`line-mcp` mirrors one personal LINE account into local SQLite and serves it to coding agents as an MCP server. A Node 24 daemon, run by launchd on macOS, by a systemd user unit on Linux and by a scheduled task on Windows, owns the only LINE session. Architecture and invariants: [`docs/architecture.md`](docs/architecture.md). Read it before changing session, sync, storage or tool code.
 
 ## Stack
 

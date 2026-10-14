@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { archiveStatus } from './archive.ts';
@@ -81,9 +81,7 @@ export async function doctor(input: {
 	}
 
 	const { service } = input;
-	// Without a backend there is no definition to compare; diagnose says so.
-	if (service.supported)
-		checks.push(definitionCheck(service, { node, cli: input.cli, env: input.env }));
+	checks.push(await definitionCheck(service, { node, cli: input.cli, env: input.env }));
 	checks.push(...(await service.diagnose()));
 	const held = await lockInUse();
 	checks.push({
@@ -97,13 +95,13 @@ export async function doctor(input: {
 }
 
 /** Whether the service definition on disk is the one `install` would write now. */
-function definitionCheck(
+async function definitionCheck(
 	service: Service,
 	input: { node: string; cli: string; env: NodeJS.ProcessEnv }
-): Check {
+): Promise<Check> {
 	const { definition } = service.paths;
-	const installed = existsSync(definition) ? readFileSync(definition, 'utf-8') : undefined;
 	try {
+		const installed = await service.readDefinition();
 		const expected = service.render(input);
 		return {
 			name: service.check,

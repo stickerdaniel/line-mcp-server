@@ -49,6 +49,8 @@ export function supportedNode(version: string | undefined): boolean {
 const versionedLayouts: [name: string, pattern: RegExp][] = [
 	['Homebrew Cellar', /[\\/]Cellar[\\/]/],
 	['nvm', /[\\/]\.nvm[\\/]versions[\\/]/],
+	// nvm-windows keeps each version in `%APPDATA%\nvm\v<version>`.
+	['nvm-windows', /[\\/]nvm[\\/]v\d/i],
 	['fnm', /[\\/](?:node-versions|fnm_multishells)[\\/]/],
 	['Volta', /[\\/]tools[\\/]image[\\/]node[\\/]/],
 	['asdf', /[\\/]installs[\\/]nodejs[\\/]/],

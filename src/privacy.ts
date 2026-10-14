@@ -42,6 +42,13 @@ export interface StatePrivacy {
 	 * the chain, since a first login refuses an exposed one.
 	 */
 	diagnose(root: string): Promise<{ checks: Check[]; readable: boolean }>;
+	/**
+	 * Doctor's checks, named `name`, of a directory outside the state root
+	 * (the Windows service's), its parents in the profile and `files` inside
+	 * it, any of which may be missing; creates nothing. macOS and Linux give
+	 * none: their service backends check file modes.
+	 */
+	diagnoseDirectory(name: string, dir: string, files: string[]): Promise<Check[]>;
 }
 
 const mode = (path: string) => statSync(path).mode & 0o777;
@@ -66,7 +73,8 @@ const posixPrivacy: StatePrivacy = {
 			],
 			readable: true
 		};
-	}
+	},
+	diagnoseDirectory: async () => []
 };
 
 function windowsPrivacy(deps: AclDeps): StatePrivacy {
@@ -84,6 +92,41 @@ function windowsPrivacy(deps: AclDeps): StatePrivacy {
 		// New directories only, and never the anchor: no exception applies.
 		refuseExposed(await checkPrivate(missing, deps));
 	}
+	/**
+	 * Doctor's checks of `target`, its chain and `files`: one passing check
+	 * worded by `passed`, given whether `target` exists, or one failing check
+	 * per object that is not private, with its fix, or one for a check that
+	 * could not run.
+	 */
+	async function audit(
+		name: string,
+		target: string,
+		files: string[],
+		passed: (exists: boolean) => string
+	): Promise<Check[]> {
+		let inspection: Inspection;
+		let confined: Confined;
+		try {
+			confined = confine(target, deps.home);
+			inspection = await checkPrivate([...confined.chain, ...files], deps, confined.anchor);
+		} catch (error) {
+			return [{ name, ok: false, detail: mapError(error, 'doctor').message }];
+		}
+		const exposed = inspection.objects.filter((object) => object.exposures.length > 0);
+		if (exposed.length === 0) {
+			// The target is the last entry of the chain, which comes first.
+			return [
+				{ name, ok: true, detail: passed(inspection.objects[confined.chain.length - 1]!.exists) }
+			];
+		}
+		return exposed.map((object) => ({
+			name,
+			ok: false,
+			detail:
+				`${object.path} is not private: ${object.exposures.map(describeExposure).join('; ')}. ` +
+				`Fix (PowerShell): ${remedy(object, inspection.user)}`
+		}));
+	}
 	const directories = new Map<string, Promise<void>>();
 	return {
 		database: (root, { create = false } = {}) => secure(root, databaseFiles(root), create),
@@ -99,50 +142,23 @@ function windowsPrivacy(deps: AclDeps): StatePrivacy {
 		},
 		file: (path) => secure(path, [], false),
 		diagnose: async (root) => {
-			const name = 'privacy';
-			let inspection: Inspection;
-			let confined: Confined;
-			try {
-				confined = confine(root, deps.home);
-				inspection = await checkPrivate(
-					[...confined.chain, ...databaseFiles(root), attachmentsDir(root)],
-					deps,
-					confined.anchor
-				);
-			} catch (error) {
-				return {
-					checks: [{ name, ok: false, detail: mapError(error, 'doctor').message }],
-					readable: false
-				};
-			}
-			const exposed = inspection.objects.filter((object) => object.exposures.length > 0);
-			if (exposed.length === 0) {
-				// The root is the last entry of the chain, which comes first.
-				const rootExists = inspection.objects[confined.chain.length - 1]!.exists;
-				return {
-					checks: [
-						{
-							name,
-							ok: true,
-							detail: rootExists
-								? `${root}, its parents in your profile, and the database files and attachment cache that exist are private`
-								: `${root} does not exist yet; the directories above it in your profile that exist are private`
-						}
-					],
-					readable: true
-				};
-			}
-			return {
-				checks: exposed.map((object) => ({
-					name,
-					ok: false,
-					detail:
-						`${object.path} is not private: ${object.exposures.map(describeExposure).join('; ')}. ` +
-						`Fix (PowerShell): ${remedy(object, inspection.user)}`
-				})),
-				readable: false
-			};
-		}
+			const checks = await audit(
+				'privacy',
+				root,
+				[...databaseFiles(root), attachmentsDir(root)],
+				(exists) =>
+					exists
+						? `${root}, its parents in your profile, and the database files and attachment cache that exist are private`
+						: `${root} does not exist yet; the directories above it in your profile that exist are private`
+			);
+			return { checks, readable: checks.every((check) => check.ok) };
+		},
+		diagnoseDirectory: (name, dir, files) =>
+			audit(name, dir, files, (exists) =>
+				exists
+					? `${dir}, its parents in your profile, and the files in it that exist are private`
+					: `${dir} does not exist yet; the directories above it in your profile that exist are private`
+			)
 	};
 }
 

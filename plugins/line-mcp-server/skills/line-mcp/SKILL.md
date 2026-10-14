@@ -5,7 +5,7 @@ description: Read, search and act in the chats of the LINE account connected to 
 
 # line-mcp CLI
 
-Run the commands below with `line-mcp`, which `npm i -g line-mcp-server` puts on PATH. They talk to the line-mcp daemon on 127.0.0.1 (port 47822, or $LINE_MCP_PORT). Every result reports `stale` and the last sync times; check them before treating a result as current. Each time is an ISO 8601 string with the offset of the daemon's time zone, which `sync-status` reports as `time_zone`. Pass a result's cursor back unchanged to continue.
+Run the commands below with `line-mcp`, which `npm i -g line-mcp-server` puts on PATH; in PowerShell, use `line-mcp.cmd` when the execution policy blocks `line-mcp`. They talk to the line-mcp daemon on 127.0.0.1 (port 47822, or `LINE_MCP_PORT` when set). Every result reports `stale` and the last sync times; check them before treating a result as current. Each time is an ISO 8601 string with the offset of the daemon's time zone, which `sync-status` reports as `time_zone`. Pass a result's cursor back unchanged to continue.
 
 Message and chat items leave out fields without a value: an absent `unsent` means false, an absent `decrypt_state` means `ok`, and an absent `from_self` means unknown.
 

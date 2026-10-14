@@ -229,7 +229,11 @@ async function runUninstall(args: string[]): Promise<number> {
 	// Taking the lock proves no daemon or login is still using the archive.
 	const lock = await acquireLock();
 	try {
-		rmSync(root, { recursive: true, force: true });
+		// On Windows, a root that is not private (a link, say) is not deleted.
+		await statePrivacy().database(root);
+		// Windows may hold a file a moment after the daemon closed it (antivirus, indexing).
+		const retries = process.platform === 'win32' ? { maxRetries: 10, retryDelay: 200 } : {};
+		rmSync(root, { recursive: true, force: true, ...retries });
 	} finally {
 		await lock.release();
 	}

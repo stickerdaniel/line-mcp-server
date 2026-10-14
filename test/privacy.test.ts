@@ -16,7 +16,7 @@ import { type AclDeps, checkPrivate, confine, exposuresOf } from '../src/acl.ts'
 import { doctor } from '../src/doctor.ts';
 import { databasePath } from '../src/paths.ts';
 import { statePrivacy } from '../src/privacy.ts';
-import { serviceFor } from '../src/service/index.ts';
+import type { Service } from '../src/service/index.ts';
 import type { RunOptions, ToolResult, ToolRunner } from '../src/service/runner.ts';
 import { openSession } from '../src/session.ts';
 import { freePort, seedLive, selfMid, tempRoot } from './fake-line.ts';
@@ -83,11 +83,26 @@ function profile(): string {
 
 const depsFor = (home: string, runner: ToolRunner): AclDeps => ({ home, env: {}, runner });
 
+/** A service backend with nothing to check, which runs no tool. */
+const noService: Service = {
+	label: 'none',
+	check: 'service',
+	paths: { definition: '', logDir: '', log: '' },
+	render: () => '',
+	install: async () => {},
+	uninstall: async () => {},
+	stop: async () => async () => {},
+	start: async () => {},
+	installed: () => false,
+	readDefinition: async () => undefined,
+	diagnose: async () => []
+};
+
 /** Doctor on `root` with the privacy guard of `platform` and no service backend. */
 const doctorOn = (root: string, platform: NodeJS.Platform, home: string, runner: ToolRunner) =>
 	doctor({
 		root,
-		service: serviceFor('win32', { home, env: {}, runner }),
+		service: noService,
 		privacy: statePrivacy(platform, depsFor(home, runner)),
 		env: {},
 		cli: '/opt/line-mcp/dist/cli.js',
@@ -558,7 +573,7 @@ describe('the Windows state guard', () => {
 			}
 		]);
 		expect(checks.map(({ name }) => name)).not.toContain('account');
-		// Only the privacy check ran a tool: no service manager call.
+		// Only the privacy check ran a tool.
 		expect(new Set(fake.calls.map(({ tool }) => tool))).toEqual(new Set(['powershell.exe']));
 	});
 

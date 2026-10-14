@@ -1,13 +1,14 @@
+import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { posix } from 'node:path';
+import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { LineMcpError } from '../src/errors.ts';
 import { type Service, serviceFor, withServiceStopped } from '../src/service/index.ts';
 import { versionedLayout } from '../src/service/node.ts';
 import { type ToolResult, type ToolRunner, toolRunner } from '../src/service/runner.ts';
-import { tempRoot, tree, within } from './fake-line.ts';
+import { tempRoot, within } from './fake-line.ts';
 
 const runner = toolRunner({
 	LINE_MCP_SERVICE_RUNNER: fileURLToPath(new URL('fixtures/service-runner.ts', import.meta.url))
@@ -297,6 +298,38 @@ describe('tool runner', () => {
 				}
 			};
 			await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 2000, interval: 20 });
+		}
+	);
+
+	// A Ctrl-C during a login's stop or restore must not end schtasks halfway.
+	it.runIf(windows)(
+		'keeps a console Ctrl-C from the tools it runs',
+		{ timeout: 60_000 },
+		async () => {
+			const out = join(tempRoot(), 'interrupt.json');
+			const helper = fileURLToPath(new URL('fixtures/console-interrupt.ts', import.meta.url));
+
+			// `start` gives the helper a console of its own, which nothing else here shares.
+			await new Promise((resolve) =>
+				execFile(
+					'cmd.exe',
+					[
+						'/d',
+						'/s',
+						'/c',
+						`"start "line-mcp test" /wait "${process.execPath}" "${helper}" "${out}""`
+					],
+					{ windowsVerbatimArguments: true },
+					resolve
+				)
+			);
+
+			const result = JSON.parse(readFileSync(out, 'utf-8')) as Record<string, unknown>;
+			// The Ctrl-C reached the console: this process got it, and it ended the plain child.
+			expect(result.interrupted).toBe(true);
+			expect(result.plain).not.toBe('running');
+			expect(result.plain).not.toBe(0);
+			expect(result.tool).toBe('running');
 		}
 	);
 });
@@ -1043,72 +1076,6 @@ describe('systemd', () => {
 	});
 });
 
-/** A home with a stray LaunchAgent and systemd unit, and a runner that only records. */
-function stray() {
-	const home = tempRoot();
-	for (const definition of [
-		posix.join(home, 'Library', 'LaunchAgents', 'io.github.stickerdaniel.line-mcp.plist'),
-		unitIn(home)
-	]) {
-		mkdirSync(posix.dirname(definition), { recursive: true });
-		writeFileSync(definition, 'stray');
-	}
-	const calls: string[][] = [];
-	const recording: ToolRunner = {
-		run: async (tool, args) => {
-			calls.push([tool, ...args]);
-			return exit(0);
-		},
-		describe: (tool, args) => [tool, ...args].join(' ')
-	};
-	return { home, calls, service: serviceFor('win32', { home, env: {}, runner: recording }) };
-}
-
-describe('a platform without a backend (Windows)', () => {
-	it('refuses every change before it writes, prints or runs anything', async () => {
-		const { home, calls, service } = stray();
-		const before = tree(home);
-		const log = vi.spyOn(console, 'log');
-		onTestFinished(() => log.mockRestore());
-		const unsupported = expect.objectContaining({
-			code: 'service_unsupported',
-			message: expect.stringContaining('run line-mcp daemon in the foreground')
-		});
-
-		expect(service.supported).toBe(false);
-		expect(() => service.render({ node: '/usr/bin/node', cli: '/cli.js', env: {} })).toThrow(
-			unsupported
-		);
-		for (const change of [
-			() => service.install('definition'),
-			() => service.install('definition', { dryRun: true }),
-			() => service.uninstall(),
-			() => service.uninstall({ dryRun: true }),
-			() => service.start()
-		]) {
-			await expect(change()).rejects.toEqual(unsupported);
-		}
-
-		expect(service.installed()).toBe(false);
-		expect(await service.diagnose()).toEqual([
-			{ name: 'service', ok: true, warning: true, detail: expect.stringContaining('Windows') }
-		]);
-		expect(calls).toEqual([]);
-		expect(log).not.toHaveBeenCalled();
-		expect(tree(home)).toEqual(before);
-	});
-
-	it('runs a login without stopping or restoring anything', async () => {
-		const { calls, service } = stray();
-
-		expect(await withServiceStopped(service, async () => 'logged in')).toBe('logged in');
-		await (
-			await service.stop()
-		)();
-		expect(calls).toEqual([]);
-	});
-});
-
 describe('versioned Node layouts', () => {
 	// Each of these directories goes away with its version, and the service with it.
 	it.each([
@@ -1120,6 +1087,8 @@ describe('versioned Node layouts', () => {
 		['/home/me/.asdf/installs/nodejs/24.18.0/bin/node', 'asdf'],
 		['/snap/node/9876/bin/node', 'snap'],
 		['C:\\Users\\me\\.nvm\\versions\\node\\v24.18.0\\bin\\node.exe', 'nvm'],
+		['C:\\Users\\me\\AppData\\Roaming\\nvm\\v24.18.0\\node.exe', 'nvm-windows'],
+		['C:\\Program Files\\nodejs\\node.exe', undefined],
 		['/usr/bin/node', undefined],
 		['/snap/bin/node', undefined],
 		['/opt/homebrew/opt/node@24/bin/node', undefined]

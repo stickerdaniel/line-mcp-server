@@ -29,9 +29,10 @@ export const defaultToolTimeoutMs = 15_000;
 
 /**
  * Runs each tool by the path or name the backend gives, with a per-call
- * timeout. On POSIX each tool runs in its own session, so a Ctrl-C in the
- * terminal reaches only line-mcp, which cancels a login and lets a stop or a
- * restore in progress finish (`runLogin`). `LINE_MCP_SERVICE_RUNNER` in `env`
+ * timeout. Each tool runs in its own session on POSIX, and with a hidden
+ * console of its own on Windows, so a Ctrl-C in the terminal reaches only line-mcp, which
+ * cancels a login and lets a stop or a restore in progress finish
+ * (`runLogin`). `LINE_MCP_SERVICE_RUNNER` in `env`
  * is a test seam: with `<file>` set, every call runs as
  * `node <file> <tool name> ...args` instead (test/fixtures/service-runner.ts),
  * so tests never reach the real service manager.
@@ -44,12 +45,17 @@ export function toolRunner(env: NodeJS.ProcessEnv = process.env): ToolRunner {
 		run: (tool, args, { timeoutMs = defaultToolTimeoutMs, env: toolEnv } = {}) =>
 			new Promise((resolve) => {
 				const [file, argv] = command(tool, args);
-				// `detached` gives the tool its own session and process group;
-				// execFile ignores it, and on Windows it would open a console instead.
+				// `detached` gives the tool its own session and process group on
+				// POSIX. On Windows `windowsHide`, with no inherited stdio, gives it a
+				// console of its own without a window (CREATE_NO_WINDOW), so no Ctrl-C
+				// on the terminal's console reaches it. `detached` there would leave
+				// it without any console (DETACHED_PROCESS), and PowerShell then
+				// writes nothing to its stdout.
 				const ownGroup = process.platform !== 'win32';
 				const child = spawn(file, argv, {
 					stdio: ['ignore', 'pipe', 'ignore'],
 					detached: ownGroup,
+					windowsHide: true,
 					env: toolEnv
 				});
 				let stdout = '';

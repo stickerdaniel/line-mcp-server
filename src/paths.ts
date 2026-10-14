@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join, posix, win32 } from 'node:path';
+import { isAbsolute, join, posix, sep } from 'node:path';
 
 /**
  * An XDG base directory from `env`, or `fallback` under `home`. The XDG spec
@@ -31,13 +31,24 @@ export function stateRoot(
 	if (platform === 'linux') {
 		return posix.join(xdgDir(env, 'XDG_DATA_HOME', home, '.local/share'), 'line-mcp');
 	}
-	if (platform === 'win32') {
-		const local = env.LOCALAPPDATA;
-		// A drive and its root, or a UNC path: `\dir` and `C:dir` depend on the current directory.
-		const absolute = local !== undefined && /^(?:[a-z]:[\\/]|[\\/]{2})/i.test(local);
-		return win32.join(absolute ? local : win32.join(home, 'AppData', 'Local'), 'line-mcp');
-	}
+	if (platform === 'win32') return windowsAppDir(env, home);
 	return join(home, 'Library', 'Application Support', 'line-mcp');
+}
+
+/**
+ * `%LOCALAPPDATA%\line-mcp`, or `<home>\AppData\Local\line-mcp` when that is
+ * not an absolute path: the default state root on Windows, which also keeps
+ * the service's files and logs whatever `LINE_MCP_HOME` says. Joined with
+ * this OS's separator, so tests of the Windows backend elsewhere get paths
+ * they can write.
+ */
+export function windowsAppDir(env: NodeJS.ProcessEnv, home: string): string {
+	const local = env.LOCALAPPDATA;
+	// A drive and its root, or a UNC path: `\dir` and `C:dir` depend on the current directory.
+	const absolute =
+		local !== undefined &&
+		(sep === '\\' ? /^(?:[a-z]:[\\/]|[\\/]{2})/i.test(local) : isAbsolute(local));
+	return join(absolute ? local : join(home, 'AppData', 'Local'), 'line-mcp');
 }
 
 export function databasePath(root: string): string {

@@ -19,7 +19,7 @@ import { openDatabase, setAuthState } from '../src/db.ts';
 import { lockInUse, requestStop } from '../src/lock.ts';
 import { selectNode } from '../src/service/node.ts';
 import { databasePath } from '../src/paths.ts';
-import { freePort, nodeAt, seedLive, selfMid, tempRoot, tree, within } from './fake-line.ts';
+import { freePort, nodeAt, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
 import { callTool, cliEntry, type ToolCall } from './mcp-client.ts';
 
 /** The real path of the CLI under test, which `install` writes into the LaunchAgent. */
@@ -534,13 +534,14 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 
 		expect(result.code).toBe(1);
 		expect(result.stderr).toContain('"code":"lock_held"');
-		// Windows has no service, so a stray plist hands nothing over.
+		// A plist is not the Windows service's definition, so it hands nothing over
+		// there; 'Windows scheduled task' tests the Windows handoff.
 		expect(result.calls.filter(([, command]) => command !== 'print')).toEqual(
 			installed && !windows ? host.handoff(home) : []
 		);
 	});
 
-	// Windows has no service to restore.
+	// Windows: test/task-scheduler.test.ts.
 	it.skipIf(windows)(
 		'fails with service_restore_failed when the service does not come back',
 		async () => {
@@ -581,40 +582,169 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 const failure = (stderr: string) =>
 	JSON.parse(stderr.trim().split('\n').at(-1)!) as Record<string, string>;
 
-describe.runIf(windows)('Windows without a service backend', { timeout: 15_000 }, () => {
-	it.each([
-		[['install']],
-		[['install', '--dry-run']],
-		[['uninstall', '--purge']],
-		[['uninstall', '--dry-run', '--purge']]
-	])('refuses %j before it changes anything, beside a stray plist', async (args) => {
-		const home = tempRoot();
-		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
-		mkdirSync(dirname(plistIn(home)), { recursive: true });
-		writeFileSync(plistIn(home), 'stray');
-		const before = tree(home);
+const sid = 'S-1-5-21-1-2-3-1001';
+const task = `line-mcp-${sid}`;
+/** whoami's answer for the user the fake Task Scheduler knows. */
+const whoami: Reply = { stdout: `"host\\me","${sid}"\r\n` };
+/** service/task-state.js's answer for a registered task. */
+const registered = (state: number, enabled: boolean): Reply => ({
+	stdout: `${JSON.stringify({ exists: true, state, enabled, instances: 0, lastResult: 0, command: '', arguments: '' })}\r\n`
+});
+const absentTask: Reply = { stdout: '{"exists":false}\r\n' };
+const serviceDirIn = (home: string) => join(home, 'AppData', 'Local', 'line-mcp', 'service');
+const whoamiCall = ['whoami', '/user', '/fo', 'csv', '/nh'];
+const queryCall = [
+	'cscript',
+	'//Nologo',
+	'//E:JScript',
+	expect.stringMatching(/task-state\.js$/),
+	task
+];
 
-		const result = await runCli(args, { home });
+// Each command starts PowerShell for the privacy checks.
+describe.runIf(windows)('Windows scheduled task', { timeout: 30_000 }, () => {
+	it('prints the launcher, the task and the schtasks commands on a dry run and changes nothing', async () => {
+		const result = await runCli(['install', '--dry-run'], {
+			env: { LINE_MCP_PORT: '47900' },
+			replies: { whoami }
+		});
 
-		expect(result.code).toBe(1);
-		expect(failure(result.stderr)).toMatchObject({ code: 'service_unsupported' });
-		expect(result.stdout).toBe('');
-		expect(result.calls).toEqual([]);
-		expect(tree(home)).toEqual(before);
+		expect(result.code).toBe(0);
+		// Reading the user SID is all it runs.
+		expect(result.calls).toEqual([whoamiCall]);
+		expect(readdirSync(result.home)).toEqual(['service-calls']);
+		const launcher = join(serviceDirIn(result.home), 'line-mcp.js');
+		for (const line of [
+			`would write ${launcher}:\n`,
+			'\nenv("LINE_MCP_SERVICE") = "task";\n',
+			`\nenv("LINE_MCP_HOME") = ${JSON.stringify(result.state)};\n`,
+			'\nenv("LINE_MCP_PORT") = "47900";\n',
+			`<UserId>${sid}</UserId>`,
+			`would run: ${process.execPath} ${serviceRunner} schtasks /Create /TN ${task} /XML `,
+			`would run: ${process.execPath} ${serviceRunner} schtasks /Run /TN ${task}\n`
+		]) {
+			expect(result.stdout).toContain(line);
+		}
 	});
 
-	it('runs doctor on the checked state without a service manager call', async () => {
+	it('runs doctor on the task and its files without changing anything', async () => {
 		const home = tempRoot();
 		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
 
-		const result = await runCli(['doctor'], { home });
+		const result = await runCli(['doctor'], { home, replies: { whoami, cscript: absentTask } });
 
-		expect(result.stdout).toContain(`ok   privacy: ${join(home, 'state')}, its parents`);
-		expect(result.stdout).toContain(`ok   account: ${selfMid} on ANDROIDSECONDARY, active`);
-		expect(result.stdout).toContain(
-			'warn service: line-mcp has no background service on Windows yet'
-		);
+		const dir = serviceDirIn(home);
+		for (const line of [
+			`ok   privacy: ${join(home, 'state')}, its parents`,
+			`ok   account: ${selfMid} on ANDROIDSECONDARY, active`,
+			`FAIL service_launcher: ${join(dir, 'line-mcp.js')} missing; run line-mcp install\n`,
+			`FAIL scheduled_task: ${task} is not registered; run line-mcp install\n`,
+			`ok   service_privacy: ${dir} does not exist yet`,
+			`ok   log_privacy: ${join(home, 'AppData', 'Local', 'line-mcp', 'logs')} does not exist yet`
+		]) {
+			expect(result.stdout).toContain(line);
+		}
+		expect(result.calls).toEqual([whoamiCall, queryCall]);
+	});
+
+	it('hands the lock over around a login: disables the task, then enables it again', async () => {
+		const home = tempRoot();
+		mkdirSync(serviceDirIn(home), { recursive: true });
+		writeFileSync(join(serviceDirIn(home), 'line-mcp.js'), '');
+		// A held lock fails the login before it reaches LINE.
+		const holder = createServer();
+		const port = await freePort();
+		await new Promise<void>((resolve) => holder.listen(port, '127.0.0.1', resolve));
+		let result: Awaited<ReturnType<typeof runCli>>;
+		try {
+			result = await runCli(['login'], {
+				home,
+				env: { LINE_MCP_LOCK_PORT: String(port) },
+				// Enabled and idle, then disabled after the stop.
+				replies: { whoami, cscript: [registered(3, true), registered(1, false)] }
+			});
+		} finally {
+			holder.close();
+		}
+
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain('"code":"lock_held"');
+		expect(result.calls).toEqual([
+			whoamiCall,
+			queryCall,
+			['schtasks', '/Change', '/TN', task, '/Disable'],
+			queryCall,
+			['schtasks', '/Change', '/TN', task, '/Enable']
+		]);
+	});
+
+	it('purges a private state root after the task is gone', async () => {
+		const home = tempRoot();
+		const state = join(home, 'state');
+		seedLive(state, selfMid, { authToken: 'token' });
+
+		const result = await runCli(['uninstall', '--purge'], {
+			home,
+			replies: { whoami, cscript: absentTask }
+		});
+
+		expect(result.code).toBe(0);
+		expect(result.stdout).toContain(`deleted ${state}`);
+		expect(existsSync(state)).toBe(false);
+		// An absent task is neither stopped nor deleted.
+		expect(result.calls).toEqual([whoamiCall, queryCall]);
+	});
+
+	it.each([
+		[
+			'an existing log that grants everyone access',
+			(log: string) => {
+				writeFileSync(log, '');
+				execFileSync('icacls', [log, '/grant', '*S-1-1-0:(R)']);
+				return [];
+			}
+		],
+		[
+			'a log that links to a missing file',
+			(log: string) => {
+				const outside = join(tempRoot(), 'outside.log');
+				symlinkSync(outside, log, 'file');
+				return [outside];
+			}
+		]
+	])('refuses %s before it stops, writes or opens anything', async (_, plant) => {
+		const home = tempRoot();
+		const logs = join(home, 'AppData', 'Local', 'line-mcp', 'logs');
+		mkdirSync(logs, { recursive: true });
+		// Files that must not come into being.
+		const absent = plant(join(logs, 'daemon.log'));
+
+		const result = await runCli(['install'], { home, replies: { whoami, cscript: absentTask } });
+
+		expect(result.code).toBe(1);
+		expect(failure(result.stderr)).toMatchObject({
+			code: 'insecure_directory',
+			message: expect.stringContaining('Nothing was stopped or written')
+		});
 		expect(result.calls).toEqual([]);
+		expect(readdirSync(serviceDirIn(home))).toEqual([]);
+		expect(absent.filter((file) => existsSync(file))).toEqual([]);
+	});
+
+	it('keeps a state root that is not private on uninstall --purge', async () => {
+		const home = tempRoot();
+		const state = join(home, 'state');
+		seedLive(state, selfMid, { authToken: 'token' });
+		execFileSync('icacls', [state, '/grant', '*S-1-1-0:(OI)(CI)(R)']);
+
+		const result = await runCli(['uninstall', '--purge'], {
+			home,
+			replies: { whoami, cscript: absentTask }
+		});
+
+		expect(result.code).toBe(1);
+		expect(failure(result.stderr)).toMatchObject({ code: 'insecure_directory' });
+		expect(existsSync(databasePath(state))).toBe(true);
 	});
 
 	it('refuses status and doctor on a state root that grants everyone access', async () => {
