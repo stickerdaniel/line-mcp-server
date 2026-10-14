@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -10,20 +10,12 @@ import { startDaemon } from './daemon.ts';
 import { readAccount } from './db.ts';
 import { doctor } from './doctor.ts';
 import { LineMcpError, mapError } from './errors.ts';
-import {
-	agentPaths,
-	bootoutCommand,
-	bootstrapCommand,
-	type Command,
-	describe,
-	isCellarPath,
-	renderPlist,
-	runLaunchctl,
-	selectNode
-} from './launchd.ts';
 import { acquireLock, lockInUse } from './lock.ts';
 import { databasePath, stateRoot } from './paths.ts';
 import { probe } from './probe.ts';
+import { serviceFor } from './service/index.ts';
+import { isCellarPath, selectNode } from './service/node.ts';
+import { toolRunner } from './service/runner.ts';
 import { type Log, login, openSession, stderrLog } from './session.ts';
 import { runToolCommand, toolCommands, toolUsage } from './tool-cli.ts';
 
@@ -47,6 +39,10 @@ ${toolUsage()}`;
  * the LaunchAgent and `doctor` name the file itself.
  */
 const cliPath = fileURLToPath(import.meta.url);
+
+/** This user's service manager, through the test seam when `LINE_MCP_SERVICE_RUNNER` is set. */
+const service = () =>
+	serviceFor(process.platform, { home: homedir(), env: process.env, runner: toolRunner() });
 
 async function main(command: string | undefined, args: string[]): Promise<number> {
 	switch (command) {
@@ -79,13 +75,13 @@ async function main(command: string | undefined, args: string[]): Promise<number
 }
 
 /**
- * The daemon holds the lock port, so an installed LaunchAgent is booted out
- * first and bootstrapped again once `login` has released the lock.
+ * The daemon holds the lock port, so an installed service is stopped first
+ * and started again once `login` has released the lock.
  */
 async function runLogin(): Promise<number> {
-	const { plist } = agentPaths();
-	const installed = existsSync(plist);
-	if (installed) await runLaunchctl(bootoutCommand());
+	const agent = service();
+	const installed = agent.installed();
+	if (installed) await agent.stop();
 	try {
 		const result = await login({
 			onQrUrl: (url) => {
@@ -100,7 +96,7 @@ async function runLogin(): Promise<number> {
 				`${result.addedKeyGenerations} new E2EE key generation(s) stored`
 		);
 	} finally {
-		if (installed) await runLaunchctl(bootstrapCommand(plist));
+		if (installed) await agent.start();
 	}
 	return 0;
 }
@@ -185,13 +181,6 @@ async function runDaemon(): Promise<number> {
 	return 0;
 }
 
-async function run(commands: Command[], dryRun: boolean): Promise<void> {
-	for (const command of commands) {
-		if (dryRun) console.log(`would run: ${describe(command)}`);
-		else await runLaunchctl(command);
-	}
-}
-
 async function runInstall(args: string[]): Promise<number> {
 	const { values } = parseArgs({
 		args,
@@ -205,29 +194,13 @@ async function runInstall(args: string[]): Promise<number> {
 		if (!dryRun) throw new LineMcpError('npx_cache', reason);
 		console.error(`warning: install refuses this location: ${reason}`);
 	}
-	const paths = agentPaths();
+	const agent = service();
 	const node = selectNode({ override: values.node ?? process.env.LINE_MCP_NODE });
 	if (isCellarPath(node.path)) {
 		console.error(`warning: ${node.path} is a versioned Cellar path; brew upgrade removes it`);
 	}
-	const plist = renderPlist({
-		node: node.path,
-		cli: cliPath,
-		log: paths.log,
-		env: process.env
-	});
-	const commands = [bootoutCommand(), bootstrapCommand(paths.plist)];
-	if (dryRun) {
-		console.log(`would write ${paths.plist}:\n${plist}`);
-		console.log(`would create ${paths.logDir} (0700)`);
-	} else {
-		mkdirSync(paths.logDir, { recursive: true, mode: 0o700 });
-		chmodSync(paths.logDir, 0o700);
-		mkdirSync(dirname(paths.plist), { recursive: true });
-		writeFileSync(paths.plist, plist, { mode: 0o644 });
-		console.log(`wrote ${paths.plist}`);
-	}
-	await run(commands, dryRun);
+	const definition = agent.render({ node: node.path, cli: cliPath, env: process.env });
+	await agent.install(definition, { dryRun });
 	return 0;
 }
 
@@ -237,10 +210,7 @@ async function runUninstall(args: string[]): Promise<number> {
 		options: { 'dry-run': { type: 'boolean' }, purge: { type: 'boolean' } }
 	});
 	const dryRun = values['dry-run'] === true;
-	const paths = agentPaths();
-	await run([bootoutCommand()], dryRun);
-	if (dryRun) console.log(`would remove ${paths.plist}`);
-	else rmSync(paths.plist, { force: true });
+	await service().uninstall({ dryRun });
 	const root = stateRoot();
 	if (!values.purge) {
 		console.log(`kept the archive in ${root}`);
@@ -264,7 +234,7 @@ async function runUninstall(args: string[]): Promise<number> {
 async function runDoctor(): Promise<number> {
 	const checks = await doctor({
 		root: stateRoot(),
-		paths: agentPaths(),
+		service: service(),
 		env: process.env,
 		cli: cliPath
 	});

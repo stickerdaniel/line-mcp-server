@@ -17,7 +17,7 @@
 	},
 	"files": [
 		"dist",
-		"launchd",
+		"service",
 		"THIRD_PARTY_NOTICES.md"
 	],
 	"os": [
