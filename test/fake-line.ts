@@ -320,6 +320,26 @@ export function seedLive(root: string, mid: string, rows: Record<string, string>
 	db.close();
 }
 
+/** The columns schema 9 adds to `message`: the stored fields of non-text messages. */
+export const nonTextColumns = [
+	'alt_text',
+	'file_name',
+	'duration_ms',
+	'image_index',
+	'image_total',
+	'call_type',
+	'call_result',
+	'event',
+	'event_by',
+	'event_members',
+	'event_name'
+];
+
+/** SQL that drops what schema 9 adds, for tests that build an older archive. */
+export const dropNonTextColumns = nonTextColumns
+	.map((column) => `ALTER TABLE message DROP COLUMN ${column};`)
+	.join(' ');
+
 /** Every `line_kv` row and the account row, for before/after comparison. */
 export function snapshot(root: string): unknown {
 	const db = new DatabaseSync(databasePath(root), { readOnly: true });
