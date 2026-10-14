@@ -1,8 +1,10 @@
 import { Buffer } from 'node:buffer';
+import type { DatabaseSync } from 'node:sqlite';
+import type { BaseClient } from '@evex/linejs/base';
 import type { Message, SquareEvent } from '@evex/linejs-types';
 import { describe, expect, it } from 'vitest';
 import { upsertParticipant } from '../src/archive.ts';
-import { transaction } from '../src/db.ts';
+import { openDatabase, transaction } from '../src/db.ts';
 import { sizeCap } from '../src/queries.ts';
 import {
 	applyChanges,
@@ -10,7 +12,15 @@ import {
 	normalizeOperations,
 	normalizeSquareEvents
 } from '../src/sync/normalize.ts';
-import { groupMid, otherMid, selfMid } from './fake-line.ts';
+import {
+	dropNonTextColumns,
+	groupMid,
+	nonTextColumns,
+	otherMid,
+	seedLive,
+	selfMid,
+	tempRoot
+} from './fake-line.ts';
 import { callTool, type Served, serve } from './mcp-client.ts';
 import { squareChat, squareEvent, squareMember } from './sync-fixture.ts';
 
@@ -439,5 +449,117 @@ describe('non-text messages', () => {
 			message_id: 'h1',
 			context_truncated: true
 		});
+	});
+});
+
+/** One archived message's envelope and stored fields. */
+const stored = (db: DatabaseSync, messageId: string) =>
+	db
+		.prepare(`SELECT envelope, ${nonTextColumns.join(', ')} FROM message WHERE message_id = ?`)
+		.get(messageId);
+
+const noFields = Object.fromEntries(nonTextColumns.map((column) => [column, null]));
+
+describe('stored non-text fields', () => {
+	it('come from the retained envelopes when an archive of schema 8 migrates', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const db = openDatabase(root);
+		const { messages, expected } = valid();
+		const kept = messages.filter((message) =>
+			['s1', 'f1', 'i1', 'd1', 'v1', 'c1', 'e2', 'e6'].includes(String(message.id))
+		);
+		const invalidEvent = invalid().messages[1]!;
+		const unsent = talk('u1', 'STICKER', { STKTXT: '[Bye]' });
+		// Plain messages: only E2EE chunks would reach the client.
+		const batch = await normalizeOperations(
+			{ base: {} as BaseClient, selfMid },
+			[...kept, invalidEvent, unsent].map((message, index) => ({
+				revision: index + 1,
+				type: 'RECEIVE_MESSAGE',
+				message,
+				createdTime: message.createdTime
+			})) as Parameters<typeof normalizeOperations>[1]
+		);
+		transaction(db, () => {
+			upsertParticipant(db, 'talk', otherMid, '王小明');
+			upsertParticipant(db, 'talk', invitee, '李四');
+			applyChanges(db, [
+				...batch.changes,
+				{ kind: 'unsend', service: 'talk', chatId: groupMid, messageId: 'u1' }
+			]);
+		});
+		// Schema 9 adds only these columns; without them this is schema 8.
+		db.exec(`${dropNonTextColumns} PRAGMA user_version = 8`);
+		db.close();
+
+		const fixture = await serve({}, undefined, { root });
+		const page = await read(fixture);
+
+		expect(byId(page.messages)).toEqual({
+			...Object.fromEntries(kept.map((message) => [message.id, expected[String(message.id)]])),
+			x2: { content_type: 'chatevent' },
+			u1: { content_type: 'sticker' }
+		});
+		expect(stored(fixture.session.db, 'u1')).toMatchObject(noFields);
+	});
+
+	it('are cleared by an unsend', async () => {
+		const fixture = await served();
+		const { db } = fixture.session;
+		await deliver(
+			fixture,
+			talk('s1', 'STICKER', { STKTXT: '[Bye]' }),
+			talk('e1', 'CHATEVENT', { LOC_KEY: 'C_MJ', LOC_ARGS: newcomer })
+		);
+		expect(stored(db, 's1')).toMatchObject({ alt_text: '[Bye]' });
+		expect(stored(db, 'e1')).toMatchObject({ event: 'joined', event_members: newcomer });
+
+		for (const messageId of ['s1', 'e1']) {
+			apply(db, { kind: 'unsend', service: 'talk', chatId: groupMid, messageId });
+		}
+
+		expect(stored(db, 's1')).toMatchObject(noFields);
+		expect(stored(db, 'e1')).toMatchObject(noFields);
+	});
+
+	it('follow the envelope a late decryption writes', async () => {
+		const fixture = await served();
+		const { db } = fixture.session;
+		const file = talk('d1', 'FILE', { FILE_SIZE: '1234' });
+		const [first] = (
+			await normalizeOperations({ base: fixture.session.base, selfMid }, [
+				{ revision: 1, type: 'RECEIVE_MESSAGE', message: file, createdTime: file.createdTime }
+			] as Parameters<typeof normalizeOperations>[1])
+		).changes as Extract<Change, { kind: 'message' }>[];
+		// Archived before its key arrived, then delivered decrypted with its file name.
+		apply(db, {
+			kind: 'message',
+			row: { ...first!.row, decryptState: 'missing_key', missingKey: 'key' }
+		});
+		expect(byId((await read(fixture)).messages)).toEqual({ d1: { content_type: 'file' } });
+
+		await deliver(fixture, { ...file, contentMetadata: { FILE_NAME: 'report.pdf' } });
+
+		expect(byId((await read(fixture)).messages)).toEqual({
+			d1: { content_type: 'file', file_name: 'report.pdf' }
+		});
+		expect(stored(db, 'd1')).toMatchObject({ file_name: 'report.pdf' });
+	});
+
+	it('stay with the archived envelope when LINE repeats a message with other metadata', async () => {
+		const fixture = await served();
+		const { db } = fixture.session;
+		const sticker = talk('s1', 'STICKER', { STKTXT: '[OK]' });
+		await deliver(fixture, sticker);
+		const before = stored(db, 's1');
+		const [{ seq }] = (await read(fixture)).messages as [{ seq: number }];
+
+		await deliver(fixture, { ...sticker, contentMetadata: { STKTXT: '[Changed]' } });
+
+		expect(stored(db, 's1')).toEqual(before);
+		expect((await read(fixture)).messages).toMatchObject([
+			{ message_id: 's1', alt_text: '[OK]', seq }
+		]);
 	});
 });

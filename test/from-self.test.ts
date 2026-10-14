@@ -4,7 +4,7 @@ import { upsertChat } from '../src/archive.ts';
 import { openDatabase, transaction } from '../src/db.ts';
 import { sweepSquareChats } from '../src/sync/square.ts';
 import { applyChanges, type MessageRow } from '../src/sync/normalize.ts';
-import { otherMid, seedLive, selfMid, tempRoot } from './fake-line.ts';
+import { dropNonTextColumns, otherMid, seedLive, selfMid, tempRoot } from './fake-line.ts';
 import { callTool, type Served, serve } from './mcp-client.ts';
 import { field } from './sync-fixture.ts';
 
@@ -205,10 +205,11 @@ describe('own OpenChat messages', () => {
 		const db = openDatabase(root);
 		upsertChat(db, { service: 'square', chatId: message.chatId, type: 'square', name: 'Kept' });
 		transaction(db, () => applyChanges(db, [{ kind: 'message', row: message }]));
-		// Schema 6 adds only the own member table, schema 7 only an index and
-		// schema 8 only the read state table and an index; without them this is schema 5.
+		// Schema 6 adds only the own member table, schema 7 only an index,
+		// schema 8 only the read state table and an index and schema 9 only the
+		// non-text columns; without them this is schema 5.
 		db.exec(
-			'DROP TABLE square_self_member; DROP INDEX message_thread_order; DROP TABLE read_state; DROP INDEX message_numeric_order; PRAGMA user_version = 5'
+			`DROP TABLE square_self_member; DROP INDEX message_thread_order; DROP TABLE read_state; DROP INDEX message_numeric_order; ${dropNonTextColumns} PRAGMA user_version = 5`
 		);
 		db.close();
 

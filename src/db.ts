@@ -1,7 +1,10 @@
 import { chmodSync, closeSync, mkdirSync, openSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { envelopeFields } from './non-text.ts';
 import { databasePath } from './paths.ts';
 
+// Each step runs in its own transaction: SQL, or a function of the connection
+// for a step SQL alone cannot express.
 const migrations = [
 	`CREATE TABLE line_kv (
 		key TEXT PRIMARY KEY,
@@ -145,8 +148,54 @@ const migrations = [
 		count_at INTEGER,
 		PRIMARY KEY (service, chat_id)
 	) STRICT;
-	CREATE INDEX message_numeric_order ON message (service, chat_id, (printf('%010d', length(message_id)) || message_id));`
-];
+	CREATE INDEX message_numeric_order ON message (service, chat_id, (printf('%010d', length(message_id)) || message_id));`,
+	// The readable fields of non-text messages, which the write path derives
+	// from the envelope it writes (architecture, Non-text messages). Existing
+	// rows get them from their retained envelope; text and unsent rows keep NULL.
+	(db) => {
+		db.exec(`ALTER TABLE message ADD COLUMN alt_text TEXT;
+		ALTER TABLE message ADD COLUMN file_name TEXT;
+		ALTER TABLE message ADD COLUMN duration_ms INTEGER;
+		ALTER TABLE message ADD COLUMN image_index INTEGER;
+		ALTER TABLE message ADD COLUMN image_total INTEGER;
+		ALTER TABLE message ADD COLUMN call_type TEXT;
+		ALTER TABLE message ADD COLUMN call_result TEXT;
+		ALTER TABLE message ADD COLUMN event TEXT;
+		ALTER TABLE message ADD COLUMN event_by TEXT;
+		ALTER TABLE message ADD COLUMN event_members TEXT;
+		ALTER TABLE message ADD COLUMN event_name TEXT;`);
+		const update = db.prepare(
+			`UPDATE message SET alt_text = ?, file_name = ?, duration_ms = ?, image_index = ?,
+				image_total = ?, call_type = ?, call_result = ?, event = ?, event_by = ?,
+				event_members = ?, event_name = ?
+			WHERE id = ?`
+		);
+		// Row by row: an archive's envelopes need not fit in memory at once.
+		const rows = db
+			.prepare(
+				`SELECT id, content_type, envelope FROM message
+				WHERE unsent = 0 AND content_type IS NOT NULL AND content_type != 'NONE'`
+			)
+			.iterate();
+		for (const row of rows) {
+			const fields = envelopeFields(String(row.content_type), String(row.envelope));
+			update.run(
+				fields.alt_text,
+				fields.file_name,
+				fields.duration_ms,
+				fields.image_index,
+				fields.image_total,
+				fields.call_type,
+				fields.call_result,
+				fields.event,
+				fields.event_by,
+				fields.event_members,
+				fields.event_name,
+				Number(row.id)
+			);
+		}
+	}
+] satisfies (string | ((db: DatabaseSync) => void))[];
 
 export const schemaVersion = migrations.length;
 
@@ -203,7 +252,9 @@ export function migrate(db: DatabaseSync): void {
 	}
 	for (let next = version; next < migrations.length; next++) {
 		transaction(db, () => {
-			db.exec(migrations[next]!);
+			const step = migrations[next]!;
+			if (typeof step === 'string') db.exec(step);
+			else step(db);
 			db.exec(`PRAGMA user_version = ${next + 1}`);
 		});
 	}

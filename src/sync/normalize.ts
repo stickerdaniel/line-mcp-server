@@ -5,6 +5,7 @@ import { enums, type Message, type Operation, type SquareEvent } from '@evex/lin
 import { readState, type Service, upsertChat, upsertParticipant, writeState } from '../archive.ts';
 import { mapError } from '../errors.ts';
 import { decryptMessage } from '../keys.ts';
+import { envelopeFields, type NonTextFields, noFields, nonTextColumns } from '../non-text.ts';
 import { decimal } from '../probe.ts';
 import { advanceMarker, readMarker } from '../read-state.ts';
 import type { Log } from '../session.ts';
@@ -542,6 +543,14 @@ function tombstone(db: DatabaseSync, row: MessageRow): number | undefined {
 	return found?.id;
 }
 
+// Every write of `envelope` also writes the readable fields derived from it
+// (architecture, Non-text messages), so they always describe the stored envelope.
+const fieldColumns = nonTextColumns.join(', ');
+const fieldSlots = nonTextColumns.map(() => '?').join(', ');
+const fieldSets = nonTextColumns.map((column) => `${column} = ?`).join(', ');
+const fieldValues = (fields: Readonly<NonTextFields>) =>
+	nonTextColumns.map((column) => fields[column]);
+
 type Outcome = { outcome: 'inserted' | 'updated' | 'unchanged' | 'tombstoned'; id?: number };
 
 /**
@@ -561,8 +570,9 @@ function applyMessage(db: DatabaseSync, row: MessageRow): Outcome {
 	if (!stored) {
 		db.prepare(
 			`INSERT INTO message (service, chat_id, message_id, thread_id, sender, sent_at, edited_at,
-				content_type, text, reply_to, mentions, envelope, decrypt_state, missing_key, seq)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+				content_type, text, reply_to, mentions, envelope, decrypt_state, missing_key, seq,
+				${fieldColumns})
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${fieldSlots})`
 		).run(
 			row.service,
 			row.chatId,
@@ -578,7 +588,8 @@ function applyMessage(db: DatabaseSync, row: MessageRow): Outcome {
 			row.envelope,
 			row.decryptState,
 			row.missingKey,
-			nextSeq(db)
+			nextSeq(db),
+			...fieldValues(envelopeFields(row.contentType, row.envelope))
 		);
 		return { outcome: 'inserted' };
 	}
@@ -588,7 +599,8 @@ function applyMessage(db: DatabaseSync, row: MessageRow): Outcome {
 	if (sameContent(stored, merged)) return unchanged;
 	db.prepare(
 		`UPDATE message SET thread_id = ?, sender = ?, sent_at = ?, edited_at = ?, content_type = ?,
-			text = ?, reply_to = ?, mentions = ?, envelope = ?, decrypt_state = ?, missing_key = ?, seq = ?
+			text = ?, reply_to = ?, mentions = ?, envelope = ?, decrypt_state = ?, missing_key = ?, seq = ?,
+			${fieldSets}
 		WHERE id = ?`
 	).run(
 		merged.threadId,
@@ -603,6 +615,7 @@ function applyMessage(db: DatabaseSync, row: MessageRow): Outcome {
 		merged.decryptState,
 		merged.missingKey,
 		nextSeq(db),
+		...fieldValues(envelopeFields(merged.contentType, merged.envelope)),
 		stored.id
 	);
 	return { outcome: 'updated', id: stored.id };
@@ -632,9 +645,9 @@ function sameContent(stored: StoredRow, row: MessageRow): boolean {
 }
 
 /**
- * Clears text, mentions (and so the FTS entry) and every plaintext or
- * ciphertext field of the envelope. An unknown message gets a tombstone row so
- * that history or decryption arriving later cannot bring it back.
+ * Clears text, mentions (and so the FTS entry), the readable fields and every
+ * plaintext or ciphertext field of the envelope. An unknown message gets a
+ * tombstone row so that history or decryption arriving later cannot bring it back.
  */
 function applyUnsend(
 	db: DatabaseSync,
@@ -657,9 +670,17 @@ function applyUnsend(
 	) as { id: number; unsent: number; envelope: string }[];
 	if (rows.length === 0) {
 		db.prepare(
-			`INSERT INTO message (service, chat_id, message_id, envelope, decrypt_state, unsent, seq)
-			VALUES (?, ?, ?, ?, 'ok', 1, ?)`
-		).run(service, chatId, messageId, tombstoneEnvelope(null, { id: messageId }), nextSeq(db));
+			`INSERT INTO message (service, chat_id, message_id, envelope, decrypt_state, unsent, seq,
+				${fieldColumns})
+			VALUES (?, ?, ?, ?, 'ok', 1, ?, ${fieldSlots})`
+		).run(
+			service,
+			chatId,
+			messageId,
+			tombstoneEnvelope(null, { id: messageId }),
+			nextSeq(db),
+			...fieldValues(noFields)
+		);
 		return 1;
 	}
 	let changed = 0;
@@ -667,8 +688,13 @@ function applyUnsend(
 		if (row.unsent === 1) continue;
 		db.prepare(
 			`UPDATE message SET text = NULL, mentions = NULL, envelope = ?, unsent = 1, missing_key = NULL,
-				seq = ? WHERE id = ?`
-		).run(tombstoneEnvelope(row.envelope, { id: messageId }), nextSeq(db), row.id);
+				seq = ?, ${fieldSets} WHERE id = ?`
+		).run(
+			tombstoneEnvelope(row.envelope, { id: messageId }),
+			nextSeq(db),
+			...fieldValues(noFields),
+			row.id
+		);
 		changed++;
 	}
 	return changed;

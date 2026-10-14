@@ -192,7 +192,7 @@ Every message row keeps a lossless envelope (`contentMetadata`, `chunks` as base
 
 ## Tombstones and changes
 
-An unsend clears the message text, its search entry and any plaintext in the retained envelope (text, location, non-E2EE `contentMetadata` values). Only tombstone metadata remains: IDs, sender, times and content type. A tombstone beats any later history or decryption result for the same message, and a newer `edited_at` beats older content.
+An unsend clears the message text, its search entry, the fields of a non-text message and any plaintext in the retained envelope (text, location, non-E2EE `contentMetadata` values). Only tombstone metadata remains: IDs, sender, times and content type. A tombstone beats any later history or decryption result for the same message, and a newer `edited_at` beats older content.
 
 Every insert or change takes a fresh `seq` from one counter. Reading changes after a `seq` returns rows in `seq` order, and a row changed during paging appears again with its new `seq`: at least once, with no gaps.
 
@@ -222,7 +222,7 @@ Pages hold 50 items by default and at most 200. A continuation is an opaque curs
 
 ## Non-text messages
 
-`content_type` is `text` for LINE's `NONE` and LINE's content type in lower case otherwise (`image`, `sticker`, `chatevent`, ...); the archive stores LINE's names. A non-text message is described by fields read from the plaintext `contentMetadata` of its retained envelope, each left out when LINE gave no valid value:
+`content_type` is `text` for LINE's `NONE` and LINE's content type in lower case otherwise (`image`, `sticker`, `chatevent`, ...); the archive stores LINE's names. A non-text message is described by fields derived from the plaintext `contentMetadata` of its envelope when the message is written and stored as columns of `message`, each left out when LINE gave no valid value:
 
 | Field         | Content types      | Source                                                                                    |
 | ------------- | ------------------ | ----------------------------------------------------------------------------------------- |
@@ -233,9 +233,9 @@ Pages hold 50 items by default and at most 200. A continuation is an opaque curs
 | `call`        | call               | `TYPE` (`A` audio, `V` video) and `RESULT` in lower case                                  |
 | `event`       | chatevent          | `LOC_KEY` and `LOC_ARGS`: args split at U+001E, MID lists in an arg at U+001F             |
 
-`event` covers only the codes whose arguments LINE's own web client confirms: `C_MJ` joined, `C_ML` left, `C_GI` and `C_MI` invited, `C_IC` invitation_canceled, `C_MR` removed, `C_PN` renamed (with the new `name`), `C_PI` picture_changed, `C_SN` link_join_allowed and `C_SP` link_join_disabled. Its `by` and `members` name MIDs with their archived display names. Any other code, an argument count the code does not take, or a malformed MID gives no `event`. A canceled call with `from_self: false` is a missed call, as LINE's web client shows it.
+`event` covers only the codes whose arguments LINE's own web client confirms: `C_MJ` joined, `C_ML` left, `C_GI` and `C_MI` invited, `C_IC` invitation_canceled, `C_MR` removed, `C_PN` renamed (with the new `name`), `C_PI` picture_changed, `C_SN` link_join_allowed and `C_SP` link_join_disabled. The archive stores the MIDs of `by` and `members`; tools add their display names when they show the event, so the names follow renames. Any other code, an argument count the code does not take, or a malformed MID gives no `event`. A canceled call with `from_self: false` is a missed call, as LINE's web client shows it.
 
-Nothing else leaves the envelope: no chunks, URLs, `OID`, `SID`, `FLEX_JSON`, `MEDIA_CONTENT_INFO` or `REPLACE`. A page reads these keys only for the non-text messages it shows, after the rows are chosen, so finding the hits of a search parses no envelope, and a text message's envelope is never parsed. An unsent message has none of these fields. The fields follow the envelope, which every content change (edit, decryption, unsend) replaces; LINE resending only metadata for an unchanged message keeps the archived envelope, and with it the archived fields. Search covers message text only, not these fields.
+The columns are `alt_text`, `file_name`, `duration_ms`, `image_index` and `image_total`, `call_type` and `call_result`, and `event`, `event_by`, `event_members` (MIDs separated by `,`) and `event_name`; tools build `image_set`, `call` and `event` from them. Nothing else leaves the envelope: no chunks, URLs, `OID`, `SID`, `FLEX_JSON`, `MEDIA_CONTENT_INFO` or `REPLACE`. Every write of an envelope writes these columns from it, so no read parses an envelope to describe a message, and a text message's envelope is never parsed. An archive from before the columns derives them from its retained envelopes when it migrates. An unsent message has none of these fields. The fields follow the envelope, which every content change (edit, decryption, unsend) replaces; LINE resending only metadata for an unchanged message keeps the archived envelope, and with it the archived fields. Search covers message text only, not these fields.
 
 ## Time
 

@@ -13,7 +13,15 @@ import { applyChanges, type Change, type MessageRow } from '../src/sync/normaliz
 import { drainTarget, sweepSquareChats, syncSquareOnce } from '../src/sync/square.ts';
 import { syncTalkOnce } from '../src/sync/talk.ts';
 import { toolCommands } from '../src/tool-cli.ts';
-import { groupMid, type Handler, otherMid, seedLive, selfMid, tempRoot } from './fake-line.ts';
+import {
+	dropNonTextColumns,
+	groupMid,
+	type Handler,
+	otherMid,
+	seedLive,
+	selfMid,
+	tempRoot
+} from './fake-line.ts';
 import { callTool, listTools, type Served, serve } from './mcp-client.ts';
 import {
 	field,
@@ -738,7 +746,10 @@ describe('read state migration', () => {
 		const db = openDatabase(root);
 		const message = row('talk', otherMid, '1001');
 		transaction(db, () => applyChanges(db, [{ kind: 'message', row: message }]));
-		db.exec('DROP TABLE read_state; DROP INDEX message_numeric_order; PRAGMA user_version = 7');
+		// Schema 8 adds the read state table and an index, schema 9 the non-text columns.
+		db.exec(
+			`DROP TABLE read_state; DROP INDEX message_numeric_order; ${dropNonTextColumns} PRAGMA user_version = 7`
+		);
 		db.close();
 
 		const served = await serve({}, undefined, { root });

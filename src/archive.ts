@@ -1,5 +1,6 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { LineMcpError } from './errors.ts';
+import { type NonTextFields, nonTextColumns } from './non-text.ts';
 import { above, idOrder } from './read-state.ts';
 
 export type Service = 'talk' | 'square';
@@ -243,6 +244,8 @@ export interface MessageView {
 	decryptState: string;
 	unsent: boolean;
 	seq: number;
+	/** What a non-text message holds, stored when it was written; all null for text and tombstones. */
+	nonText: NonTextFields;
 	/** Archive row id: the tiebreak of the read order, never a LINE ID. */
 	rowId: number;
 }
@@ -250,10 +253,11 @@ export interface MessageView {
 // The envelope is never part of a view: tool results carry no raw envelopes.
 const viewColumns = `m.service, m.chat_id, m.message_id, m.thread_id, m.sender, m.sent_at,
 	m.edited_at, m.content_type, m.text, m.reply_to, m.mentions, m.decrypt_state, m.unsent, m.seq,
-	m.id`;
+	m.id, ${nonTextColumns.map((column) => `m.${column}`).join(', ')}`;
 
 const nullable = (value: unknown) => (value === null ? null : String(value));
-const time = (value: unknown) => (value === null ? null : Number(value));
+const numeric = (value: unknown) => (value === null ? null : Number(value));
+const callType = (value: unknown) => (value === 'audio' || value === 'video' ? value : null);
 
 function view(row: Record<string, unknown>): MessageView {
 	return {
@@ -262,8 +266,8 @@ function view(row: Record<string, unknown>): MessageView {
 		messageId: String(row.message_id),
 		threadId: nullable(row.thread_id),
 		sender: nullable(row.sender),
-		sentAt: time(row.sent_at),
-		editedAt: time(row.edited_at),
+		sentAt: numeric(row.sent_at),
+		editedAt: numeric(row.edited_at),
 		contentType: nullable(row.content_type),
 		text: nullable(row.text),
 		replyTo: nullable(row.reply_to),
@@ -271,6 +275,19 @@ function view(row: Record<string, unknown>): MessageView {
 		decryptState: String(row.decrypt_state),
 		unsent: row.unsent === 1,
 		seq: Number(row.seq),
+		nonText: {
+			alt_text: nullable(row.alt_text),
+			file_name: nullable(row.file_name),
+			duration_ms: numeric(row.duration_ms),
+			image_index: numeric(row.image_index),
+			image_total: numeric(row.image_total),
+			call_type: callType(row.call_type),
+			call_result: nullable(row.call_result),
+			event: nullable(row.event),
+			event_by: nullable(row.event_by),
+			event_members: nullable(row.event_members),
+			event_name: nullable(row.event_name)
+		},
 		rowId: Number(row.id)
 	};
 }
