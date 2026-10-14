@@ -311,6 +311,8 @@ export function systemd({ home, env, runner }: ServiceDeps): Service {
 		},
 		start,
 		installed: () => existsSync(paths.definition),
+		readDefinition: async () =>
+			existsSync(paths.definition) ? readFileSync(paths.definition, 'utf-8') : undefined,
 		async diagnose() {
 			const checks: Check[] = [];
 			try {

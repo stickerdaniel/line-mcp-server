@@ -1,9 +1,10 @@
 import type { Check } from '../doctor.ts';
 import { LineMcpError, mapError } from '../errors.ts';
+import type { StatePrivacy } from '../privacy.ts';
 import { launchd } from './launchd.ts';
 import type { ToolRunner } from './runner.ts';
 import { systemd } from './systemd.ts';
-import { unsupported } from './unsupported.ts';
+import { taskScheduler } from './task-scheduler.ts';
 
 export interface ServicePaths {
 	/** The definition file the service manager reads. */
@@ -17,8 +18,12 @@ export interface ServiceDeps {
 	home: string;
 	env: NodeJS.ProcessEnv;
 	runner: ToolRunner;
-	/** How long `stop` waits for the manager to let the service go; 30 s by default. */
+	/** How long `stop` waits for the manager to let the service go; 30 s by default, 45 s on Windows. */
 	stopTimeoutMs?: number;
+	/** How long the Windows `start` waits for the daemon to run and take the lock; 15 s by default. */
+	startTimeoutMs?: number;
+	/** Keeps the Windows backend's files private; the real checks for `home` and `env` by default. */
+	privacy?: StatePrivacy;
 }
 
 /** A dry run prints every file write and mutating command instead of running it. */
@@ -35,10 +40,7 @@ export type Restore = () => Promise<void>;
  * said so.
  */
 export interface Service {
-	/**
-	 * False for a platform without a backend yet (Windows), where every
-	 * mutation rejects with `service_unsupported` and nothing is installed.
-	 */
+	/** Whether the backend installs a service; doctor compares its definition only then. */
 	readonly supported: boolean;
 	/** The manager's name for the service, as messages show it. */
 	readonly label: string;
@@ -63,6 +65,11 @@ export interface Service {
 	start(): Promise<void>;
 	/** Whether the definition file exists. */
 	installed(): boolean;
+	/**
+	 * The installed definition, or undefined when it is missing; on Windows
+	 * only after its privacy check passed, rejecting otherwise.
+	 */
+	readDefinition(): Promise<string | undefined>;
 	/** Doctor's read-only checks of the manager's view of the service. */
 	diagnose(): Promise<Check[]>;
 }
@@ -70,7 +77,7 @@ export interface Service {
 const backends: Partial<Record<NodeJS.Platform, (deps: ServiceDeps) => Service>> = {
 	darwin: launchd,
 	linux: systemd,
-	win32: unsupported
+	win32: taskScheduler
 };
 
 /** The backend for `platform`; launchd's on a platform without one of its own. */

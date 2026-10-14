@@ -2,7 +2,7 @@
 
 Local MCP server that mirrors a personal LINE account into SQLite, so coding agents (Claude Code, Codex, T3 Code) can read, search and answer messages.
 
-A Node 24 daemon, started by launchd or systemd, logs in to LINE as a secondary Android device, keeps a local copy of every chat, and serves MCP tools on `127.0.0.1`. The `line-mcp` CLI runs the same tools from a shell, and an agent skill teaches agents to use it.
+A Node 24 daemon, started by launchd, systemd or the Windows Task Scheduler, logs in to LINE as a secondary Android device, keeps a local copy of every chat, and serves MCP tools on `127.0.0.1`. The `line-mcp` CLI runs the same tools from a shell, and an agent skill teaches agents to use it.
 
 Status: in development. See [`docs/architecture.md`](docs/architecture.md) for the architecture.
 
@@ -11,7 +11,7 @@ Status: in development. See [`docs/architecture.md`](docs/architecture.md) for t
 
 ## Requirements
 
-- macOS, where the daemon runs as a per-user LaunchAgent, or Linux with systemd (see [Linux](#linux))
+- macOS, where the daemon runs as a per-user LaunchAgent, Linux with systemd (see [Linux](#linux)), or Windows (see [Windows](#windows))
 - [Node](https://nodejs.org) 24.18 or later
 - The LINE app on your phone, logged in to the account
 
@@ -30,7 +30,7 @@ If LINE ends the session, the daemon keeps serving the local archive, shows a de
 
 ## State
 
-On macOS; [Linux](#linux) keeps it in the XDG directories.
+On macOS; [Linux](#linux) keeps it in the XDG directories, [Windows](#windows) in `%LOCALAPPDATA%`.
 
 | What        | Where                                                           |
 | ----------- | --------------------------------------------------------------- |
@@ -87,6 +87,25 @@ Without systemd, for example in a container, run `line-mcp daemon` in the foregr
 ### WSL
 
 WSL 2 with systemd enabled works like Linux. Keep the state directory in the Linux file system, not under `/mnt/c`. A systemd service does not keep WSL running, so the daemon stops when WSL shuts down after its last terminal closes.
+
+## Windows
+
+Windows needs line-mcp-server 0.3.0 or later.
+
+The daemon runs as the scheduled task `line-mcp-<your user SID>`, which starts it when you log on and runs it while you stay logged on. Install, upgrade and uninstall work as above. When PowerShell's execution policy blocks the scripts npm installs, run `npm.cmd` and `line-mcp.cmd` instead of `npm` and `line-mcp`.
+
+| What        | Where                                                                |
+| ----------- | -------------------------------------------------------------------- |
+| Archive     | `%LOCALAPPDATA%\line-mcp\line.db`                                    |
+| Attachments | `%LOCALAPPDATA%\line-mcp\attachments`                                |
+| Logs        | `%LOCALAPPDATA%\line-mcp\logs\daemon.log`, also with `LINE_MCP_HOME` |
+| Task files  | `%LOCALAPPDATA%\line-mcp\service`, also with `LINE_MCP_HOME`         |
+
+The state must stay inside your user profile, readable by you, SYSTEM and Administrators only. line-mcp refuses state that others can read and never changes access lists itself; `doctor` prints the fix. Paths with a `"` or a `%` cannot run as a scheduled task, so `install` refuses them.
+
+Logging off ends the daemon without a shutdown. SQLite recovers the archive when the task starts again at your next logon, and the sync catches up from there.
+
+A Node from nvm-windows lives in a directory that goes away with its version, and the daemon with it; `install` and `doctor` warn about that. Pass `--node` with a Node that stays, such as `C:\Program Files\nodejs\node.exe`, or run `line-mcp install` again after switching versions.
 
 ## MCP endpoint
 

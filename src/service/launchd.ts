@@ -173,6 +173,8 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 		},
 		start: () => bootstrap(),
 		installed: () => existsSync(paths.definition),
+		readDefinition: async () =>
+			existsSync(paths.definition) ? readFileSync(paths.definition, 'utf-8') : undefined,
 		async diagnose() {
 			const name = 'launch_agent_loaded';
 			try {

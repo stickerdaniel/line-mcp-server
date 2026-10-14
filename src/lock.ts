@@ -148,6 +148,17 @@ export async function requestStop(
 }
 
 /**
+ * Whether a process holds the lock port. Unlike `lockInUse` it fails closed:
+ * only a refused connection means free, and any other error or no answer
+ * within `timeoutMs` rejects with `lock_failed`.
+ */
+export function lockHeld(port: number, { timeoutMs }: { timeoutMs: number }): Promise<boolean> {
+	const timedOut = () =>
+		new LineMcpError('lock_failed', `The line-mcp lock port ${port} did not answer in time`);
+	return contact(port, timeoutMs, timedOut, (socket) => socket.destroy());
+}
+
+/**
  * Connects to the lock port and hands the socket to `connected`. Resolves true
  * once a connection was made and has closed, false when it was refused. Any
  * other error rejects, and so does no answer within `timeoutMs` (with

@@ -137,7 +137,8 @@ const unverified = (cause: string) =>
 		`line-mcp could not verify that its state is private: ${cause}`
 	);
 
-const system32 = (env: NodeJS.ProcessEnv) =>
+/** Where Windows keeps the tools line-mcp runs, named in full so no other directory is searched. */
+export const system32 = (env: NodeJS.ProcessEnv) =>
 	win32.join(env.SystemRoot ?? 'C:\\Windows', 'System32');
 
 /**

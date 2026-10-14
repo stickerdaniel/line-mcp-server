@@ -2,3 +2,5 @@ bun.lock
 scratch/
 # A symlink to AGENTS.md; a checkout without symlinks writes it as a one-line file.
 CLAUDE.md
+# Windows Script Host JScript: a call on the left of `=` sets a COM property there.
+service/line-mcp.js
