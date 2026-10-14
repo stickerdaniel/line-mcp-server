@@ -10,7 +10,8 @@
 // A refused release prints the reason and exits 1.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 
 const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
@@ -74,6 +75,20 @@ export function planPublish(integrity: string, npmView: string): 'publish' | 'sk
 	throw new Error(`npm view failed: ${npmView.trim()}`);
 }
 
+/**
+ * Runs npm. On Windows `npm` is a `.cmd` shim, which spawn runs only through
+ * a shell; Node runs the npm entry the shim would, from beside it on PATH.
+ */
+function npm(args: string[]) {
+	if (process.platform !== 'win32') return spawnSync('npm', args, { encoding: 'utf-8' });
+	const dir = (process.env.PATH ?? '')
+		.split(delimiter)
+		.find((entry) => entry && existsSync(join(entry, 'npm.cmd')));
+	if (!dir) throw new Error('npm.cmd is not on PATH');
+	const cli = join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js');
+	return spawnSync(process.execPath, [cli, ...args], { encoding: 'utf-8' });
+}
+
 /** The `sha512-<base64>` integrity npm records for a tarball. */
 function tarballIntegrity(path: string): string {
 	return `sha512-${createHash('sha512').update(readFileSync(path)).digest('base64')}`;
@@ -88,9 +103,7 @@ function main(command: string | undefined, args: string[]): string {
 	if (command === 'publish' && args.length === 2) {
 		const [tarball = '', version = ''] = args;
 		const spec = `line-mcp-server@${version}`;
-		const view = spawnSync('npm', ['view', spec, 'dist.integrity', '--json'], {
-			encoding: 'utf-8'
-		});
+		const view = npm(['view', spec, 'dist.integrity', '--json']);
 		return `publish=${planPublish(tarballIntegrity(tarball), view.stdout ?? '') === 'publish'}`;
 	}
 	throw new Error('usage: release-plan.ts detect|publish <args>, see the header');
