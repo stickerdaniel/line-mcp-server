@@ -76,11 +76,21 @@ export function serviceFor(platform: NodeJS.Platform, deps: ServiceDeps): Servic
  * its prior state. A failed restore rejects with `service_restore_failed`
  * after `body` printed its own result; when `body` failed too, the message
  * carries its failure as well.
+ *
+ * `signal` cancels the login, and `body` must settle promptly on it. A stop
+ * in progress finishes first and `body` is skipped; a restore in progress
+ * finishes too. Once the service is back, a handoff whose signal aborted at
+ * any point rejects with `login_cancelled`.
  */
-export async function withServiceStopped<T>(service: Service, body: () => Promise<T>): Promise<T> {
+export async function withServiceStopped<T>(
+	service: Service,
+	body: () => Promise<T>,
+	signal?: AbortSignal
+): Promise<T> {
 	const restore = service.installed() ? await service.stop() : undefined;
 	let outcome: { value: T } | { error: unknown };
 	try {
+		signal?.throwIfAborted();
 		outcome = { value: await body() };
 	} catch (error) {
 		outcome = { error };
@@ -90,13 +100,23 @@ export async function withServiceStopped<T>(service: Service, body: () => Promis
 	} catch (error) {
 		const also =
 			'error' in outcome
-				? ` The login failed too: ${mapError(outcome.error, 'login').message}`
+				? signal?.aborted
+					? ' The login was cancelled.'
+					: ` The login failed too: ${mapError(outcome.error, 'login').message}`
 				: '';
 		throw new LineMcpError(
 			'service_restore_failed',
 			`${service.label} did not return to its state before the login: ` +
 				`${mapError(error, 'login').message}. Run line-mcp install to start it.${also}`,
 			{ cause: error }
+		);
+	}
+	if (signal?.aborted) {
+		// A login that finished before the abort already printed its result.
+		throw new LineMcpError(
+			'login_cancelled',
+			'value' in outcome ? 'Interrupted after the login finished' : 'The login was cancelled',
+			'error' in outcome ? { cause: outcome.error } : undefined
 		);
 	}
 	if ('error' in outcome) throw outcome.error;

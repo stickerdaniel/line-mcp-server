@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { parse } from 'node:path';
 
 export interface ToolResult {
@@ -27,10 +27,12 @@ export const defaultToolTimeoutMs = 15_000;
 
 /**
  * Runs each tool by the path or name the backend gives, with a per-call
- * timeout. `LINE_MCP_SERVICE_RUNNER` in `env` is a test seam: with `<file>`
- * set, every call runs as `node <file> <tool name> ...args` instead
- * (test/fixtures/service-runner.ts), so tests never reach the real service
- * manager.
+ * timeout. On POSIX each tool runs in its own session, so a Ctrl-C in the
+ * terminal reaches only line-mcp, which cancels a login and lets a stop or a
+ * restore in progress finish (`runLogin`). `LINE_MCP_SERVICE_RUNNER` in `env`
+ * is a test seam: with `<file>` set, every call runs as
+ * `node <file> <tool name> ...args` instead (test/fixtures/service-runner.ts),
+ * so tests never reach the real service manager.
  */
 export function toolRunner(env: NodeJS.ProcessEnv = process.env): ToolRunner {
 	const fake = env.LINE_MCP_SERVICE_RUNNER;
@@ -40,20 +42,28 @@ export function toolRunner(env: NodeJS.ProcessEnv = process.env): ToolRunner {
 		run: (tool, args, { timeoutMs = defaultToolTimeoutMs } = {}) =>
 			new Promise((resolve) => {
 				const [file, argv] = command(tool, args);
-				execFile(
-					file,
-					argv,
-					{ encoding: 'utf-8', timeout: timeoutMs, killSignal: 'SIGKILL' },
-					(error, stdout) => {
-						if (!error) return resolve({ exit: 0, stdout });
-						// Node kills the child on timeout; on a full buffer it sets a code as well.
-						const timedOut = error.killed === true && typeof error.code !== 'string';
-						resolve({
-							exit: timedOut ? 'timeout' : (error.code ?? error.signal ?? 'unknown'),
-							stdout
-						});
-					}
-				);
+				// `detached` gives the tool its own session; execFile ignores it, and on
+				// Windows it would open a console instead.
+				const child = spawn(file, argv, {
+					stdio: ['ignore', 'pipe', 'ignore'],
+					detached: process.platform !== 'win32'
+				});
+				let stdout = '';
+				let timedOut = false;
+				const timer = setTimeout(() => {
+					timedOut = true;
+					child.kill('SIGKILL');
+				}, timeoutMs);
+				child.stdout.setEncoding('utf-8').on('data', (chunk: string) => (stdout += chunk));
+				// A tool that does not start (ENOENT) emits `error`, and may emit `close` after it.
+				child.once('error', (error: NodeJS.ErrnoException) => {
+					clearTimeout(timer);
+					resolve({ exit: error.code ?? 'unknown', stdout });
+				});
+				child.once('close', (code, signal) => {
+					clearTimeout(timer);
+					resolve({ exit: timedOut ? 'timeout' : (code ?? signal ?? 'unknown'), stdout });
+				});
 			}),
 		describe: (tool, args) => command(tool, args).flat().join(' ')
 	};

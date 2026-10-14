@@ -339,6 +339,16 @@ function installed(fault?: (subcommand: string, call: number) => Fault | undefin
 	return { manager, service: systemdIn(home, manager) };
 }
 
+/** An installed, running unit whose manager cancels the login handoff on each `abortOn` call. */
+function cancelledOn(abortOn: string, fault?: (subcommand: string) => Fault | undefined) {
+	const cancel = new AbortController();
+	const unit = installed((name) => {
+		if (name === abortOn) cancel.abort();
+		return fault?.(name);
+	});
+	return { ...unit, cancel };
+}
+
 const node = '/usr/bin/node';
 const cli = '/home/me/.local/lib/node_modules/line-mcp-server/dist/cli.js';
 
@@ -800,6 +810,63 @@ describe('systemd', () => {
 
 			await expect(handoff).rejects.toMatchObject({ code: 'systemctl_failed' });
 			expect(ran).toBe(false);
+		});
+
+		it('finishes a stop that a cancel interrupts, skips the login and starts the unit', async () => {
+			const { manager, service, cancel } = cancelledOn('stop');
+			let ran = false;
+
+			const handoff = withServiceStopped(
+				service,
+				async () => {
+					ran = true;
+				},
+				cancel.signal
+			);
+
+			await expect(handoff).rejects.toMatchObject({ code: 'login_cancelled' });
+			expect(ran).toBe(false);
+			expect(manager.subcommands().filter((name) => name !== 'show')).toEqual(['stop', 'start']);
+			expect(manager.state.ActiveState).toBe('active');
+		});
+
+		it('starts the unit again when the login is cancelled', async () => {
+			const { manager, service } = installed();
+			const cancel = new AbortController();
+
+			const handoff = withServiceStopped(
+				service,
+				async () => {
+					cancel.abort();
+					throw new Error('login stopped');
+				},
+				cancel.signal
+			);
+
+			await expect(handoff).rejects.toMatchObject({ code: 'login_cancelled' });
+			expect(manager.state.ActiveState).toBe('active');
+		});
+
+		it('finishes a restore that a cancel interrupts and reports the cancel', async () => {
+			const { manager, service, cancel } = cancelledOn('start');
+
+			const handoff = withServiceStopped(service, async () => 'logged in', cancel.signal);
+
+			await expect(handoff).rejects.toMatchObject({ code: 'login_cancelled' });
+			expect(manager.state.ActiveState).toBe('active');
+		});
+
+		it('names the cancel when the unit does not start again', async () => {
+			const { service, cancel } = cancelledOn('stop', (name) =>
+				name === 'start' ? { exit: 1 } : undefined
+			);
+
+			const handoff = withServiceStopped(service, async () => 'logged in', cancel.signal);
+
+			await expect(handoff).rejects.toMatchObject({
+				code: 'service_restore_failed',
+				message: expect.stringContaining('The login was cancelled.')
+			});
 		});
 	});
 

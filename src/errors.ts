@@ -36,6 +36,7 @@ export type ErrorCode =
 	| 'no_attachment'
 	| 'attachment_too_large'
 	| 'cancelled'
+	| 'login_cancelled'
 	| 'shutting_down'
 	| 'stop_timeout'
 	| 'idempotency_conflict'

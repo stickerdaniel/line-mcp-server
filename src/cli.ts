@@ -6,19 +6,19 @@ import { isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import qrcode from 'qrcode-terminal';
 import { archiveStatus } from './archive.ts';
 import { type Daemon, startDaemon } from './daemon.ts';
 import { readAccount } from './db.ts';
 import { doctor } from './doctor.ts';
 import { LineMcpError, mapError } from './errors.ts';
 import { acquireLock, lockInUse } from './lock.ts';
+import { runLogin } from './login-cli.ts';
 import { databasePath, stateRoot } from './paths.ts';
 import { probe } from './probe.ts';
-import { serviceFor, withServiceStopped } from './service/index.ts';
+import { serviceFor } from './service/index.ts';
 import { selectNode, versionedLayout } from './service/node.ts';
 import { toolRunner } from './service/runner.ts';
-import { type Log, login, openSession, stderrLog } from './session.ts';
+import { type Log, openSession, stderrLog } from './session.ts';
 import { runToolCommand, toolCommands, toolUsage } from './tool-cli.ts';
 
 const usage = `Usage: line-mcp <command>
@@ -49,7 +49,7 @@ const service = () =>
 async function main(command: string | undefined, args: string[]): Promise<number> {
 	switch (command) {
 		case 'login':
-			return await runLogin();
+			return await runLogin(service());
 		case 'status':
 			return await runStatus();
 		case 'probe':
@@ -74,28 +74,6 @@ async function main(command: string | undefined, args: string[]): Promise<number
 			return 2;
 		}
 	}
-}
-
-/**
- * The daemon holds the lock port, so an installed service is stopped first
- * and returned to its prior state once `login` has released the lock.
- */
-async function runLogin(): Promise<number> {
-	await withServiceStopped(service(), async () => {
-		const result = await login({
-			onQrUrl: (url) => {
-				console.log('Scan this QR code with LINE on your phone:');
-				qrcode.generate(url, { small: true });
-				console.log(url);
-			},
-			onPin: (pin) => console.log(`Enter this PIN in LINE on your phone: ${pin}`)
-		});
-		console.log(
-			`Logged in as ${result.mid} (${result.firstLogin ? 'account bound' : 'bound account'}), ` +
-				`${result.addedKeyGenerations} new E2EE key generation(s) stored`
-		);
-	});
-	return 0;
 }
 
 async function runStatus(): Promise<number> {

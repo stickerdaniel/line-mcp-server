@@ -166,6 +166,13 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): 
 export interface LoginOptions extends Omit<SessionOptions, 'signal' | 'onStopRequest'> {
 	onQrUrl: (url: string) => void;
 	onPin: (pin: string) => void;
+	/**
+	 * Cancels the login: the client refuses further upstream dispatch at once,
+	 * nothing reaches the live store, and the login rejects with
+	 * `login_cancelled` once the stores are closed and the lock is released,
+	 * without waiting for a pending upstream call.
+	 */
+	signal?: AbortSignal;
 }
 
 export interface LoginResult {
@@ -185,16 +192,22 @@ const loginOwnedKeys = new Set([tokenKey, 'refreshToken', 'expire', 'qrCert']);
  */
 export async function login(options: LoginOptions): Promise<LoginResult> {
 	const log = options.log ?? stderrLog;
+	const { signal } = options;
 	const lock = await acquireLock(options.lockPort);
 	let live: DatabaseSync | undefined;
 	let staging: DatabaseSync | undefined;
+	let guards: Control | undefined;
+	// Registered before `untilAborted` below, so the guards close before the login settles.
+	const refuse = () => guards?.close();
+	signal?.addEventListener('abort', refuse);
 	try {
+		signal?.throwIfAborted();
 		const liveDb = (live = openDatabase(options.root ?? stateRoot()));
 		const stagingDb = (staging = new DatabaseSync(':memory:'));
 		migrate(stagingDb);
 		copyRows(liveDb, stagingDb, 'replace');
 
-		const control = new Control(log);
+		const control = (guards = new Control(log));
 		const storage = new SqliteStorage(stagingDb, control.storageFailed);
 		const base = (options.createClient ?? createClient)(storage);
 		installGuards(base, control, storage);
@@ -217,7 +230,9 @@ export async function login(options: LoginOptions): Promise<LoginResult> {
 			}
 		};
 
-		await base.loginProcess.login({ qr: true });
+		// An abort does not wait for a pending call (the QR poll, the profile
+		// lookup); its late answer meets closed guards and a closed staging store.
+		await untilAborted(base.loginProcess.login({ qr: true }), signal);
 		const mid = base.profile?.mid;
 		if (!mid) {
 			throw new LineMcpError('not_logged_in', 'LINE did not return the account profile');
@@ -230,12 +245,21 @@ export async function login(options: LoginOptions): Promise<LoginResult> {
 			);
 		}
 		const addedKeyGenerations = transaction(liveDb, () => {
+			// Inside the transaction: an abort that raced the steps before it rolls it back.
+			signal?.throwIfAborted();
 			const added = copyRows(stagingDb, liveDb, 'merge');
 			bindAccount(liveDb, { mid, device, linejsVersion });
 			return added;
 		});
 		return { mid, firstLogin: !account, addedKeyGenerations };
+	} catch (error) {
+		if (signal?.aborted) {
+			throw new LineMcpError('login_cancelled', 'The login was cancelled', { cause: error });
+		}
+		throw error;
 	} finally {
+		signal?.removeEventListener('abort', refuse);
+		guards?.close();
 		staging?.close();
 		live?.close();
 		await lock.release();
