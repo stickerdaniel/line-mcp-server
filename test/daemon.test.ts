@@ -790,7 +790,7 @@ describe('daemon', () => {
 		const discovery = squareDiscovery([squareChat]);
 		let sweeps = 0;
 		let fetches = 0;
-		let stalling = false;
+		let stallPages = 0;
 		const { daemon } = await start(
 			root,
 			{
@@ -805,6 +805,8 @@ describe('daemon', () => {
 				// A token that leads back to itself stalls the stream.
 				fetchMyEvents: () => {
 					fetches++;
+					const stalling = stallPages > 0;
+					if (stalling) stallPages--;
 					return {
 						events: discovery.events,
 						syncToken: 'my-1',
@@ -825,7 +827,8 @@ describe('daemon', () => {
 			expect.objectContaining({ chat_id: squareChat, unread_count: 0, line_unread_count: 1 })
 		]);
 
-		stalling = true;
+		// Two pages under the same token close one cycle: exactly one stall, so the count settles.
+		stallPages = 2;
 		await until(() => sweeps === 2, 'a sweep after the stall');
 	});
 
