@@ -149,6 +149,31 @@ export function systemd({ home, env, runner }: ServiceDeps): Service {
 			`the daemon is not running. See ${paths.log} and systemctl --user status ${unit}, then run line-mcp install`
 		);
 
+	/**
+	 * Stops a unit that was in state `before`. A stop that failed or timed out
+	 * may still have a job queued or running, so a unit that ran is started
+	 * again (which cancels or follows that job) before the failure, ending in
+	 * `remedy`, is reported; a failed start then reports the state as unknown.
+	 */
+	async function stopUnit(before: UnitState, remedy: string): Promise<void> {
+		try {
+			await mutate(['stop', unit], (state) => stopped.has(state.ActiveState), remedy);
+		} catch (error) {
+			if (!running.has(before.ActiveState)) throw error;
+			try {
+				await start();
+			} catch (startError) {
+				throw new LineMcpError(
+					'service_state_unknown',
+					`${mapError(error, 'service').message}. Starting ${unit} again failed too: ` +
+						`${mapError(startError, 'service').message}. Run line-mcp doctor`,
+					{ cause: startError }
+				);
+			}
+			throw error;
+		}
+	}
+
 	/** Whether the manager reads the unit from `paths.definition`, also through a link. */
 	function loadsDefinition(state: UnitState): boolean {
 		if (state.FragmentPath === paths.definition) return true;
@@ -185,7 +210,8 @@ export function systemd({ home, env, runner }: ServiceDeps): Service {
 		check: 'systemd_unit',
 		paths,
 		render({ node, cli, env: values }) {
-			if (!posix.isAbsolute(node) || /["\\]/.test(node) || control(node)) {
+			// systemd runs the path only when string_is_safe: no quote of either kind, no backslash.
+			if (!posix.isAbsolute(node) || /["'\\]/.test(node) || control(node)) {
 				throw new LineMcpError(
 					'unsupported_path',
 					`Node at ${node} cannot be run by systemd; pass --node with an absolute path without quotes or backslashes`
@@ -225,10 +251,10 @@ export function systemd({ home, env, runner }: ServiceDeps): Service {
 				return;
 			}
 			// Discovery fails before anything is written.
-			if (!absent(await query())) {
-				await mutate(
-					['stop', unit],
-					(state) => stopped.has(state.ActiveState),
+			const before = await query();
+			if (!absent(before)) {
+				await stopUnit(
+					before,
 					'nothing was changed. See systemctl --user status line-mcp.service, then run line-mcp install again'
 				);
 			}
@@ -278,11 +304,7 @@ export function systemd({ home, env, runner }: ServiceDeps): Service {
 		async stop() {
 			const before = await query();
 			if (absent(before)) return async () => {};
-			await mutate(
-				['stop', unit],
-				(state) => stopped.has(state.ActiveState),
-				'the service is unchanged'
-			);
+			await stopUnit(before, 'the service is unchanged');
 			// Back to running only if it ran; UnitFileState was never touched.
 			return running.has(before.ActiveState) ? start : async () => {};
 		},

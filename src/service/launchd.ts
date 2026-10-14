@@ -57,7 +57,9 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 	 * Boots the agent out and waits until launchd has let it go; one that is
 	 * not loaded is already where it should be. `bootout` returns while the
 	 * daemon is still shutting down, and until it is gone a `bootstrap` fails
-	 * (5) and a login finds the lock held.
+	 * (5) and a login finds the lock held. A bootout that failed or timed out
+	 * may still take effect, so launchd's view decides then too: it fails only
+	 * while the agent stays loaded.
 	 */
 	async function bootout({ dryRun }: DryRun = {}): Promise<void> {
 		const args = ['bootout', target];
@@ -65,13 +67,28 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 			console.log(`would run: ${runner.describe(launchctl, args)}`);
 			return;
 		}
-		if ((await run(args)) === 'not_loaded') return;
+		let failure: unknown;
+		try {
+			if ((await run(args)) === 'not_loaded') return;
+		} catch (error) {
+			failure = error;
+		}
+		// When launchd cannot tell either, the bootout's own failure says more.
+		const loaded = () =>
+			run(['print', target]).then(
+				(state) => state === 'done',
+				(error: unknown) => {
+					throw failure ?? error;
+				}
+			);
 		const deadline = Date.now() + stopTimeoutMs;
-		while ((await run(['print', target])) === 'done') {
+		while (await loaded()) {
 			if (Date.now() >= deadline) {
+				const after = failure === undefined ? 'bootout' : mapError(failure, 'service').message;
 				throw new LineMcpError(
 					'launchctl_failed',
-					`launchd still had ${label} loaded ${stopTimeoutMs / 1000} s after bootout`
+					`launchd still had ${label} loaded ${stopTimeoutMs / 1000} s after ${after}`,
+					{ cause: failure }
 				);
 			}
 			await sleep(100);

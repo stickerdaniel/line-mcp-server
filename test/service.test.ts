@@ -12,15 +12,22 @@ const runner = toolRunner({
 	LINE_MCP_SERVICE_RUNNER: fileURLToPath(new URL('fixtures/service-runner.ts', import.meta.url))
 });
 
-const exit = (code: number) => ({ exit: code, stdout: '' });
+const exit = (code: ToolResult['exit']) => ({ exit: code, stdout: '' });
 
 /**
  * Stands in for launchctl and records every call. After a bootout that found
- * the agent (exit 0) launchd keeps it loaded for `unloadPolls` more `print`
- * calls, as while the daemon shuts down, and a bootstrap until then fails
- * with 5, as the real one does.
+ * the agent, launchd keeps it loaded for `unloadPolls` more `print` calls, as
+ * while the daemon shuts down, and a bootstrap until then fails with 5, as the
+ * real one does. Only 3 and 113 mean it was not loaded; a bootout exiting
+ * anything else still takes effect.
  */
-function fakeLaunchd({ bootout = 0, unloadPolls = 0 }: { bootout?: number; unloadPolls?: number }) {
+function fakeLaunchd({
+	bootout = 0,
+	unloadPolls = 0
+}: {
+	bootout?: ToolResult['exit'];
+	unloadPolls?: number;
+}) {
 	const calls: string[][] = [];
 	let loadedFor = 0;
 	const launchctl: ToolRunner = {
@@ -28,7 +35,7 @@ function fakeLaunchd({ bootout = 0, unloadPolls = 0 }: { bootout?: number; unloa
 			calls.push([tool, ...args]);
 			switch (args[0]) {
 				case 'bootout':
-					if (bootout === 0) loadedFor = unloadPolls;
+					if (bootout !== 3 && bootout !== 113) loadedFor = unloadPolls;
 					return exit(bootout);
 				case 'print':
 					if (loadedFor === 0) return exit(113);
@@ -146,6 +153,34 @@ describe('launchd', () => {
 
 		await expect(service.stop()).rejects.toMatchObject({ code: 'launchctl_failed' });
 	});
+
+	// launchd may unload the agent although launchctl failed or the runner gave up on it.
+	it('counts a bootout that failed but took effect as stopped', async () => {
+		const { launchctl } = fakeLaunchd({ bootout: 'timeout', unloadPolls: 2 });
+		const service = serviceFor('darwin', { home: '/Users/me', env: {}, runner: launchctl });
+
+		await service.stop();
+
+		await expect(service.start()).resolves.toBeUndefined();
+	});
+
+	it('fails the stop when a failed bootout leaves the agent loaded', async () => {
+		const { launchctl } = fakeLaunchd({
+			bootout: 'timeout',
+			unloadPolls: Number.POSITIVE_INFINITY
+		});
+		const service = serviceFor('darwin', {
+			home: '/Users/me',
+			env: {},
+			runner: launchctl,
+			stopTimeoutMs: 300
+		});
+
+		await expect(service.stop()).rejects.toMatchObject({
+			code: 'launchctl_failed',
+			message: expect.stringContaining('after launchctl bootout failed (timeout)')
+		});
+	});
 });
 
 describe('tool runner', () => {
@@ -185,6 +220,8 @@ interface Fault {
 	exit: ToolResult['exit'];
 	/** Whether the call took effect even though it reported the failure. */
 	landed?: boolean;
+	/** The `ActiveState` a failed call leaves, as a stop job still running does. */
+	leaves?: string;
 }
 
 /**
@@ -231,6 +268,7 @@ function fakeManager(
 				return { exit: 0, stdout: lines.join('') };
 			}
 			if (!failed || failed.landed) effects[subcommand]?.();
+			if (failed?.leaves) state.ActiveState = failed.leaves;
 			return { exit: failed?.exit ?? 0, stdout: '' };
 		},
 		describe: (tool, args) => [tool, ...args].join(' ')
@@ -341,6 +379,7 @@ describe('systemd', () => {
 	it.each([
 		['a relative Node', { node: 'bin/node' }],
 		['a Node path with a quote', { node: '/opt/a"b/node' }],
+		['a Node path with an apostrophe', { node: "/opt/owner's node/node" }],
 		['a Node path with a backslash', { node: '/opt/a\\b/node' }],
 		['a Node path with a tab', { node: '/opt/a\tb/node' }],
 		['a CLI path with a line break', { cli: '/opt/a\nb/cli.js' }],
@@ -389,6 +428,19 @@ describe('systemd', () => {
 
 		expect(statSync(service.paths.logDir).mode & 0o777).toBe(0o700);
 		expect(statSync(service.paths.log).mode & 0o777).toBe(0o600);
+	});
+
+	it('keeps the old unit running and unchanged when the stop of a reinstall fails', async () => {
+		const { manager, service } = installed((name) =>
+			name === 'stop' ? { exit: 'timeout', leaves: 'deactivating' } : undefined
+		);
+
+		await expect(service.install('[Unit]\nDescription=new\n')).rejects.toMatchObject({
+			code: 'systemctl_failed',
+			message: expect.stringContaining('nothing was changed')
+		});
+		expect(manager.state.ActiveState).toBe('active');
+		expect(readFileSync(service.paths.definition, 'utf-8')).toBe('[Unit]\n');
 	});
 
 	it('stops nothing on a first install', async () => {
@@ -508,6 +560,42 @@ describe('systemd', () => {
 			await expect(systemdIn(tempRoot(), manager).stop()).rejects.toMatchObject({
 				code: 'systemctl_failed',
 				message: expect.stringContaining('systemctl --user stop line-mcp.service failed (timeout)')
+			});
+		});
+
+		// The stop job may still finish after systemctl gave up on it.
+		it('starts a unit that ran again when its stop fails, then fails', async () => {
+			const manager = fakeManager(
+				{ LoadState: 'loaded', ActiveState: 'active' },
+				{
+					fault: (name) =>
+						name === 'stop' ? { exit: 'timeout', leaves: 'deactivating' } : undefined
+				}
+			);
+
+			await expect(systemdIn(tempRoot(), manager).stop()).rejects.toMatchObject({
+				code: 'systemctl_failed',
+				message: expect.stringContaining('the service is unchanged')
+			});
+			expect(manager.state.ActiveState).toBe('active');
+		});
+
+		it('fails as unknown when the unit does not start again either', async () => {
+			const manager = fakeManager(
+				{ LoadState: 'loaded', ActiveState: 'active' },
+				{
+					fault: (name) =>
+						name === 'stop'
+							? { exit: 'timeout', leaves: 'deactivating' }
+							: name === 'start'
+								? { exit: 1, leaves: 'failed' }
+								: undefined
+				}
+			);
+
+			await expect(systemdIn(tempRoot(), manager).stop()).rejects.toMatchObject({
+				code: 'service_state_unknown',
+				message: expect.stringContaining('Starting line-mcp.service again failed too')
 			});
 		});
 

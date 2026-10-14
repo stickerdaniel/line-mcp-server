@@ -176,13 +176,13 @@ const host = linux
 			})
 		};
 
-/** `uninstall` over an installed plist, with launchctl's `bootout` exiting `bootout`. */
-async function uninstall(bootout: number) {
+/** `uninstall` over an installed plist, with launchctl subcommands exiting as `exits` says. */
+async function uninstall(exits: Record<string, number>) {
 	const home = tempRoot();
 	const plist = plistIn(home);
 	mkdirSync(dirname(plist), { recursive: true });
 	writeFileSync(plist, '');
-	const result = await runCli(['uninstall'], { home, exits: { bootout } });
+	const result = await runCli(['uninstall'], { home, exits });
 	return { ...result, plistKept: existsSync(plist) };
 }
 
@@ -441,7 +441,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 	it.skipIf(linux).each([3, 113])(
 		'treats a not-loaded agent as booted out (bootout exits %i)',
 		async (bootout) => {
-			const result = await uninstall(bootout);
+			const result = await uninstall({ bootout });
 
 			expect([result.code, result.plistKept]).toEqual([0, false]);
 			expect(result.calls).toEqual([['launchctl', 'bootout', agent]]);
@@ -449,11 +449,11 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 	);
 
 	it.skipIf(linux)('surfaces other launchctl errors on uninstall and keeps the plist', async () => {
-		const failed = await uninstall(5);
+		const failed = await uninstall({ bootout: 5, print: 5 });
 
 		expect(failed.code).toBe(1);
 		expect(failed.stderr).toContain('launchctl bootout failed (5)');
-		// A failed bootout may leave the agent running: its plist stays for a retry.
+		// launchd cannot say whether the agent is gone, so its plist stays for a retry.
 		expect(failed.plistKept).toBe(true);
 	});
 
