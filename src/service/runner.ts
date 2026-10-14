@@ -42,17 +42,27 @@ export function toolRunner(env: NodeJS.ProcessEnv = process.env): ToolRunner {
 		run: (tool, args, { timeoutMs = defaultToolTimeoutMs } = {}) =>
 			new Promise((resolve) => {
 				const [file, argv] = command(tool, args);
-				// `detached` gives the tool its own session; execFile ignores it, and on
-				// Windows it would open a console instead.
+				// `detached` gives the tool its own session and process group;
+				// execFile ignores it, and on Windows it would open a console instead.
+				const ownGroup = process.platform !== 'win32';
 				const child = spawn(file, argv, {
 					stdio: ['ignore', 'pipe', 'ignore'],
-					detached: process.platform !== 'win32'
+					detached: ownGroup
 				});
 				let stdout = '';
 				let timedOut = false;
 				const timer = setTimeout(() => {
 					timedOut = true;
-					child.kill('SIGKILL');
+					// The whole group, so a wrapper's descendants go too.
+					try {
+						if (ownGroup && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+						else child.kill('SIGKILL');
+					} catch {
+						child.kill('SIGKILL');
+					}
+					// A descendant that left the group may still hold stdout open; `close`
+					// must not wait for it.
+					child.stdout.destroy();
 				}, timeoutMs);
 				child.stdout.setEncoding('utf-8').on('data', (chunk: string) => (stdout += chunk));
 				// A tool that does not start (ENOENT) emits `error`, and may emit `close` after it.

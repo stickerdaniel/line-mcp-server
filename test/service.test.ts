@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { userInfo } from 'node:os';
 import { posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import { LineMcpError } from '../src/errors.ts';
 import { type Service, serviceFor, withServiceStopped } from '../src/service/index.ts';
 import { versionedLayout } from '../src/service/node.ts';
 import { type ToolResult, type ToolRunner, toolRunner } from '../src/service/runner.ts';
@@ -195,6 +196,29 @@ describe('launchd', () => {
 		expect(fake.loaded()).toBe(true);
 	});
 
+	it('reports a cancel when the bootout it interrupted is rolled back', async () => {
+		const fake = fakeLaunchd({ print: 5 });
+		const cancel = new AbortController();
+		const interrupting: ToolRunner = {
+			run: async (tool, args) => {
+				if (args[0] === 'bootout') cancel.abort();
+				return await fake.launchctl.run(tool, args);
+			},
+			describe: fake.launchctl.describe
+		};
+		const service = serviceFor('darwin', { home: tempRoot(), env: {}, runner: interrupting });
+		mkdirSync(posix.dirname(service.paths.definition), { recursive: true });
+		writeFileSync(service.paths.definition, '');
+
+		const handoff = withServiceStopped(service, async () => 'logged in', cancel.signal);
+
+		await expect(handoff).rejects.toMatchObject({
+			code: 'login_cancelled',
+			message: expect.stringContaining('loaded it again')
+		});
+		expect(fake.loaded()).toBe(true);
+	});
+
 	it('fails as unknown when launchd cannot say and the agent does not load again', async () => {
 		const fake = fakeLaunchd({ unloadPolls: Number.POSITIVE_INFINITY, print: 5 });
 		const service = serviceFor('darwin', { home: '/Users/me', env: {}, runner: fake.launchctl });
@@ -224,24 +248,57 @@ describe('launchd', () => {
 	});
 });
 
+/** Runs `systemctl --user stop` through the fixture with `reply` and a 2 s timeout. */
+async function stopWith(reply: Record<string, unknown>) {
+	// The fixture reads its script from the environment it inherits.
+	const saved = process.env.LINE_MCP_SERVICE_SCRIPT;
+	process.env.LINE_MCP_SERVICE_SCRIPT = JSON.stringify({ stop: reply });
+	try {
+		return await within(
+			5000,
+			runner.run('systemctl', ['--user', 'stop', 'line-mcp.service'], { timeoutMs: 2000 }),
+			'the call to end'
+		);
+	} finally {
+		if (saved === undefined) delete process.env.LINE_MCP_SERVICE_SCRIPT;
+		else process.env.LINE_MCP_SERVICE_SCRIPT = saved;
+	}
+}
+
 describe('tool runner', () => {
 	// A hung systemctl must not hang install or login; the kill is not "stopped".
 	it('kills a call that outlives its timeout and reports it as a timeout', async () => {
-		// The fixture reads its script from the environment it inherits.
-		const saved = process.env.LINE_MCP_SERVICE_SCRIPT;
-		process.env.LINE_MCP_SERVICE_SCRIPT = JSON.stringify({ stop: { hang: true } });
-		try {
-			const result = await within(
-				10_000,
-				runner.run('systemctl', ['--user', 'stop', 'line-mcp.service'], { timeoutMs: 1000 }),
-				'the call to end'
-			);
-			expect(result.exit).toBe('timeout');
-		} finally {
-			if (saved === undefined) delete process.env.LINE_MCP_SERVICE_SCRIPT;
-			else process.env.LINE_MCP_SERVICE_SCRIPT = saved;
-		}
+		expect((await stopWith({ hang: true })).exit).toBe('timeout');
 	});
+
+	// A wrapper script on PATH may leave a child that holds the output open.
+	it(
+		'ends a timed-out call whose descendant still holds its output',
+		{ timeout: 10_000 },
+		async () => {
+			const result = await stopWith({ hang: true, descendant: true });
+			const pid = Number(/descendant (\d+)/.exec(result.stdout)?.[1]);
+			onTestFinished(() => {
+				try {
+					process.kill(pid, 'SIGKILL');
+				} catch {}
+			});
+
+			expect(result.exit).toBe('timeout');
+			expect(pid).toBeGreaterThan(0);
+			// Windows has no process groups: there the descendant outlives the call.
+			if (windows) return;
+			const alive = () => {
+				try {
+					process.kill(pid, 0);
+					return true;
+				} catch {
+					return false;
+				}
+			};
+			await vi.waitFor(() => expect(alive()).toBe(false), { timeout: 2000, interval: 20 });
+		}
+	);
 });
 
 type UnitState = Record<
@@ -847,13 +904,95 @@ describe('systemd', () => {
 			expect(manager.state.ActiveState).toBe('active');
 		});
 
-		it('finishes a restore that a cancel interrupts and reports the cancel', async () => {
+		it('finishes a restore that a signal interrupts after the login finished', async () => {
 			const { manager, service, cancel } = cancelledOn('start');
 
 			const handoff = withServiceStopped(service, async () => 'logged in', cancel.signal);
 
-			await expect(handoff).rejects.toMatchObject({ code: 'login_cancelled' });
+			await expect(handoff).rejects.toMatchObject({
+				code: 'login_cancelled',
+				message: 'Interrupted after the login finished'
+			});
 			expect(manager.state.ActiveState).toBe('active');
+		});
+
+		// The login settled before the signal, so its own failure is the result.
+		it('keeps a failed login in the result when a signal interrupts the restore', async () => {
+			const { manager, service, cancel } = cancelledOn('start');
+
+			const handoff = withServiceStopped(
+				service,
+				async () => {
+					throw new LineMcpError('wrong_account', 'The scanned account is not the bound account');
+				},
+				cancel.signal
+			);
+
+			await expect(handoff).rejects.toMatchObject({
+				code: 'login_cancelled',
+				message: expect.stringMatching(
+					/^The login failed with wrong_account: The scanned account is not the bound account\./
+				)
+			});
+			expect(manager.state.ActiveState).toBe('active');
+		});
+
+		it('names a failed login when a signal interrupts a restore that fails', async () => {
+			const { service, cancel } = cancelledOn('start', (name) =>
+				name === 'start' ? { exit: 1 } : undefined
+			);
+
+			const handoff = withServiceStopped(
+				service,
+				async () => {
+					throw new LineMcpError('wrong_account', 'The scanned account is not the bound account');
+				},
+				cancel.signal
+			);
+
+			await expect(handoff).rejects.toMatchObject({
+				code: 'service_restore_failed',
+				message: expect.stringContaining(
+					'The login failed too: The scanned account is not the bound account'
+				)
+			});
+		});
+
+		// systemd starts a unit whose stop failed again before it rejects.
+		it('reports a cancel when the stop it interrupted fails and is rolled back', async () => {
+			const { manager, service, cancel } = cancelledOn('stop', (name) =>
+				name === 'stop' ? { exit: 'timeout', leaves: 'deactivating' } : undefined
+			);
+			let ran = false;
+
+			const handoff = withServiceStopped(
+				service,
+				async () => {
+					ran = true;
+				},
+				cancel.signal
+			);
+
+			await expect(handoff).rejects.toMatchObject({
+				code: 'login_cancelled',
+				message: expect.stringMatching(/^The login was cancelled\. .*the service is unchanged/)
+			});
+			expect(ran).toBe(false);
+			expect(manager.state.ActiveState).toBe('active');
+		});
+
+		it('keeps an unknown state after a cancel during a stop that fails', async () => {
+			const { service, cancel } = cancelledOn('stop', (name) =>
+				name === 'stop'
+					? { exit: 'timeout', leaves: 'deactivating' }
+					: name === 'start'
+						? { exit: 1, leaves: 'failed' }
+						: undefined
+			);
+
+			const handoff = withServiceStopped(service, async () => 'logged in', cancel.signal);
+
+			await expect(handoff).rejects.toMatchObject({ code: 'service_state_unknown' });
 		});
 
 		it('names the cancel when the unit does not start again', async () => {

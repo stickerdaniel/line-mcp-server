@@ -10,9 +10,10 @@ import { login, type LoginOptions } from './session.ts';
  *
  * From before the stop until the restore has finished, SIGINT (Ctrl-C, which
  * Node also raises on Windows) and SIGTERM cancel the login instead of ending
- * the process, so the service is never left stopped. A cancelled login prints
- * `login_cancelled` and exits 130. A second signal changes nothing: the
- * restore always runs to the end, bounded by the service manager's timeouts.
+ * the process, so the service is never left stopped. An interrupted login
+ * prints `login_cancelled`, whose message `withServiceStopped` words, and
+ * exits 130. A second signal changes nothing: the restore always runs to the
+ * end, bounded by the service manager's timeouts.
  * Tests pass a fake upstream as `createClient`.
  */
 export async function runLogin(
