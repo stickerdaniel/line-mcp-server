@@ -13,7 +13,7 @@ import { createServer } from 'node:net';
 import { userInfo } from 'node:os';
 import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { healthKey, writeState } from '../src/archive.ts';
 import { openDatabase, setAuthState } from '../src/db.ts';
 import { lockInUse, requestStop } from '../src/lock.ts';
@@ -55,6 +55,7 @@ const serviceRunner = fileURLToPath(new URL('fixtures/service-runner.ts', import
 interface Reply {
 	exit?: number;
 	stdout?: string;
+	delayMs?: number;
 }
 
 interface RunOptions {
@@ -81,45 +82,64 @@ async function runCli(
 	args: string[],
 	{ home = tempRoot(), env = {}, exits = {}, replies = {}, script = cliEntry, cwd }: RunOptions = {}
 ) {
-	const state = join(home, 'state');
-	const calls = join(home, 'service-calls');
 	const lockPort = await freePort();
 	const serviceScript = {
 		...Object.fromEntries(Object.entries(exits).map(([command, exit]) => [command, { exit }])),
 		...replies
 	};
-	const base: NodeJS.ProcessEnv = { ...process.env };
-	for (const name of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) delete base[name];
 	const run = await new Promise<Run>((resolve) => {
 		execFile(
 			process.execPath,
 			[script, ...args],
-			{
-				cwd,
-				env: {
-					...base,
-					// os.homedir() reads USERPROFILE on Windows.
-					HOME: home,
-					USERPROFILE: home,
-					LINE_MCP_HOME: state,
-					LINE_MCP_LOCK_PORT: String(lockPort),
-					LINE_MCP_SERVICE_RUNNER: serviceRunner,
-					LINE_MCP_SERVICE_CALLS: calls,
-					LINE_MCP_SERVICE_SCRIPT: JSON.stringify(serviceScript),
-					...env
-				}
-			},
+			{ cwd, env: { ...cliEnv(home, lockPort, serviceScript), ...env } },
 			(error, stdout, stderr) =>
 				resolve({ code: error ? Number(error.code ?? 1) : 0, stdout, stderr })
 		);
 	});
-	const launched = existsSync(calls)
+	const launched = serviceCalls(home);
+	return {
+		...run,
+		home,
+		state: join(home, 'state'),
+		launched: launched.length > 0,
+		calls: launched
+	};
+}
+
+/**
+ * The environment of a CLI run under `home`: the state root `<home>/state`,
+ * the lock port, and the service runner fixture with its replies, recording
+ * to `<home>/service-calls`.
+ */
+function cliEnv(
+	home: string,
+	lockPort: number,
+	replies: Record<string, Reply | Reply[]>
+): NodeJS.ProcessEnv {
+	const base: NodeJS.ProcessEnv = { ...process.env };
+	for (const name of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME']) delete base[name];
+	return {
+		...base,
+		// os.homedir() reads USERPROFILE on Windows.
+		HOME: home,
+		USERPROFILE: home,
+		LINE_MCP_HOME: join(home, 'state'),
+		LINE_MCP_LOCK_PORT: String(lockPort),
+		LINE_MCP_SERVICE_RUNNER: serviceRunner,
+		LINE_MCP_SERVICE_CALLS: join(home, 'service-calls'),
+		LINE_MCP_SERVICE_SCRIPT: JSON.stringify(replies)
+	};
+}
+
+/** Every service manager call the runner fixture recorded under `home`, in order. */
+function serviceCalls(home: string): string[][] {
+	const calls = join(home, 'service-calls');
+	return existsSync(calls)
 		? readFileSync(calls, 'utf-8')
 				.trimEnd()
 				.split('\n')
 				.map((line) => JSON.parse(line) as string[])
 		: [];
-	return { ...run, home, state, launched: launched.length > 0, calls: launched };
 }
 
 const domain = `gui/${userInfo().uid}`;
@@ -141,12 +161,19 @@ function unitState(load: string, active: string, fragment = ''): Reply {
 /**
  * The CLI's service manager on this OS: systemd on Linux, launchd everywhere
  * else until Windows gets its own backend. Each gives the definition path,
- * the text that runs a Node and a CLI, and the fixture replies and calls of an
- * install under `home`.
+ * the text that runs a Node and a CLI, the fixture replies and calls of an
+ * install under `home`, and the calls that stop a running service for a login
+ * and restore it (launchd's read-only `print` left out), the stop first.
  */
 const host = linux
 	? {
 			definitionIn: unitIn,
+			handoff: (_home: string) => [
+				['systemctl', '--user', 'show', 'line-mcp.service', expect.any(String)],
+				['systemctl', '--user', 'stop', 'line-mcp.service'],
+				['systemctl', '--user', 'start', 'line-mcp.service']
+			],
+			stop: 'stop',
 			starts: (node: string) => `\nExecStart="${node}" `,
 			runs: (entry: string) => ` "${entry}" daemon\n`,
 			install: (home: string) => ({
@@ -164,6 +191,11 @@ const host = linux
 		}
 	: {
 			definitionIn: plistIn,
+			handoff: (home: string) => [
+				['launchctl', 'bootout', agent],
+				['launchctl', 'bootstrap', domain, plistIn(home)]
+			],
+			stop: 'bootout',
 			starts: (node: string) =>
 				`<key>ProgramArguments</key>\n\t<array>\n\t\t<string>${node}</string>`,
 			runs: (entry: string) => `<string>${entry}</string>\n\t\t<string>daemon</string>`,
@@ -494,18 +526,8 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 
 		expect(result.code).toBe(1);
 		expect(result.stderr).toContain('"code":"lock_held"');
-		const stopAndRestore = linux
-			? [
-					['systemctl', '--user', 'show', 'line-mcp.service', expect.any(String)],
-					['systemctl', '--user', 'stop', 'line-mcp.service'],
-					['systemctl', '--user', 'start', 'line-mcp.service']
-				]
-			: [
-					['launchctl', 'bootout', agent],
-					['launchctl', 'bootstrap', domain, plistIn(home)]
-				];
 		expect(result.calls.filter(([, command]) => command !== 'print')).toEqual(
-			installed ? stopAndRestore : []
+			installed ? host.handoff(home) : []
 		);
 	});
 
@@ -539,6 +561,80 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(error.message).toContain(
 			'The login failed too: Another process holds the line-mcp lock port'
 		);
+	});
+});
+
+const interruptedLogin = fileURLToPath(new URL('fixtures/interrupted-login.ts', import.meta.url));
+
+/**
+ * Starts `line-mcp login` (test/fixtures/interrupted-login.ts) under a fresh
+ * home with a running service, in a process group of its own, so a signal to
+ * the group reaches it as a Ctrl-C in a terminal reaches its foreground group.
+ */
+async function startLogin(replies: Record<string, Reply> = {}) {
+	const home = tempRoot();
+	mkdirSync(dirname(host.definitionIn(home)), { recursive: true });
+	writeFileSync(host.definitionIn(home), '');
+	const lockPort = await freePort();
+	const child = spawn(process.execPath, [interruptedLogin], {
+		env: cliEnv(home, lockPort, { show: unitState('loaded', 'active', unitIn(home)), ...replies }),
+		stdio: ['ignore', 'pipe', 'pipe'],
+		detached: true
+	});
+	const output = { stdout: '', stderr: '' };
+	child.stdout.setEncoding('utf-8').on('data', (chunk: string) => (output.stdout += chunk));
+	child.stderr.setEncoding('utf-8').on('data', (chunk: string) => (output.stderr += chunk));
+	const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
+		child.once('exit', (code, signal) => resolve({ code, signal }))
+	);
+	onTestFinished(() => {
+		if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+	});
+	return {
+		home,
+		lockPort,
+		output,
+		interrupt: (signal: NodeJS.Signals) => process.kill(-child.pid!, signal),
+		exited: () => within(10_000, exited, 'the interrupted login')
+	};
+}
+
+// A real signal; Windows has none to send to a child.
+describe.skipIf(windows)('interrupted login', { timeout: 15_000 }, () => {
+	it.each(['SIGINT', 'SIGTERM'] as const)(
+		'cancels on %s, restores the service and exits 130',
+		async (signal) => {
+			const login = await startLogin();
+			await vi.waitFor(() => expect(login.output.stdout).toContain('stalled'), {
+				timeout: 10_000,
+				interval: 20
+			});
+
+			login.interrupt(signal);
+
+			expect(await login.exited()).toEqual({ code: 130, signal: null });
+			expect(JSON.parse(login.output.stderr.trim().split('\n').at(-1)!)).toMatchObject({
+				code: 'login_cancelled'
+			});
+			const calls = serviceCalls(login.home).filter(([, command]) => command !== 'print');
+			expect(calls).toEqual(host.handoff(login.home));
+			expect(await lockInUse(login.lockPort)).toBe(false);
+		}
+	);
+
+	it('finishes a stop in progress, skips the login and restores the service', async () => {
+		const login = await startLogin({ [host.stop]: { delayMs: 1000 } });
+		await vi.waitFor(() => expect(serviceCalls(login.home).flat()).toContain(host.stop), {
+			timeout: 10_000,
+			interval: 20
+		});
+
+		login.interrupt('SIGINT');
+
+		expect(await login.exited()).toEqual({ code: 130, signal: null });
+		expect(login.output.stdout).not.toContain('Scan this QR code');
+		const calls = serviceCalls(login.home).filter(([, command]) => command !== 'print');
+		expect(calls).toEqual(host.handoff(login.home));
 	});
 });
 

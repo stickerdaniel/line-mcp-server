@@ -76,20 +76,49 @@ export function serviceFor(platform: NodeJS.Platform, deps: ServiceDeps): Servic
  * its prior state. A failed restore rejects with `service_restore_failed`
  * after `body` printed its own result; when `body` failed too, the message
  * carries its failure as well.
+ *
+ * `signal` interrupts the handoff, and `body` must settle promptly on it. A
+ * stop in progress finishes first, or rolls back on its own failure, and
+ * `body` is skipped; a restore in progress finishes too. Once the service is
+ * back, an interrupted handoff rejects with `login_cancelled`: "The login was
+ * cancelled" when the signal came during the stop or `body` and `body` did
+ * not succeed; otherwise its message keeps the login's own result. A stop
+ * that leaves the state unknown (`service_state_unknown`) and a failed restore
+ * keep their own errors.
  */
-export async function withServiceStopped<T>(service: Service, body: () => Promise<T>): Promise<T> {
-	const restore = service.installed() ? await service.stop() : undefined;
+export async function withServiceStopped<T>(
+	service: Service,
+	body: () => Promise<T>,
+	signal?: AbortSignal
+): Promise<T> {
+	let restore: Restore | undefined;
+	try {
+		restore = service.installed() ? await service.stop() : undefined;
+	} catch (error) {
+		// A failed stop has put the service back, unless its state is unknown.
+		const unknown = error instanceof LineMcpError && error.code === 'service_state_unknown';
+		if (!signal?.aborted || unknown) throw error;
+		throw new LineMcpError(
+			'login_cancelled',
+			`The login was cancelled. ${mapError(error, 'login').message}`,
+			{ cause: error }
+		);
+	}
 	let outcome: { value: T } | { error: unknown };
 	try {
+		signal?.throwIfAborted();
 		outcome = { value: await body() };
 	} catch (error) {
 		outcome = { error };
 	}
+	// Fixed once `body` settled: a signal during the restore cancels nothing.
+	const cancelled = signal?.aborted === true && 'error' in outcome;
 	try {
 		await restore?.();
 	} catch (error) {
-		const also =
-			'error' in outcome
+		const also = cancelled
+			? ' The login was cancelled.'
+			: 'error' in outcome
 				? ` The login failed too: ${mapError(outcome.error, 'login').message}`
 				: '';
 		throw new LineMcpError(
@@ -99,6 +128,21 @@ export async function withServiceStopped<T>(service: Service, body: () => Promis
 			{ cause: error }
 		);
 	}
+	if (signal?.aborted) {
+		throw new LineMcpError(
+			'login_cancelled',
+			cancelled ? 'The login was cancelled' : interruptedAfter(outcome),
+			'error' in outcome ? { cause: outcome.error } : undefined
+		);
+	}
 	if ('error' in outcome) throw outcome.error;
 	return outcome.value;
+}
+
+/** The message for a signal that came after the login settled on its own. */
+function interruptedAfter(outcome: { value: unknown } | { error: unknown }): string {
+	// A login that succeeded has printed its result already.
+	if ('value' in outcome) return 'Interrupted after the login finished';
+	const { code, message } = mapError(outcome.error, 'login');
+	return `The login failed with ${code}: ${message}. Interrupted while the service was restored`;
 }

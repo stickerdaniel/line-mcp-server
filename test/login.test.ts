@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { readAccount } from '../src/db.ts';
 import { mapError } from '../src/errors.ts';
+import { acquireLock } from '../src/lock.ts';
 import { databasePath } from '../src/paths.ts';
 import { login, type LoginOptions } from '../src/session.ts';
 import {
@@ -16,7 +17,8 @@ import {
 	selfMid,
 	snapshot,
 	storedKey,
-	tempRoot
+	tempRoot,
+	within
 } from './fake-line.ts';
 
 async function runLogin(root: string, upstream: FakeUpstream, extra: Partial<LoginOptions> = {}) {
@@ -187,5 +189,81 @@ describe('QR expiry', () => {
 		const error = await runLogin(root, upstream).catch((reason: unknown) => reason);
 
 		expect(mapError(error, 'login').code).toBe('upstream_parse_error');
+	});
+});
+
+describe('cancelled login', () => {
+	// Ctrl-C usually comes while the QR code waits for a scan; at the profile
+	// lookup, LINEJS has already written the new token and keys to staging.
+	it.each(['checkQrCodeVerified', 'getProfile'])(
+		'settles at once while %s is pending and commits nothing',
+		async (method) => {
+			const root = tempRoot();
+			seedLive(root, selfMid, { authToken: 'token-old', 'e2eeKeys:1': storedKey(keyPair(1)) });
+			const before = snapshot(root);
+			const handlers = qrLoginHandlers({ mid: selfMid, keys: [keyPair(1), keyPair(2)] });
+			const answer = handlers[method]!;
+			const reached = Promise.withResolvers<void>();
+			const resume = Promise.withResolvers<void>();
+			const upstream = fakeUpstream({
+				...handlers,
+				[method]: async (value, base) => {
+					reached.resolve();
+					await resume.promise;
+					return answer(value, base);
+				}
+			});
+			const cancel = new AbortController();
+			const lockPort = await freePort();
+
+			const pending = runLogin(root, upstream, { lockPort, signal: cancel.signal });
+			await within(5000, reached.promise, `reaching ${method}`);
+			const dispatched = [...upstream.calls];
+			cancel.abort();
+
+			await expect(within(1000, pending, 'the cancelled login')).rejects.toMatchObject({
+				code: 'login_cancelled'
+			});
+			const lock = await acquireLock(lockPort);
+			await lock.release();
+			// The stalled call answers late, and LINEJS carries on with the login.
+			resume.resolve();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(upstream.calls).toEqual(dispatched);
+			expect(snapshot(root)).toEqual(before);
+		}
+	);
+
+	it('binds nothing when the cancel comes right before the commit', async () => {
+		const root = tempRoot();
+		const cancel = new AbortController();
+		const upstream = fakeUpstream(qrLoginHandlers({ mid: selfMid, keys: [keyPair(1)] }));
+		// The cancel lands once LINEJS has finished, at the profile read that leads to the commit.
+		const createClient: LoginOptions['createClient'] = (storage) => {
+			const base = upstream.createClient(storage);
+			const loginProcess = base.loginProcess.login.bind(base.loginProcess);
+			let finished = false;
+			base.loginProcess.login = async (...args) => {
+				await loginProcess(...args);
+				finished = true;
+			};
+			let profile = base.profile;
+			Object.defineProperty(base, 'profile', {
+				get: () => {
+					if (finished) cancel.abort();
+					return profile;
+				},
+				set: (value: typeof profile) => {
+					profile = value;
+				}
+			});
+			return base;
+		};
+
+		await expect(
+			runLogin(root, upstream, { createClient, signal: cancel.signal })
+		).rejects.toMatchObject({ code: 'login_cancelled' });
+
+		expect(snapshot(root)).toEqual({ kv: [], account: [] });
 	});
 });
