@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { connect, createServer } from 'node:net';
+import { connect, createServer, Socket } from 'node:net';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -19,6 +19,19 @@ import {
 	tempRoot,
 	within
 } from './fake-line.ts';
+
+// Pass-through, so a test can make one connection attempt fail like the OS would.
+vi.mock('node:net', async (importOriginal) => {
+	const net = await importOriginal<typeof import('node:net')>();
+	return { ...net, connect: vi.fn(net.connect) };
+});
+
+/** A connection attempt that fails with `code` instead of connecting or being refused. */
+function failingConnect(code: string): Socket {
+	const socket = new Socket();
+	process.nextTick(() => socket.destroy(Object.assign(new Error(code), { code })));
+	return socket;
+}
 
 const children: ChildProcess[] = [];
 afterEach(() => {
@@ -233,7 +246,29 @@ describe('stop request', () => {
 		expect(await lockInUse(port)).toBe(true);
 	});
 
+	it.each([
+		['sending the request fails', 1, () => failingConnect('EMFILE'), 'lock_failed'],
+		['confirming the stop fails', 2, () => failingConnect('EMFILE'), 'lock_failed'],
+		['confirming the stop never answers', 2, () => new Socket(), 'stop_timeout']
+	])('does not guess when %s', async (_step, failAt, attempt, code) => {
+		const port = await freePort();
+		const lock = await acquireLock(port, () => {});
+		const real = vi.mocked(connect).getMockImplementation()!;
+		let attempts = 0;
+		vi.mocked(connect).mockImplementation(((...args: Parameters<typeof connect>) =>
+			++attempts === failAt ? attempt() : real(...args)) as typeof connect);
+		try {
+			const started = Date.now();
+			await expect(requestStop(port, { deadlineMs: 500 })).rejects.toMatchObject({ code });
+			expect(Date.now() - started).toBeLessThan(1500);
+		} finally {
+			vi.mocked(connect).mockImplementation(real);
+			await lock.release();
+		}
+	});
+
 	it('reports not_running when nothing listens on the port', async () => {
-		await expect(requestStop(await freePort(), { deadlineMs: 500 })).resolves.toBe('not_running');
+		// The deadline leaves room for Windows, which takes about 2 s to refuse.
+		await expect(requestStop(await freePort(), { deadlineMs: 5000 })).resolves.toBe('not_running');
 	});
 });

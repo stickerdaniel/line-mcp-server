@@ -537,8 +537,11 @@ describe('daemon', () => {
 		const failed = expect(starting).rejects.toMatchObject({ code: 'shutting_down' });
 		await until(() => upstream.calls.includes('getProfile'), 'the profile request');
 
-		await within(2000, requestStop(lockPort, { deadlineMs: 2000 }), 'stop');
-		await failed;
+		// Startup ends promptly; confirming the free port can take longer on
+		// Windows, where a refused connection takes about 2 s.
+		const stopping = requestStop(lockPort, { deadlineMs: 10_000 });
+		await within(2000, failed, 'stop');
+		await expect(stopping).resolves.toBe('stopped');
 
 		// LINE answers after all; nothing goes on from there.
 		profile.resolve({ mid: selfMid });
