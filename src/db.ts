@@ -170,12 +170,13 @@ const migrations = [
 				event_members = ?, event_name = ?
 			WHERE id = ?`
 		);
+		// Row by row: an archive's envelopes need not fit in memory at once.
 		const rows = db
 			.prepare(
 				`SELECT id, content_type, envelope FROM message
 				WHERE unsent = 0 AND content_type IS NOT NULL AND content_type != 'NONE'`
 			)
-			.all();
+			.iterate();
 		for (const row of rows) {
 			const fields = envelopeFields(String(row.content_type), String(row.envelope));
 			update.run(
