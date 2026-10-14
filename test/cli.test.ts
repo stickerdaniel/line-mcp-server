@@ -695,6 +695,42 @@ describe.runIf(windows)('Windows scheduled task', { timeout: 30_000 }, () => {
 		expect(result.calls).toEqual([whoamiCall, queryCall]);
 	});
 
+	it.each([
+		[
+			'an existing log that grants everyone access',
+			(log: string) => {
+				writeFileSync(log, '');
+				execFileSync('icacls', [log, '/grant', '*S-1-1-0:(R)']);
+				return [];
+			}
+		],
+		[
+			'a log that links to a missing file',
+			(log: string) => {
+				const outside = join(tempRoot(), 'outside.log');
+				symlinkSync(outside, log, 'file');
+				return [outside];
+			}
+		]
+	])('refuses %s before it stops, writes or opens anything', async (_, plant) => {
+		const home = tempRoot();
+		const logs = join(home, 'AppData', 'Local', 'line-mcp', 'logs');
+		mkdirSync(logs, { recursive: true });
+		// Files that must not come into being.
+		const absent = plant(join(logs, 'daemon.log'));
+
+		const result = await runCli(['install'], { home, replies: { whoami, cscript: absentTask } });
+
+		expect(result.code).toBe(1);
+		expect(failure(result.stderr)).toMatchObject({
+			code: 'insecure_directory',
+			message: expect.stringContaining('Nothing was stopped or written')
+		});
+		expect(result.calls).toEqual([]);
+		expect(readdirSync(serviceDirIn(home))).toEqual([]);
+		expect(absent.filter((file) => existsSync(file))).toEqual([]);
+	});
+
 	it('keeps a state root that is not private on uninstall --purge', async () => {
 		const home = tempRoot();
 		const state = join(home, 'state');

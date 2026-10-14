@@ -1,7 +1,14 @@
 // The Windows Task Scheduler backend through a fake schtasks, cscript and
 // whoami, on every OS, with its daemon on a real loopback lock port;
 // test/service-e2e.test.ts runs it against the real Task Scheduler.
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	symlinkSync,
+	writeFileSync
+} from 'node:fs';
 import { join, parse } from 'node:path';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { LineMcpError } from '../src/errors.ts';
@@ -322,6 +329,10 @@ describe('Task Scheduler (Windows)', { timeout: 15_000 }, () => {
 		expect(fake.events.filter((event) => event !== 'cscript')).toEqual([
 			`privacy directory ${paths.dir}`,
 			`privacy directory ${paths.logDir}`,
+			// Before anything is stopped, written or opened; missing files pass.
+			`privacy file ${paths.launcher}`,
+			`privacy file ${paths.xml}`,
+			`privacy file ${paths.log}`,
 			'whoami',
 			`privacy file ${paths.launcher}`,
 			`privacy file ${paths.xml}`,
@@ -375,6 +386,48 @@ describe('Task Scheduler (Windows)', { timeout: 15_000 }, () => {
 		expect(fake.schtasks()).toEqual([]);
 		expect(readdirSync(paths.dir)).toEqual([]);
 		expect([taskState(fake), fake.bound()]).toEqual(['enabled, running', true]);
+	});
+
+	it('stops and writes nothing when a file already there is not private', async () => {
+		const fake = await fakeScheduler({ initial: 'enabled, running' });
+		const paths = scheduler(fake, { refuse: (path) => path === paths.log });
+
+		await expect(paths.service.install(render(paths.service))).rejects.toMatchObject({
+			code: 'insecure_directory',
+			message: expect.stringContaining('Nothing was stopped or written')
+		});
+		expect(fake.schtasks()).toEqual([]);
+		expect(readdirSync(paths.dir)).toEqual([]);
+		expect([taskState(fake), fake.bound()]).toEqual(['enabled, running', true]);
+	});
+
+	it('opens no log that failed its check, so a link creates nothing', async () => {
+		const fake = await fakeScheduler();
+		const paths = scheduler(fake, { refuse: (path) => path === paths.log });
+		const outside = join(tempRoot(), 'outside.log');
+		mkdirSync(paths.logDir, { recursive: true });
+		symlinkSync(outside, paths.log, 'file');
+
+		await expect(paths.service.install(render(paths.service))).rejects.toMatchObject({
+			code: 'insecure_directory'
+		});
+		expect(existsSync(outside)).toBe(false);
+	});
+
+	it('keeps the stopped task disabled when a written file fails its check', async () => {
+		const fake = await fakeScheduler({ initial: 'enabled, running' });
+		// The log passes before the stop and fails once written.
+		let logChecks = 0;
+		const paths = scheduler(fake, { refuse: (path) => path === paths.log && ++logChecks > 1 });
+
+		await expect(paths.service.install(render(paths.service))).rejects.toMatchObject({
+			code: 'install_failed',
+			message: expect.stringMatching(
+				/^Checking the written files failed: .*; the scheduled task stays disabled\. Run line-mcp doctor, then line-mcp install$/
+			)
+		});
+		expect(fake.schtasks()).toEqual(['/Change /Disable']);
+		expect([taskState(fake), fake.launched()]).toEqual(['disabled, idle', 1]);
 	});
 
 	it('leaves everything as it was when the stop of an install fails', async () => {

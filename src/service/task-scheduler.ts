@@ -411,6 +411,16 @@ export function taskScheduler({
 
 	/** Install's failure in `step`, after the prior state was restored where it could be. */
 	async function installFailed(step: string, error: unknown, prior: Prior | undefined) {
+		// A file the task runs or opens failed its check, or the check could not
+		// run: the task stays disabled rather than run against it.
+		if (prior && error instanceof LineMcpError && error.code === 'insecure_directory') {
+			return new LineMcpError(
+				'install_failed',
+				`${step} failed: ${reason(error, 'install')}; the scheduled task stays disabled. ` +
+					'Run line-mcp doctor, then line-mcp install',
+				{ cause: error }
+			);
+		}
 		let restored = prior
 			? 'the scheduled task as it was before is back'
 			: 'no scheduled task was registered before';
@@ -484,9 +494,22 @@ export function taskScheduler({
 				}
 				return;
 			}
-			// 1. Nothing is stopped, written or registered before the directories are private.
+			// 1. Nothing is stopped, written, opened or registered before the
+			// directories and the files already in them (missing ones pass) are private.
 			await privacy.directory(serviceDir);
 			await privacy.directory(logDir);
+			for (const file of [launcher, definitionXml, paths.log]) {
+				try {
+					await privacy.file(file);
+				} catch (error) {
+					if (!(error instanceof LineMcpError)) throw error;
+					throw new LineMcpError(
+						error.code,
+						`${error.message}. Nothing was stopped or written; run line-mcp install again after the fix`,
+						{ cause: error }
+					);
+				}
+			}
 			// 2. A failed stop has put the task back and changed nothing here.
 			let prior: Prior | undefined;
 			try {
@@ -499,7 +522,8 @@ export function taskScheduler({
 					{ cause: error }
 				);
 			}
-			// 3. and 4. Written into the checked directories, checked again, then registered disabled.
+			// 3. and 4. Written into the checked directories, checked again, then
+			// registered disabled. A failed check leaves the task disabled (installFailed).
 			let step = `Writing ${launcher}`;
 			try {
 				replace(launcher, definition);
