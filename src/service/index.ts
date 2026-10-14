@@ -13,6 +13,8 @@ export interface ServiceDeps {
 	home: string;
 	env: NodeJS.ProcessEnv;
 	runner: ToolRunner;
+	/** How long `stop` waits for the manager to let the service go; 30 s by default. */
+	stopTimeoutMs?: number;
 }
 
 /** A dry run prints every file write and mutating command instead of running it. */

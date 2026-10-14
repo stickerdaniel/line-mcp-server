@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { LineMcpError } from '../errors.ts';
 import { serviceTemplate } from '../paths.ts';
 import type { DryRun, Service, ServiceDeps } from './index.ts';
@@ -28,7 +29,7 @@ function xml(value: string): string {
 const notLoadedCodes = new Set([3, 113]);
 
 /** The per-user LaunchAgent in the GUI domain, logging to `~/Library/Logs/line-mcp`. */
-export function launchd({ home, runner }: ServiceDeps): Service {
+export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): Service {
 	const logDir = join(home, 'Library', 'Logs', 'line-mcp');
 	const paths = {
 		definition: join(home, 'Library', 'LaunchAgents', `${label}.plist`),
@@ -36,6 +37,7 @@ export function launchd({ home, runner }: ServiceDeps): Service {
 		log: join(logDir, 'daemon.log')
 	};
 	const domain = `gui/${userInfo().uid}`;
+	const target = `${domain}/${label}`;
 
 	/**
 	 * Runs launchctl and tells whether the service was there. Every failure
@@ -48,11 +50,29 @@ export function launchd({ home, runner }: ServiceDeps): Service {
 		throw new LineMcpError('launchctl_failed', `launchctl ${args[0]} failed (${exit})`);
 	}
 
-	/** Boots the agent out; one that is not loaded is already where it should be. */
+	/**
+	 * Boots the agent out and waits until launchd has let it go; one that is
+	 * not loaded is already where it should be. `bootout` returns while the
+	 * daemon is still shutting down, and until it is gone a `bootstrap` fails
+	 * (5) and a login finds the lock held.
+	 */
 	async function bootout({ dryRun }: DryRun = {}): Promise<void> {
-		const args = ['bootout', `${domain}/${label}`];
-		if (dryRun) console.log(`would run: ${runner.describe(launchctl, args)}`);
-		else await run(args);
+		const args = ['bootout', target];
+		if (dryRun) {
+			console.log(`would run: ${runner.describe(launchctl, args)}`);
+			return;
+		}
+		if ((await run(args)) === 'not_loaded') return;
+		const deadline = Date.now() + stopTimeoutMs;
+		while ((await run(['print', target])) === 'done') {
+			if (Date.now() >= deadline) {
+				throw new LineMcpError(
+					'launchctl_failed',
+					`launchd still had ${label} loaded ${stopTimeoutMs / 1000} s after bootout`
+				);
+			}
+			await sleep(100);
+		}
 	}
 
 	async function bootstrap({ dryRun }: DryRun = {}): Promise<void> {
@@ -101,6 +121,6 @@ export function launchd({ home, runner }: ServiceDeps): Service {
 		stop: () => bootout(),
 		start: () => bootstrap(),
 		installed: () => existsSync(paths.definition),
-		loaded: async () => (await run(['print', `${domain}/${label}`])) === 'done'
+		loaded: async () => (await run(['print', target])) === 'done'
 	};
 }

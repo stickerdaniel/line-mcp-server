@@ -165,7 +165,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(readFileSync(plistIn(result.home), 'utf-8')).toContain(
 			`<string>${cli}</string>\n\t\t<string>daemon</string>`
 		);
-		expect(result.calls).toEqual([
+		expect(result.calls.filter(([, command]) => command !== 'print')).toEqual([
 			['launchctl', 'bootout', agent],
 			['launchctl', 'bootstrap', domain, plistIn(result.home)]
 		]);
