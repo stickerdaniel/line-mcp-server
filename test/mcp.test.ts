@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
@@ -1330,7 +1330,7 @@ describe('upstream tools', () => {
 		]);
 	});
 
-	it('downloads an attachment into a private cache and refuses unsent messages', async () => {
+	it('downloads an attachment into the cache and refuses unsent messages', async () => {
 		const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
 		const fetched: string[] = [];
 		const { server, session, upstream, root } = await serve({}, async (request) => {
@@ -1359,11 +1359,9 @@ describe('upstream tools', () => {
 			download: true
 		});
 		const path = saved.data.path as string;
-		expect(path.startsWith(`${root}/attachments/`)).toBe(true);
+		expect(dirname(path)).toBe(join(root, 'attachments'));
 		expect(readFileSync(path)).toEqual(image);
-		expect(statSync(path).mode & 0o777).toBe(0o600);
-		expect(statSync(`${root}/attachments`).mode & 0o777).toBe(0o700);
-		expect(path).toMatch(/\/talk-41-[0-9a-f]{24}\.png$/);
+		expect(basename(path)).toMatch(/^talk-41-[0-9a-f]{24}\.png$/);
 		expect(fetched).toEqual(['/r/talk/m/41']);
 		const again = await callTool(server.port, 'get_attachment', {
 			service: 'talk',
@@ -1382,6 +1380,25 @@ describe('upstream tools', () => {
 		expect(unsent).toMatchObject({ isError: true, data: { error: { code: 'message_unsent' } } });
 		expect(fetched).toHaveLength(1);
 		expect(upstream.calls).toEqual([]);
+	});
+
+	// Windows has no POSIX modes; its private directories are ACL checks of their own.
+	it.skipIf(process.platform === 'win32')('keeps the attachment cache private', async () => {
+		const { server, session, root } = await serve(
+			{},
+			async () => new Response(Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+		);
+		store(session.db, media('41'));
+
+		const saved = await callTool(server.port, 'get_attachment', {
+			service: 'talk',
+			chat_id: otherMid,
+			message_id: '41',
+			download: true
+		});
+
+		expect(statSync(saved.data.path as string).mode & 0o777).toBe(0o600);
+		expect(statSync(join(root, 'attachments')).mode & 0o777).toBe(0o700);
 	});
 
 	it('names cached media without a file name by its leading bytes', async () => {
@@ -1407,8 +1424,9 @@ describe('upstream tools', () => {
 				download: true
 			});
 			const path = saved.data.path as string;
-			expect(path.startsWith(`${root}/attachments/talk-${id}-`)).toBe(true);
-			names.push(path.slice(path.lastIndexOf('/') + `/talk-${id}-`.length + 24));
+			expect(dirname(path)).toBe(join(root, 'attachments'));
+			expect(basename(path).startsWith(`talk-${id}-`)).toBe(true);
+			names.push(basename(path).slice(`talk-${id}-`.length + 24));
 		}
 		expect(names).toEqual(['.jpg', '.mp4', '.m4a', '.pdf', '']);
 	});
@@ -1566,7 +1584,7 @@ describe('upstream tools', () => {
 		});
 		expect(readFileSync(saved.data.path as string)).toEqual(small);
 		// The name inside the encrypted payload gives the extension.
-		expect(saved.data.path).toMatch(/\/talk-51-[0-9a-f]{24}\.jpg$/);
+		expect(basename(saved.data.path as string)).toMatch(/^talk-51-[0-9a-f]{24}\.jpg$/);
 
 		// A file of exactly the limit arrives with its 32-byte HMAC on top.
 		const full = await fetch('54');
@@ -1668,7 +1686,7 @@ describe('upstream tools', () => {
 		});
 		const saved = await attachment('71', true);
 		expect(saved).toMatchObject({ attachment: { file_name: 'Q3 報告.pdf' }, cached: false });
-		expect(saved.path).toMatch(/\/talk-71-[0-9a-f]{24}\.pdf$/);
+		expect(basename(saved.path as string)).toMatch(/^talk-71-[0-9a-f]{24}\.pdf$/);
 		expect(await attachment('71', true)).toMatchObject({
 			attachment: { file_name: 'Q3 報告.pdf' },
 			path: saved.path,

@@ -36,7 +36,7 @@ function checkout(from: string): { dir: string; texts: Map<string, string> } {
 }
 
 const bump = (dir: string, target: string) =>
-	promisify(execFile)('node', [join(dir, 'scripts', 'bump.ts'), target]);
+	promisify(execFile)(process.execPath, [join(dir, 'scripts', 'bump.ts'), target]);
 
 describe('bump.ts', () => {
 	it.each([

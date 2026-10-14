@@ -34,7 +34,7 @@ function runCli(title: string | undefined, prJson?: string) {
 	if (title === undefined) delete env.PR_TITLE;
 	else env.PR_TITLE = title;
 	const args = prJson === undefined ? [script] : [script, '--pr-json', prJson];
-	const result = spawnSync('node', args, { env, encoding: 'utf-8' });
+	const result = spawnSync(process.execPath, args, { env, encoding: 'utf-8' });
 	return { ...result, output: result.stdout + result.stderr };
 }
 
