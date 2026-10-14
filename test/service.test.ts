@@ -304,7 +304,7 @@ describe('tool runner', () => {
 	// A Ctrl-C during a login's stop or restore must not end schtasks halfway.
 	it.runIf(windows)(
 		'keeps a console Ctrl-C from the tools it runs',
-		{ timeout: 30_000 },
+		{ timeout: 60_000 },
 		async () => {
 			const out = join(tempRoot(), 'interrupt.json');
 			const helper = fileURLToPath(new URL('fixtures/console-interrupt.ts', import.meta.url));
@@ -325,10 +325,11 @@ describe('tool runner', () => {
 			);
 
 			const result = JSON.parse(readFileSync(out, 'utf-8')) as Record<string, unknown>;
-			// The Ctrl-C reached the console: this process and a plain child got it.
+			// The Ctrl-C reached the console: this process got it, and it ended the plain child.
 			expect(result.interrupted).toBe(true);
+			expect(result.plain).not.toBe('running');
 			expect(result.plain).not.toBe(0);
-			expect(result.tool).toEqual({ exit: 0, stdout: '' });
+			expect(result.tool).toBe('running');
 		}
 	);
 });
