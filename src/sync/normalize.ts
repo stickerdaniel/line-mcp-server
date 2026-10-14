@@ -481,7 +481,7 @@ export function applyChanges(
 		} else if (change.kind === 'unsend') {
 			result.changed += applyUnsend(db, change.service, change.chatId, change.messageId);
 		} else if (change.kind === 'read') {
-			advanceMarker(db, change.service, change.chatId, change.marker, now);
+			advanceMarker(db, change.service, change.chatId, change.marker);
 		} else {
 			const { row } = change;
 			upsertChat(

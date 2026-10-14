@@ -54,23 +54,29 @@ function parseCount(value: unknown): number | null {
 	return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-/** SQL: canonical decimal `a` is numerically above canonical decimal `b`, by length, then text. */
-export const above = (a: string, b: string) =>
-	`(length(${a}) > length(${b}) OR (length(${a}) = length(${b}) AND ${a} > ${b}))`;
+/**
+ * SQL: a text key that orders canonical decimal IDs numerically, the length
+ * zero-padded to 10 digits (enough for any SQLite string), then the ID. Over
+ * `message_id` it is the key of the `message_numeric_order` index, which a
+ * comparison or ORDER BY uses only while this text matches the index exactly.
+ */
+export const idOrder = (id: string) => `(printf('%010d', length(${id})) || ${id})`;
+
+/** SQL: canonical decimal `a` is numerically above canonical decimal `b`. */
+export const above = (a: string, b: string) => `${idOrder(a)} > ${idOrder(b)}`;
 
 /** Stores `marker` as the chat's read position when it is above the stored one. */
 export function advanceMarker(
 	db: DatabaseSync,
 	service: Service,
 	chatId: string,
-	marker: string,
-	at: number
+	marker: string
 ): void {
 	db.prepare(
-		`INSERT INTO read_state (service, chat_id, marker, marker_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT (service, chat_id) DO UPDATE SET marker = excluded.marker, marker_at = excluded.marker_at
+		`INSERT INTO read_state (service, chat_id, marker) VALUES (?, ?, ?)
+		ON CONFLICT (service, chat_id) DO UPDATE SET marker = excluded.marker
 		WHERE read_state.marker IS NULL OR ${above('excluded.marker', 'read_state.marker')}`
-	).run(service, chatId, marker, at);
+	).run(service, chatId, marker);
 }
 
 /**
@@ -89,11 +95,11 @@ export function observeSnapshot(
 ): void {
 	if (marker === null) {
 		db.prepare(
-			`INSERT INTO read_state (service, chat_id, marker, marker_at) VALUES (?, ?, NULL, ?)
+			`INSERT INTO read_state (service, chat_id) VALUES (?, ?)
 			ON CONFLICT (service, chat_id) DO NOTHING`
-		).run(service, chatId, at);
+		).run(service, chatId);
 	} else {
-		advanceMarker(db, service, chatId, marker, at);
+		advanceMarker(db, service, chatId, marker);
 	}
 	db.prepare(
 		`UPDATE read_state SET line_count = ?, count_marker = ?, count_at = ?

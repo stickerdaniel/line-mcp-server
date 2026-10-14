@@ -206,9 +206,9 @@ describe('own OpenChat messages', () => {
 		upsertChat(db, { service: 'square', chatId: message.chatId, type: 'square', name: 'Kept' });
 		transaction(db, () => applyChanges(db, [{ kind: 'message', row: message }]));
 		// Schema 6 adds only the own member table, schema 7 only an index and
-		// schema 8 only the read state table; without them this is schema 5.
+		// schema 8 only the read state table and an index; without them this is schema 5.
 		db.exec(
-			'DROP TABLE square_self_member; DROP INDEX message_thread_order; DROP TABLE read_state; PRAGMA user_version = 5'
+			'DROP TABLE square_self_member; DROP INDEX message_thread_order; DROP TABLE read_state; DROP INDEX message_numeric_order; PRAGMA user_version = 5'
 		);
 		db.close();
 

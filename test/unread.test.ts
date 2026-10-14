@@ -313,6 +313,10 @@ describe('list_unread size cap', () => {
 			const continued = page.chats[0]!.chat_id === all[0]!.chats.at(-1)!.chat_id;
 			expect(page.chats[0]!.continued).toBe(continued || undefined);
 		}
+		// A continued header still counts every unread message of its chat.
+		for (const item of all.flatMap((page) => page.chats)) {
+			expect(item.unread_count).toBe(chats.find((chat) => chat.id === item.chat_id)!.messages);
+		}
 	});
 
 	it('pages chats with unknown read positions', async () => {
@@ -389,7 +393,7 @@ describe('list_unread across pages', () => {
 		{ name: 'nothing', change: () => {}, expected: all },
 		{
 			name: 'a read of the next message',
-			change: (served: Served) => advanceMarker(served.session.db, 'talk', b, '2004', clock),
+			change: (served: Served) => advanceMarker(served.session.db, 'talk', b, '2004'),
 			expected: all.filter((entry) => entry !== `${b}:2004`)
 		},
 		{
@@ -708,7 +712,7 @@ describe('read state migration', () => {
 		const db = openDatabase(root);
 		const message = row('talk', otherMid, '1001');
 		transaction(db, () => applyChanges(db, [{ kind: 'message', row: message }]));
-		db.exec('DROP TABLE read_state; PRAGMA user_version = 7');
+		db.exec('DROP TABLE read_state; DROP INDEX message_numeric_order; PRAGMA user_version = 7');
 		db.close();
 
 		const served = await serve({}, undefined, { root });

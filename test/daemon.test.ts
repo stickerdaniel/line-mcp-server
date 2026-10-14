@@ -627,40 +627,75 @@ describe('daemon', () => {
 		await until(() => snapshots === 3, 'a snapshot after a reset');
 	});
 
-	it('keeps the pages a failed Talk read snapshot committed and takes it again', async () => {
+	it('keeps the pages a failed Talk read snapshot committed and retries it after a backoff', async () => {
 		const root = tempRoot();
 		seedLive(root, selfMid, { authToken: 'token' });
 		const [first, second] = [`u${'3'.repeat(32)}`, `u${'4'.repeat(32)}`];
-		const { promise: gate, resolve: open } = Promise.withResolvers<void>();
-		let secondPages = 0;
+		let clock = 1_900_000_000_000;
+		let failing = true;
+		let attempts = 0;
+		let rounds = 0;
 		const { daemon } = await start(
 			root,
 			{
 				sync: () => ({}),
-				getMessageBoxes: async (value) => {
+				getMessageBoxes: (value) => {
 					if (!field(value, 2, 5)) return { messageBoxes: [], hasNext: false };
 					if (field(value, 2, 1) !== first) {
 						return { messageBoxes: [readBox(first, 10n)], hasNext: true };
 					}
-					if (++secondPages === 1) throw talkError('ILLEGAL_ARGUMENT');
-					await gate;
+					attempts++;
+					if (failing) throw talkError('ILLEGAL_ARGUMENT');
 					return { messageBoxes: [readBox(second, 20n)], hasNext: false };
-				}
+				},
+				// Discovery runs every worker round here, so it counts the rounds.
+				getAllChatMids: () => {
+					rounds++;
+					return { memberChatMids: [] };
+				},
+				getContactsV2: () => ({ contacts: {} })
 			},
-			// The clock stands still: only a snapshot that stayed due runs again.
-			{ notify: () => {}, now: () => 1_900_000_000_000 }
+			{ notify: () => {}, now: () => clock, discoveryIntervalMs: 0 }
 		);
 		const known = async () =>
 			((await callTool(daemon.mcp!.port, 'list_unread')).data.chats as { chat_id: string }[]).map(
 				(chat) => chat.chat_id
 			);
+		// Waits until the worker finished the round it was in and ran two more.
+		const idle = async () => {
+			const from = rounds;
+			await until(() => rounds >= from + 3, 'worker rounds');
+		};
 
-		await until(() => secondPages === 2, 'the second page asked again');
+		await until(() => attempts === 1, 'the first snapshot');
+		await idle();
+		expect(attempts).toBe(1);
 		expect(await known()).toEqual([first]);
-		open();
+
+		clock += 60_000 - 1;
+		await idle();
+		expect(attempts).toBe(1);
+		clock += 1;
+		await until(() => attempts === 2, 'a retry after 1 minute');
+		await idle();
+
+		clock += 120_000 - 1;
+		await idle();
+		expect(attempts).toBe(2);
+		failing = false;
+		clock += 1;
+		await until(() => attempts === 3, 'a retry after 2 more minutes');
 		await vi.waitFor(async () => expect(await known()).toEqual([first, second]), {
 			timeout: 3000
 		});
+
+		// A success resets the backoff to 1 minute.
+		failing = true;
+		clock += 10 * 60 * 1000;
+		await until(() => attempts === 4, 'the next snapshot 10 minutes later');
+		await idle();
+		clock += 60_000;
+		await until(() => attempts === 5, 'a retry 1 minute after it failed');
 	});
 
 	it('sweeps OpenChat once at start despite a recent sweep, and again after a stall', async () => {

@@ -210,16 +210,18 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
 	let discoveredAt = Number.NEGATIVE_INFINITY;
 	let keysRetriedAt = Number.NEGATIVE_INFINITY;
-	let readSnapshotAt = Number.NEGATIVE_INFINITY;
 	let discoveryDue = false;
 	let keysDue = true;
-	let readSnapshotDue = false;
 	/** A chat change seen in Talk triggers discovery at most this often. */
 	const rediscoveryMs = 10 * 60 * 1000;
 	const discoveryIntervalMs = options.discoveryIntervalMs ?? 6 * 60 * 60 * 1000;
 	const keyRetryIntervalMs = options.keyRetryIntervalMs ?? 15 * 60 * 1000;
 	/** How often the Talk read state snapshot becomes due. */
 	const readSnapshotIntervalMs = 10 * 60 * 1000;
+	/** The first retry delay after a failed snapshot; it doubles up to the interval. */
+	const readSnapshotRetryMs = 60 * 1000;
+	let readSnapshotDueAt = Number.NEGATIVE_INFINITY;
+	let readSnapshotBackoffMs = readSnapshotRetryMs;
 	// A phase LINE refuses for good is logged and retried on its own schedule;
 	// it must not keep the other phases, and backfill, from running. Resolves
 	// to whether the phase succeeded.
@@ -243,12 +245,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 			await phase('square_names', () => nameSquareSenders(context, pool));
 		}
 		// Due at start, every 10 minutes and after a Talk reset; a failed
-		// snapshot stays due for the next round.
-		if (readSnapshotDue || now() - readSnapshotAt >= readSnapshotIntervalMs) {
+		// snapshot is due again after a backoff that a success resets.
+		if (now() >= readSnapshotDueAt) {
 			const started = now();
 			if (await phase('read_state', () => snapshotTalkReadState(context, pool))) {
-				readSnapshotAt = started;
-				readSnapshotDue = false;
+				readSnapshotDueAt = started + readSnapshotIntervalMs;
+				readSnapshotBackoffMs = readSnapshotRetryMs;
+			} else {
+				readSnapshotDueAt = now() + readSnapshotBackoffMs;
+				readSnapshotBackoffMs = Math.min(readSnapshotBackoffMs * 2, readSnapshotIntervalMs);
 			}
 		}
 		if (listGaps(db, { service: 'talk', status: 'open' }).length > 0) {
@@ -275,7 +280,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 					if (step.keysChanged) keysDue = true;
 					if (step.chats.length > 0) discoveryDue = true;
 					// A reset can skip read operations along with the rest.
-					if (step.reset) readSnapshotDue = true;
+					if (step.reset) readSnapshotDueAt = Number.NEGATIVE_INFINITY;
 				},
 				// An idle long poll answers only after about 110 s; being held already
 				// shows there is no backlog.
