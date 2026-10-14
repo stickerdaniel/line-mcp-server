@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import { DatabaseSync } from 'node:sqlite';
 import type { Message } from '@evex/linejs-types';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { readAccount } from '../src/db.ts';
+import { openDatabase, readAccount } from '../src/db.ts';
 import { mapError } from '../src/errors.ts';
 import { decryptMessage } from '../src/keys.ts';
 import { databasePath } from '../src/paths.ts';
@@ -186,6 +186,36 @@ describe('session guards', () => {
 		await expect(session.base.talk.getProfile()).rejects.toMatchObject({ code: 'needs_login' });
 		expect(upstream.calls).toHaveLength(sent);
 		expect(readAccount(session.db)?.authState).toBe('needs_login');
+	});
+
+	it('leaves a stopped startup closed when LINE ends the session late', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const answer = Promise.withResolvers<unknown>();
+		const upstream = fakeUpstream({ getProfile: () => answer.promise });
+		const logs: LogEntry[] = [];
+		const stop = new AbortController();
+		const opening = openSession({
+			root,
+			lockPort: await freePort(),
+			createClient: upstream.createClient,
+			log: (entry) => logs.push(entry),
+			signal: stop.signal
+		});
+		const failed = expect(opening).rejects.toMatchObject({ code: 'shutting_down' });
+		while (!upstream.calls.includes('getProfile')) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+
+		stop.abort();
+		await failed;
+		answer.reject(talkError('NOT_AUTHORIZED_DEVICE'));
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		expect(logs.filter((entry) => entry.event === 'session_state')).toEqual([]);
+		const db = openDatabase(root);
+		expect(readAccount(db)?.authState).not.toBe('needs_login');
+		db.close();
 	});
 
 	it('refuses every upstream call and media request once closed', async () => {

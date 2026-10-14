@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openGap, readMessages, searchMessages, upsertChat, writeState } from '../src/archive.ts';
 import { type Daemon, type DaemonOptions, startDaemon } from '../src/daemon.ts';
 import { openDatabase, readAccount, transaction } from '../src/db.ts';
+import { acquireLock, requestStop } from '../src/lock.ts';
 import { applyChanges } from '../src/sync/normalize.ts';
 import { historyStepMs, type Sleep } from '../src/sync/loop.ts';
 import {
@@ -513,6 +514,41 @@ describe('daemon', () => {
 		await expect(post(port, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).rejects.toThrow(
 			/ECONNREFUSED/
 		);
+	});
+
+	it('stops on a request during startup without waiting for LINE to answer', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const profile = Promise.withResolvers<unknown>();
+		const upstream = fakeUpstream({ ...quiet, getProfile: () => profile.promise });
+		const lockPort = await freePort();
+		const stop = new AbortController();
+		const starting = startDaemon({
+			root,
+			lockPort,
+			createClient: upstream.createClient,
+			log: () => {},
+			notify: () => {},
+			sleep: fastSleep,
+			mcpPort: 0,
+			signal: stop.signal,
+			onStopRequest: () => stop.abort()
+		});
+		const failed = expect(starting).rejects.toMatchObject({ code: 'shutting_down' });
+		await until(() => upstream.calls.includes('getProfile'), 'the profile request');
+
+		// Startup ends promptly; confirming the free port can take longer on
+		// Windows, where a refused connection takes about 2 s.
+		const stopping = requestStop(lockPort, { deadlineMs: 10_000 });
+		await within(2000, failed, 'stop');
+		await expect(stopping).resolves.toBe('stopped');
+
+		// LINE answers after all; nothing goes on from there.
+		profile.resolve({ mid: selfMid });
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(upstream.calls).toEqual(['getProfile']);
+		const next = await acquireLock(lockPort);
+		await next.release();
 	});
 
 	it('fails startup and releases the lock when the MCP port is taken', async () => {

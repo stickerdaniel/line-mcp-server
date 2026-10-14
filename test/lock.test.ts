@@ -1,10 +1,10 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { connect, createServer } from 'node:net';
+import { connect, createServer, Socket } from 'node:net';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { acquireLock } from '../src/lock.ts';
+import { acquireLock, lockInUse, requestStop } from '../src/lock.ts';
 import { databasePath } from '../src/paths.ts';
 import { login, openSession } from '../src/session.ts';
 import {
@@ -19,6 +19,19 @@ import {
 	tempRoot,
 	within
 } from './fake-line.ts';
+
+// Pass-through, so a test can make one connection attempt fail like the OS would.
+vi.mock('node:net', async (importOriginal) => {
+	const net = await importOriginal<typeof import('node:net')>();
+	return { ...net, connect: vi.fn(net.connect) };
+});
+
+/** A connection attempt that fails with `code` instead of connecting or being refused. */
+function failingConnect(code: string): Socket {
+	const socket = new Socket();
+	process.nextTick(() => socket.destroy(Object.assign(new Error(code), { code })));
+	return socket;
+}
 
 const children: ChildProcess[] = [];
 afterEach(() => {
@@ -56,6 +69,22 @@ async function strayConnection(port: number): Promise<void> {
 	const socket = connect({ host: '127.0.0.1', port });
 	socket.on('error', () => {});
 	await within(1000, once(socket, 'close'), 'closing a stray connection');
+}
+
+/**
+ * Writes each chunk on one connection, apart, and keeps it open; resolves once
+ * the lock owner closed it, which must happen within its 1 s request deadline.
+ */
+async function sendToLock(port: number, ...chunks: string[]): Promise<void> {
+	const socket = connect({ host: '127.0.0.1', port });
+	socket.on('error', () => {});
+	const closed = once(socket, 'close');
+	await once(socket, 'connect');
+	for (const chunk of chunks) {
+		socket.write(chunk);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+	await within(1500, closed, 'the lock owner to close the connection');
 }
 
 describe('ownership lock', () => {
@@ -141,4 +170,106 @@ describe('ownership lock', () => {
 		const lock = await acquireLock(port);
 		await lock.release();
 	});
+
+	it('frees the port right away when released while a client stays connected', async () => {
+		const port = await freePort();
+		const lock = await acquireLock(port, () => {});
+		const idle = connect({ host: '127.0.0.1', port });
+		idle.on('error', () => {});
+		await once(idle, 'connect');
+		// The owner accepts in a later turn; until then the connection is only queued.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+
+		await within(500, lock.release(), 'release');
+
+		const next = await acquireLock(port);
+		await next.release();
+		idle.destroy();
+	});
+});
+
+describe('stop request', () => {
+	it('calls the stop handler once, also for a line sent in pieces', async () => {
+		const port = await freePort();
+		const onStop = vi.fn();
+		const lock = await acquireLock(port, onStop);
+
+		await sendToLock(port, 'line-mcp ', 'stop\n');
+		await sendToLock(port, 'line-mcp stop\n');
+
+		expect(onStop).toHaveBeenCalledTimes(1);
+		await lock.release();
+	});
+
+	// Budgets leave room for Windows, which takes about 2 s to refuse a connection.
+	it('resolves stopped once the owner has let go of the port', async () => {
+		const port = await freePort();
+		const lock = await acquireLock(port, () => setTimeout(() => void lock.release(), 200));
+
+		await expect(requestStop(port, { deadlineMs: 5000 })).resolves.toBe('stopped');
+		expect(await lockInUse(port)).toBe(false);
+	}, 15_000);
+
+	it.each([
+		['another first line', ['GET / HTTP/1.1\r\n\r\n']],
+		['the line with a suffix', ['line-mcp stopping\n']],
+		['the line with a CR', ['line-mcp stop\r\n']],
+		['the line twice', ['line-mcp stop\nline-mcp stop\n']],
+		['the line not from byte zero', [' line-mcp stop\n']],
+		['the line without its newline', ['line-mcp stop']],
+		['64 bytes without a newline', ['line-mcp stop'.repeat(5)]],
+		['a silent connection', []]
+	])('ignores %s and closes it', async (_kind, chunks) => {
+		const port = await freePort();
+		const onStop = vi.fn();
+		const lock = await acquireLock(port, onStop);
+
+		await sendToLock(port, ...chunks);
+		expect(await lockInUse(port)).toBe(true);
+
+		expect(onStop).not.toHaveBeenCalled();
+		await lock.release();
+	});
+
+	it.each([
+		['a process that only holds the lock', 'hold-lock.ts', 'locked'],
+		['a login', 'stalled-login.ts', 'stalled']
+	])('is ignored by %s, and the stopper gives up', async (_kind, fixture, line) => {
+		const port = await freePort();
+		const args = fixture === 'hold-lock.ts' ? [String(port)] : [tempRoot(), String(port)];
+		await startChild(fixture, args, line);
+
+		const started = Date.now();
+		await expect(requestStop(port, { deadlineMs: 500 })).rejects.toMatchObject({
+			code: 'stop_timeout'
+		});
+		expect(Date.now() - started).toBeLessThan(1500);
+		expect(await lockInUse(port)).toBe(true);
+	});
+
+	it.each([
+		['sending the request fails', 1, () => failingConnect('EMFILE'), 'lock_failed'],
+		['confirming the stop fails', 2, () => failingConnect('EMFILE'), 'lock_failed'],
+		['confirming the stop never answers', 2, () => new Socket(), 'stop_timeout']
+	])('does not guess when %s', async (_step, failAt, attempt, code) => {
+		const port = await freePort();
+		const lock = await acquireLock(port, () => {});
+		const real = vi.mocked(connect).getMockImplementation()!;
+		let attempts = 0;
+		vi.mocked(connect).mockImplementation(((...args: Parameters<typeof connect>) =>
+			++attempts === failAt ? attempt() : real(...args)) as typeof connect);
+		try {
+			const started = Date.now();
+			await expect(requestStop(port, { deadlineMs: 500 })).rejects.toMatchObject({ code });
+			expect(Date.now() - started).toBeLessThan(1500);
+		} finally {
+			vi.mocked(connect).mockImplementation(real);
+			await lock.release();
+		}
+	});
+
+	it('reports not_running when nothing listens on the port', async () => {
+		// The deadline leaves room for Windows, which takes about 2 s to refuse.
+		await expect(requestStop(await freePort(), { deadlineMs: 5000 })).resolves.toBe('not_running');
+	}, 15_000);
 });

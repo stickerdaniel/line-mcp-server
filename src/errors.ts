@@ -29,6 +29,7 @@ export type ErrorCode =
 	| 'attachment_too_large'
 	| 'cancelled'
 	| 'shutting_down'
+	| 'stop_timeout'
 	| 'idempotency_conflict'
 	| 'outcome_unknown'
 	| 'unsupported_action'
