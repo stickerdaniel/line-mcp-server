@@ -170,18 +170,23 @@ async function runProbe(args: string[]): Promise<number> {
 }
 
 /**
- * Runs until SIGTERM (launchd bootout), SIGINT or a stop request over the lock
- * port (`requestStop`); the lock listener keeps the process alive. Each of
- * them also cancels a startup still in progress.
+ * Runs until SIGTERM (launchd bootout), SIGINT or, when the Windows scheduled
+ * task started it, a stop request over the lock port (`requestStop`); the lock
+ * listener keeps the process alive. Each of them also cancels a startup still
+ * in progress.
  */
 async function runDaemon(): Promise<number> {
 	const stop = new AbortController();
 	const abort = () => stop.abort();
 	process.once('SIGTERM', abort);
 	process.once('SIGINT', abort);
+	// Only a daemon that the Windows scheduled task started accepts a stop
+	// request (its launcher sets LINE_MCP_SERVICE=task), so stopping the service
+	// never ends a daemon the user runs by hand.
+	const onStopRequest = process.env.LINE_MCP_SERVICE === 'task' ? abort : undefined;
 	let daemon: Daemon;
 	try {
-		daemon = await startDaemon({ signal: stop.signal, onStopRequest: abort });
+		daemon = await startDaemon({ signal: stop.signal, onStopRequest });
 	} catch (error) {
 		if (!(error instanceof LineMcpError && error.code === 'shutting_down')) throw error;
 		stderrLog({ event: 'daemon_stopped' });

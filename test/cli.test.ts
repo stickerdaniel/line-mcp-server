@@ -379,46 +379,64 @@ describe('commands', { timeout: 15_000 }, () => {
 		expect(await within(5000, exited, 'the daemon to exit')).toBe(0);
 	}, 20_000);
 
-	// No signal reaches a daemon run as a Windows scheduled task; this request does.
-	it('stops on a stop request over the lock port and frees it', async () => {
-		const home = tempRoot();
-		const state = join(home, 'state');
-		cacheOnly(state);
-		const lockPort = await freePort();
-		const daemon = spawn(process.execPath, [cliEntry, 'daemon'], {
-			env: {
+	// No signal reaches a daemon run as a Windows scheduled task; this request
+	// does. A daemon the user runs by hand ignores it.
+	it.each([
+		['started by the scheduled task, stops', 'task'],
+		['run by hand, ignores it', undefined]
+	])(
+		'on a stop request over the lock port, a daemon %s',
+		async (_kind, service) => {
+			const home = tempRoot();
+			const state = join(home, 'state');
+			cacheOnly(state);
+			const lockPort = await freePort();
+			const env: NodeJS.ProcessEnv = {
 				...process.env,
 				HOME: home,
 				LINE_MCP_HOME: state,
 				LINE_MCP_LOCK_PORT: String(lockPort),
 				LINE_MCP_PORT: String(await freePort())
-			},
-			stdio: ['ignore', 'ignore', 'pipe']
-		});
-		let stderr = '';
-		daemon.stderr.setEncoding('utf-8').on('data', (chunk: string) => (stderr += chunk));
-		const exited = new Promise<number | null>((resolve) => daemon.once('exit', resolve));
-		try {
-			await within(
-				10_000,
-				(async () => {
-					while (!stderr.includes('"daemon_started"')) {
-						await new Promise((resolve) => setTimeout(resolve, 50));
-					}
-				})(),
-				'the daemon to start'
-			);
+			};
+			delete env.LINE_MCP_SERVICE;
+			if (service) env.LINE_MCP_SERVICE = service;
+			const daemon = spawn(process.execPath, [cliEntry, 'daemon'], {
+				env,
+				stdio: ['ignore', 'ignore', 'pipe']
+			});
+			let stderr = '';
+			daemon.stderr.setEncoding('utf-8').on('data', (chunk: string) => (stderr += chunk));
+			const exited = new Promise<number | null>((resolve) => daemon.once('exit', resolve));
+			try {
+				await within(
+					10_000,
+					(async () => {
+						while (!stderr.includes('"daemon_started"')) {
+							await new Promise((resolve) => setTimeout(resolve, 50));
+						}
+					})(),
+					'the daemon to start'
+				);
 
-			await expect(requestStop(lockPort, { deadlineMs: 5000 })).resolves.toBe('stopped');
-		} catch (error) {
-			daemon.kill('SIGKILL');
-			throw error;
-		}
+				const stopping = requestStop(lockPort, { deadlineMs: 5000 });
+				if (!service) {
+					await expect(stopping).rejects.toMatchObject({ code: 'stop_timeout' });
+					expect(await lockInUse(lockPort)).toBe(true);
+					daemon.kill('SIGKILL');
+					return;
+				}
+				await expect(stopping).resolves.toBe('stopped');
+			} catch (error) {
+				daemon.kill('SIGKILL');
+				throw error;
+			}
 
-		expect(await within(5000, exited, 'the daemon to exit')).toBe(0);
-		expect(stderr).toContain('"event":"daemon_stopped"');
-		expect(await lockInUse(lockPort)).toBe(false);
-	}, 20_000);
+			expect(await within(5000, exited, 'the daemon to exit')).toBe(0);
+			expect(stderr).toContain('"event":"daemon_stopped"');
+			expect(await lockInUse(lockPort)).toBe(false);
+		},
+		20_000
+	);
 });
 
 /**
