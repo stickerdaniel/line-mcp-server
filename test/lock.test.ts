@@ -201,13 +201,14 @@ describe('stop request', () => {
 		await lock.release();
 	});
 
+	// Budgets leave room for Windows, which takes about 2 s to refuse a connection.
 	it('resolves stopped once the owner has let go of the port', async () => {
 		const port = await freePort();
 		const lock = await acquireLock(port, () => setTimeout(() => void lock.release(), 200));
 
-		await expect(requestStop(port, { deadlineMs: 2000 })).resolves.toBe('stopped');
+		await expect(requestStop(port, { deadlineMs: 5000 })).resolves.toBe('stopped');
 		expect(await lockInUse(port)).toBe(false);
-	});
+	}, 15_000);
 
 	it.each([
 		['another first line', ['GET / HTTP/1.1\r\n\r\n']],
@@ -270,5 +271,5 @@ describe('stop request', () => {
 	it('reports not_running when nothing listens on the port', async () => {
 		// The deadline leaves room for Windows, which takes about 2 s to refuse.
 		await expect(requestStop(await freePort(), { deadlineMs: 5000 })).resolves.toBe('not_running');
-	});
+	}, 15_000);
 });
