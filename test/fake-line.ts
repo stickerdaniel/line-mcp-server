@@ -2,7 +2,7 @@
 // client gets a fetch that throws, and RPCs are answered by local handlers.
 import { Buffer } from 'node:buffer';
 import { createCipheriv } from 'node:crypto';
-import { mkdtempSync } from 'node:fs';
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, symlinkSync } from 'node:fs';
 import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -218,6 +218,26 @@ export function qrLoginHandlers(options: QrLoginOptions): Record<string, Handler
 
 export function tempRoot(): string {
 	return mkdtempSync(join(tmpdir(), 'line-mcp-test-'));
+}
+
+/**
+ * The running Node at `<dir>/node`: a symlink, or on Windows `node.exe` as a
+ * hard link (a copy across volumes), since a symlink there needs a privilege.
+ */
+export function nodeAt(dir: string): string {
+	mkdirSync(dir, { recursive: true });
+	if (process.platform !== 'win32') {
+		const path = join(dir, 'node');
+		symlinkSync(process.execPath, path);
+		return path;
+	}
+	const path = join(dir, 'node.exe');
+	try {
+		linkSync(process.execPath, path);
+	} catch {
+		copyFileSync(process.execPath, path);
+	}
+	return path;
 }
 
 export async function freePort(): Promise<number> {

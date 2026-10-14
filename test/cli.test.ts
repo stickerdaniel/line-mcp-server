@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:net';
 import { userInfo } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { healthKey, writeState } from '../src/archive.ts';
@@ -19,7 +19,7 @@ import { openDatabase, setAuthState } from '../src/db.ts';
 import { lockInUse, requestStop } from '../src/lock.ts';
 import { selectNode } from '../src/service/node.ts';
 import { databasePath } from '../src/paths.ts';
-import { freePort, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
+import { freePort, nodeAt, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
 import { callTool, cliEntry, type ToolCall } from './mcp-client.ts';
 
 /** The real path of the CLI under test, which `install` writes into the LaunchAgent. */
@@ -36,17 +36,12 @@ function npxCopy(): string {
 	for (const part of [relative(pkg, dirname(cli)), 'service', 'package.json']) {
 		cpSync(join(pkg, part), join(copy, part), { recursive: true });
 	}
-	symlinkSync(join(pkg, 'node_modules'), join(copy, 'node_modules'));
+	// A junction on Windows, where a directory symlink needs a privilege; ignored elsewhere.
+	symlinkSync(join(pkg, 'node_modules'), join(copy, 'node_modules'), 'junction');
 	return join(copy, relative(pkg, cli));
 }
 
-/** A link to the running Node at `<dir>/node`, standing in for a Homebrew layout. */
-function nodeAt(dir: string): string {
-	mkdirSync(dir, { recursive: true });
-	const path = join(dir, 'node');
-	symlinkSync(process.execPath, path);
-	return path;
-}
+const windows = process.platform === 'win32';
 
 interface Run {
 	code: number;
@@ -56,8 +51,18 @@ interface Run {
 
 const serviceRunner = fileURLToPath(new URL('fixtures/service-runner.ts', import.meta.url));
 
+interface RunOptions {
+	home?: string;
+	env?: NodeJS.ProcessEnv;
+	/** Exit codes of the fake launchctl by subcommand. */
+	exits?: Record<string, number>;
+	/** The CLI entry to run; the CLI under test by default. */
+	script?: string;
+	cwd?: string;
+}
+
 /**
- * Runs the CLI with a temporary HOME and state root. Every launchctl call goes
+ * Runs the CLI with a temporary home and state root. Every launchctl call goes
  * to the service runner fixture, which only records it, so the test proves dry
  * runs execute nothing. It exits 0, except with the code `exits` names for a
  * subcommand; `print` defaults to 113, launchctl's answer for a service that
@@ -65,10 +70,7 @@ const serviceRunner = fileURLToPath(new URL('fixtures/service-runner.ts', import
  */
 async function runCli(
 	args: string[],
-	home = tempRoot(),
-	env: NodeJS.ProcessEnv = {},
-	exits: Record<string, number> = {},
-	script = cliEntry
+	{ home = tempRoot(), env = {}, exits = {}, script = cliEntry, cwd }: RunOptions = {}
 ) {
 	const state = join(home, 'state');
 	const calls = join(home, 'service-calls');
@@ -81,9 +83,12 @@ async function runCli(
 			process.execPath,
 			[script, ...args],
 			{
+				cwd,
 				env: {
 					...process.env,
+					// os.homedir() reads USERPROFILE on Windows.
 					HOME: home,
+					USERPROFILE: home,
 					LINE_MCP_HOME: state,
 					LINE_MCP_LOCK_PORT: String(lockPort),
 					LINE_MCP_SERVICE_RUNNER: serviceRunner,
@@ -107,8 +112,9 @@ async function runCli(
 
 const domain = `gui/${userInfo().uid}`;
 const agent = `${domain}/io.github.stickerdaniel.line-mcp`;
+// The launchd backend joins its paths with `/` on every OS.
 const plistIn = (home: string) =>
-	join(home, 'Library', 'LaunchAgents', 'io.github.stickerdaniel.line-mcp.plist');
+	posix.join(home, 'Library', 'LaunchAgents', 'io.github.stickerdaniel.line-mcp.plist');
 
 /** `uninstall` over an installed plist, with launchctl's `bootout` exiting `bootout`. */
 async function uninstall(bootout: number) {
@@ -116,14 +122,14 @@ async function uninstall(bootout: number) {
 	const plist = plistIn(home);
 	mkdirSync(dirname(plist), { recursive: true });
 	writeFileSync(plist, '');
-	const result = await runCli(['uninstall'], home, {}, { bootout });
+	const result = await runCli(['uninstall'], { home, exits: { bootout } });
 	return { ...result, plistKept: existsSync(plist) };
 }
 
 // Each CLI run is a cold Node start that loads the whole server; under load it can pass 5 s.
 describe('install and uninstall', { timeout: 15_000 }, () => {
 	it('prints the LaunchAgent and launchctl commands on a dry run and changes nothing', async () => {
-		const result = await runCli(['install', '--dry-run'], tempRoot(), { LINE_MCP_PORT: '47900' });
+		const result = await runCli(['install', '--dry-run'], { env: { LINE_MCP_PORT: '47900' } });
 
 		expect(result.code).toBe(0);
 		// Not even a read-only launchctl call, let alone bootout or bootstrap.
@@ -140,7 +146,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 			'<key>Umask</key>\n\t<integer>63</integer>',
 			`<key>LINE_MCP_HOME</key>\n\t\t<string>${result.state}</string>`,
 			'<key>LINE_MCP_PORT</key>\n\t\t<string>47900</string>',
-			join(result.home, 'Library', 'Logs', 'line-mcp', 'daemon.log')
+			posix.join(result.home, 'Library', 'Logs', 'line-mcp', 'daemon.log')
 		]) {
 			expect(plist).toContain(setting);
 		}
@@ -154,25 +160,30 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		);
 	});
 
-	it('installs the real CLI file when started through a global bin symlink', async () => {
-		const bin = join(tempRoot(), 'bin', 'line-mcp');
-		mkdirSync(dirname(bin));
-		symlinkSync(cliEntry, bin);
+	// npm installs global bins on Windows as .cmd shims, and a symlink there needs a privilege.
+	it.skipIf(windows)(
+		'installs the real CLI file when started through a global bin symlink',
+		async () => {
+			const bin = join(tempRoot(), 'bin', 'line-mcp');
+			mkdirSync(dirname(bin));
+			symlinkSync(cliEntry, bin);
 
-		const result = await runCli(['install'], tempRoot(), {}, {}, bin);
+			const result = await runCli(['install'], { script: bin });
 
-		expect(result.code).toBe(0);
-		expect(readFileSync(plistIn(result.home), 'utf-8')).toContain(
-			`<string>${cli}</string>\n\t\t<string>daemon</string>`
-		);
-		expect(result.calls.filter(([, command]) => command !== 'print')).toEqual([
-			['launchctl', 'bootout', agent],
-			['launchctl', 'bootstrap', domain, plistIn(result.home)]
-		]);
-	});
+			expect(result.code).toBe(0);
+			expect(readFileSync(plistIn(result.home), 'utf-8')).toContain(
+				`<string>${cli}</string>\n\t\t<string>daemon</string>`
+			);
+			expect(result.calls.filter(([, command]) => command !== 'print')).toEqual([
+				['launchctl', 'bootout', agent],
+				['launchctl', 'bootstrap', domain, plistIn(result.home)]
+			]);
+		}
+	);
 
-	it('refuses to install from the npx cache, which npm may delete', async () => {
-		const install = await runCli(['install'], tempRoot(), {}, {}, npxCopy());
+	// The npx guard matches `/` separators; Windows paths get it with the Windows backend.
+	it.skipIf(windows)('refuses to install from the npx cache, which npm may delete', async () => {
+		const install = await runCli(['install'], { script: npxCopy() });
 
 		expect(install.code).toBe(1);
 		expect(install.stderr).toContain('npm i -g line-mcp-server');
@@ -180,16 +191,20 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(readdirSync(install.home)).toEqual([]);
 	});
 
-	it('still shows the LaunchAgent on a dry run from the npx cache, with the same advice', async () => {
-		const copy = npxCopy();
+	// As above: the npx guard matches `/` separators only.
+	it.skipIf(windows)(
+		'still shows the LaunchAgent on a dry run from the npx cache, with the same advice',
+		async () => {
+			const copy = npxCopy();
 
-		const dryRun = await runCli(['install', '--dry-run'], tempRoot(), {}, {}, copy);
+			const dryRun = await runCli(['install', '--dry-run'], { script: copy });
 
-		expect(dryRun.code).toBe(0);
-		expect(dryRun.stderr).toContain('npm i -g line-mcp-server');
-		expect(dryRun.stdout).toContain(`<string>${realpathSync(copy)}</string>`);
-		expect(dryRun.launched).toBe(false);
-	});
+			expect(dryRun.code).toBe(0);
+			expect(dryRun.stderr).toContain('npm i -g line-mcp-server');
+			expect(dryRun.stdout).toContain(`<string>${realpathSync(copy)}</string>`);
+			expect(dryRun.launched).toBe(false);
+		}
+	);
 
 	// One CLI process per case: two in one test can outlast the default timeout on a loaded machine.
 	it.each(['--node', 'LINE_MCP_NODE'])(
@@ -200,7 +215,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 			const result =
 				source === '--node'
 					? await runCli(['install', '--dry-run', '--node', node])
-					: await runCli(['install', '--dry-run'], tempRoot(), { LINE_MCP_NODE: node });
+					: await runCli(['install', '--dry-run'], { env: { LINE_MCP_NODE: node } });
 
 			expect(result.code).toBe(0);
 			expect(result.stdout).toContain(
@@ -210,18 +225,26 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 	);
 
 	it.each([
-		// A working Node, but relative: launchd would resolve it against another directory.
-		['relative', () => relative(process.cwd(), nodeAt(join(tempRoot(), 'bin')))],
+		// A working Node from the CLI's directory, but relative: launchd would
+		// resolve it against another directory.
+		[
+			'relative',
+			() => {
+				const cwd = tempRoot();
+				return { cwd, node: relative(cwd, nodeAt(join(cwd, 'bin'))) };
+			}
+		],
 		[
 			'not executable',
 			() => {
-				const path = join(tempRoot(), 'node');
-				writeFileSync(path, '');
-				return path;
+				const node = join(tempRoot(), 'node');
+				writeFileSync(node, '');
+				return { node, cwd: process.cwd() };
 			}
 		]
 	])('refuses a Node override that is %s', async (_kind, override) => {
-		const result = await runCli(['install', '--dry-run', '--node', override()]);
+		const { node, cwd } = override();
+		const result = await runCli(['install', '--dry-run', '--node', node], { cwd });
 
 		expect(result.code).toBe(1);
 		expect(result.stderr).toContain('invalid_node');
@@ -229,16 +252,20 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(result.launched).toBe(false);
 	});
 
-	it('uses the Homebrew opt link for a Node running from a versioned Cellar path', () => {
-		const prefix = tempRoot();
-		const cellar = nodeAt(join(prefix, 'Cellar', 'node@24', '24.18.0', 'bin'));
-		const opt = nodeAt(join(prefix, 'opt', 'node@24', 'bin'));
+	// Homebrew layouts exist only on macOS and Linux.
+	it.skipIf(windows)(
+		'uses the Homebrew opt link for a Node running from a versioned Cellar path',
+		() => {
+			const prefix = tempRoot();
+			const cellar = nodeAt(join(prefix, 'Cellar', 'node@24', '24.18.0', 'bin'));
+			const opt = nodeAt(join(prefix, 'opt', 'node@24', 'bin'));
 
-		expect(selectNode({ execPath: cellar, stable: join(prefix, 'missing') })).toEqual({
-			path: opt,
-			source: 'stable'
-		});
-	});
+			expect(selectNode({ execPath: cellar, stable: join(prefix, 'missing') })).toEqual({
+				path: opt,
+				source: 'stable'
+			});
+		}
+	);
 
 	it.each([
 		[[], 'kept the archive in'],
@@ -247,7 +274,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		const home = tempRoot();
 		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
 
-		const result = await runCli(['uninstall', '--dry-run', ...flags], home);
+		const result = await runCli(['uninstall', '--dry-run', ...flags], { home });
 
 		expect(result.code).toBe(0);
 		expect(result.stdout).toContain(`${line} ${result.state}`);
@@ -259,7 +286,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		const home = tempRoot();
 		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
 
-		const result = await runCli(['doctor'], home);
+		const result = await runCli(['doctor'], { home });
 
 		expect(result.code).toBe(1);
 		expect(result.stdout).toContain(`ok   account: ${selfMid} on ANDROIDSECONDARY, active`);
@@ -281,7 +308,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 			const home = tempRoot();
 			seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
 
-			const result = await runCli(['doctor'], home, {}, { print });
+			const result = await runCli(['doctor'], { home, exits: { print } });
 
 			expect(result.stdout).toContain(line);
 		}
@@ -306,16 +333,20 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(failed.plistKept).toBe(true);
 	});
 
-	it('warns in doctor when the selected Node is a versioned Cellar path', async () => {
-		const home = tempRoot();
-		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
-		const node = nodeAt(join(tempRoot(), 'Cellar', 'node@24', '24.18.0', 'bin'));
+	// As above: a Cellar path has `/` separators.
+	it.skipIf(windows)(
+		'warns in doctor when the selected Node is a versioned Cellar path',
+		async () => {
+			const home = tempRoot();
+			seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
+			const node = nodeAt(join(tempRoot(), 'Cellar', 'node@24', '24.18.0', 'bin'));
 
-		const result = await runCli(['doctor'], home, { LINE_MCP_NODE: node });
+			const result = await runCli(['doctor'], { home, env: { LINE_MCP_NODE: node } });
 
-		expect(result.stdout).toContain(`ok   node: ${node}`);
-		expect(result.stdout).toContain(`warn node_path: ${node} is a versioned Cellar path`);
-	});
+			expect(result.stdout).toContain(`ok   node: ${node}`);
+			expect(result.stdout).toContain(`warn node_path: ${node} is a versioned Cellar path`);
+		}
+	);
 });
 
 // One cold CLI start per test, as above.
@@ -333,7 +364,7 @@ describe('commands', { timeout: 15_000 }, () => {
 		await new Promise<void>((resolve) => holder.listen(port, '127.0.0.1', resolve));
 		let result: Awaited<ReturnType<typeof runCli>>;
 		try {
-			result = await runCli(['daemon'], tempRoot(), { LINE_MCP_LOCK_PORT: String(port) });
+			result = await runCli(['daemon'], { env: { LINE_MCP_LOCK_PORT: String(port) } });
 		} finally {
 			holder.close();
 		}
@@ -347,37 +378,35 @@ describe('commands', { timeout: 15_000 }, () => {
 	});
 
 	// The timeout covers the 10 s start deadline in serving() plus the 5 s exit wait.
-	it('serves a cache-only archive over MCP and stops on SIGTERM', async () => {
-		const home = tempRoot();
-		const state = join(home, 'state');
-		cacheOnly(state);
-		const port = await freePort();
-		const daemon = spawn(process.execPath, [cliEntry, 'daemon'], {
-			env: {
-				...process.env,
-				HOME: home,
-				LINE_MCP_HOME: state,
-				LINE_MCP_LOCK_PORT: String(await freePort()),
-				LINE_MCP_PORT: String(port)
-			},
-			stdio: 'ignore'
-		});
-		const exited = new Promise<number | null>((resolve) => daemon.once('exit', resolve));
-
-		let status: ToolCall;
+	it('serves a cache-only archive over MCP', async () => {
+		const daemon = await cacheOnlyDaemon();
 		try {
-			status = await serving(port);
+			expect((await serving(daemon.port)).data).toMatchObject({
+				health: 'needs_login',
+				stale: true,
+				account: { mid: selfMid, auth_state: 'needs_login' }
+			});
 		} finally {
-			daemon.kill('SIGTERM');
+			daemon.child.kill();
 		}
-
-		expect(status.data).toMatchObject({
-			health: 'needs_login',
-			stale: true,
-			account: { mid: selfMid, auth_state: 'needs_login' }
-		});
-		expect(await within(5000, exited, 'the daemon to exit')).toBe(0);
 	}, 20_000);
+
+	// Windows has no SIGTERM: kill() there terminates the process at once.
+	it.skipIf(windows)(
+		'stops on SIGTERM and exits 0',
+		async () => {
+			const daemon = await cacheOnlyDaemon();
+			const exited = new Promise<number | null>((resolve) => daemon.child.once('exit', resolve));
+			try {
+				await serving(daemon.port);
+			} finally {
+				daemon.child.kill('SIGTERM');
+			}
+
+			expect(await within(5000, exited, 'the daemon to exit')).toBe(0);
+		},
+		20_000
+	);
 
 	// No signal reaches a daemon run as a Windows scheduled task; this request
 	// does. A daemon the user runs by hand ignores it.
@@ -394,6 +423,7 @@ describe('commands', { timeout: 15_000 }, () => {
 			const env: NodeJS.ProcessEnv = {
 				...process.env,
 				HOME: home,
+				USERPROFILE: home,
 				LINE_MCP_HOME: state,
 				LINE_MCP_LOCK_PORT: String(lockPort),
 				LINE_MCP_PORT: String(await freePort())
@@ -449,6 +479,26 @@ function cacheOnly(state: string): void {
 	setAuthState(db, 'needs_login');
 	writeState(db, healthKey, { state: 'needs_login', since: Date.now() });
 	db.close();
+}
+
+/** `line-mcp daemon` over a `cacheOnly` state root, on a free MCP port. */
+async function cacheOnlyDaemon() {
+	const home = tempRoot();
+	const state = join(home, 'state');
+	cacheOnly(state);
+	const port = await freePort();
+	const child = spawn(process.execPath, [cliEntry, 'daemon'], {
+		env: {
+			...process.env,
+			HOME: home,
+			USERPROFILE: home,
+			LINE_MCP_HOME: state,
+			LINE_MCP_LOCK_PORT: String(await freePort()),
+			LINE_MCP_PORT: String(port)
+		},
+		stdio: 'ignore'
+	});
+	return { child, port };
 }
 
 /** `status` from the daemon on `port` once it listens; gives up after 10 s. */

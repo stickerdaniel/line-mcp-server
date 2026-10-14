@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { delimiter, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { planPublish, planRelease } from '../scripts/release-plan.ts';
@@ -71,7 +71,32 @@ describe('planPublish', () => {
 });
 
 const run = (args: string[], env: NodeJS.ProcessEnv = process.env) =>
-	promisify(execFile)('node', [script, ...args], { env });
+	promisify(execFile)(process.execPath, [script, ...args], { env });
+
+/**
+ * A fake npm first on PATH, as each OS finds it: an executable `npm`, or on
+ * Windows the `npm.cmd` shim with the npm entry beside it. It records its
+ * arguments in `<dir>/args`, prints NPM_VIEW and exits NPM_EXIT. Returns the
+ * environment that finds it.
+ */
+function fakeNpm(dir: string) {
+	const stub = `const { writeFileSync } = require('node:fs');
+writeFileSync(${JSON.stringify(join(dir, 'args'))}, process.argv.slice(2).map((arg) => arg + '\\n').join(''));
+process.stdout.write(process.env.NPM_VIEW);
+process.exitCode = Number(process.env.NPM_EXIT);
+`;
+	writeFileSync(join(dir, 'npm'), `#!/usr/bin/env node\n${stub}`);
+	chmodSync(join(dir, 'npm'), 0o755);
+	writeFileSync(join(dir, 'npm.cmd'), '@node "%~dp0node_modules\\npm\\bin\\npm-cli.js" %*\r\n');
+	mkdirSync(join(dir, 'node_modules', 'npm', 'bin'), { recursive: true });
+	writeFileSync(join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), stub);
+	// Windows keeps the variable as `Path`; a second `PATH` key would be ambiguous.
+	const env = Object.fromEntries(
+		Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'PATH')
+	);
+	// Both shims find this Node by name: a shebang cannot hold a path with a space.
+	return { ...env, PATH: [dir, dirname(process.execPath), process.env.PATH].join(delimiter) };
+}
 
 describe('release-plan.ts', () => {
 	it('prints the detect decision as step outputs', async () => {
@@ -90,14 +115,9 @@ describe('release-plan.ts', () => {
 		// sha512 of the bytes above, from `openssl dgst -sha512 -binary | openssl base64 -A`.
 		const expected =
 			'sha512-NcbQ+Su4jXY2rLnuoBnm54xyJR7gxMfEGq2NA3QTdjBbb1gYLXU1hp3aYEW2au+oNOb6sAR4bZruePqGPlU8AQ==';
-		writeFileSync(
-			join(dir, 'npm'),
-			`#!/bin/sh\nprintf '%s\\n' "$@" >"${dir}/args"\nprintf '%s' "$NPM_VIEW"\nexit "$NPM_EXIT"\n`
-		);
-		chmodSync(join(dir, 'npm'), 0o755);
+		const path = fakeNpm(dir);
 		const env = (view: string, exit: number) => ({
-			...process.env,
-			PATH: `${dir}:${process.env.PATH}`,
+			...path,
 			NPM_VIEW: view,
 			NPM_EXIT: String(exit)
 		});

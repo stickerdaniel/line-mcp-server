@@ -186,8 +186,8 @@ export interface Tool {
 }
 
 /**
- * The CLI under test: the sources, or an installed `line-mcp` bin named by
- * `LINE_MCP_TEST_CLI` (scripts/smoke-pack.sh).
+ * The CLI under test: the sources, or the installed `line-mcp` bin (its
+ * script on Windows) named by `LINE_MCP_TEST_CLI` (scripts/smoke-pack.ts).
  */
 export const cliEntry =
 	process.env.LINE_MCP_TEST_CLI || fileURLToPath(new URL('../src/cli.ts', import.meta.url));

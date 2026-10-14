@@ -1,3 +1,4 @@
 bun.lock
 scratch/
-dist/
+# A symlink to AGENTS.md; a checkout without symlinks writes it as a one-line file.
+CLAUDE.md

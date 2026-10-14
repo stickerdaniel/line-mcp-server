@@ -14,9 +14,20 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    runs-on: ubicloud-standard-2
-    timeout-minutes: 10
+  verify-os:
+    name: verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubicloud-standard-2
+          - os: macos
+            runner: macos-latest
+          - os: windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,12 +57,27 @@ jobs:
       - name: Type check
         run: bun run check
 
+      # Tests put their state roots in the temp directory. On the Windows
+      # runner TEMP is on C:, where a SQLite commit's fsync takes 5-10 ms;
+      # on runner.temp (D:) it takes about 1 ms.
       - name: Test
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: bun run test
 
-  # The npm package as users install it, on macOS like the LaunchAgent it installs.
-  package:
-    runs-on: macos-latest
+  # The npm package as users install it. macOS also runs the real LaunchAgent
+  # through the installed bin (test/service-e2e.test.ts).
+  package-os:
+    name: package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
       - name: Checkout code
@@ -73,4 +99,30 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Pack, install and test the package
-        run: scripts/smoke-pack.sh
+        env:
+          LINE_MCP_E2E_SERVICE: '1'
+        run: node scripts/smoke-pack.ts
+
+  # Branch protection requires `verify` and `package`. These pass only when
+  # every leg of their matrix passed; a failed, cancelled or skipped leg fails them.
+  verify:
+    needs: verify-os
+    if: always()
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 2
+    steps:
+      - name: Check the matrix result
+        env:
+          RESULT: ${{ needs.verify-os.result }}
+        run: test "$RESULT" = success
+
+  package:
+    needs: package-os
+    if: always()
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 2
+    steps:
+      - name: Check the matrix result
+        env:
+          RESULT: ${{ needs.package-os.result }}
+        run: test "$RESULT" = success

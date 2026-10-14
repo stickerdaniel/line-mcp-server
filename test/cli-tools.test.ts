@@ -1,21 +1,11 @@
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { transaction } from '../src/db.ts';
 import { Pool } from '../src/sync/loop.ts';
 import { applyChanges, type MessageRow } from '../src/sync/normalize.ts';
-import { freePort, otherMid, tempRoot } from './fake-line.ts';
-import {
-	callTool,
-	cliEntry,
-	listTools,
-	runCli,
-	serve,
-	type Served,
-	startCli
-} from './mcp-client.ts';
+import { freePort, otherMid } from './fake-line.ts';
+import { callTool, listTools, runCli, serve, type Served, startCli } from './mcp-client.ts';
 
 /** Messages from the peer with `texts`, one minute apart. */
 function store(served: Served, ...texts: string[]): void {
@@ -77,24 +67,17 @@ class CountingPool extends Pool {
 	}
 }
 
-/** Runs `line-mcp <command> | <reader>` through bash; the CLI's exit code and stderr. */
-async function pipedCli(port: number, command: string, reader: string) {
-	const shell = spawn(
-		'bash',
-		[
-			'-c',
-			`"$0" "$1" ${command} | ${reader} >/dev/null; echo "\${PIPESTATUS[0]}"`,
-			process.execPath,
-			cliEntry
-		],
-		{ env: { ...process.env, LINE_MCP_HOME: tempRoot(), LINE_MCP_PORT: String(port) } }
-	);
-	let stdout = '';
-	let stderr = '';
-	shell.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
-	shell.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
-	await once(shell, 'close');
-	return { code: Number(stdout.trim()), stderr };
+/**
+ * Runs `line-mcp <command>` with a reader that closes the pipe at once (as
+ * `| true` does) or after the first output (as `| head -c 1` does); the CLI's
+ * exit code and stderr.
+ */
+async function closedReader(port: number, command: string, close: 'at once' | 'after output') {
+	const cli = startCli(port, [command]);
+	if (close === 'at once') cli.child.stdout.destroy();
+	else cli.child.stdout.once('data', () => cli.child.stdout.destroy());
+	const { code, stderr } = await cli.done;
+	return { code, stderr };
 }
 
 /** The published command name of a tool. */
@@ -118,15 +101,15 @@ describe('tool commands', { timeout: 30_000 }, () => {
 	it('finishes quietly when the reader closes the pipe early', async () => {
 		const { port } = (await serve()).server;
 
-		// `head` exits after one byte, while the command still closes its MCP session.
-		const run = await pipedCli(port, 'sync-status', 'head -c 1');
+		// The reader goes away after the first chunk, while the command still closes its MCP session.
+		const run = await closedReader(port, 'sync-status', 'after output');
 
 		expect(run).toEqual({ code: 0, stderr: '' });
 	});
 
 	it('keeps its own exit code when the reader is gone before any output', async () => {
-		// `true` exits at once; with no daemon the command fails without stdout output.
-		const run = await pipedCli(await freePort(), 'sync-status', 'true');
+		// With no daemon the command fails without stdout output.
+		const run = await closedReader(await freePort(), 'sync-status', 'at once');
 
 		expect(run.code).toBe(1);
 		expect(run.stderr).not.toContain('EPIPE');
@@ -226,26 +209,30 @@ describe('tool commands', { timeout: 30_000 }, () => {
 		expect(served.upstream.calls).not.toContain('sendMessage');
 	});
 
-	it('cancels a queued call on Ctrl-C and exits 130', async () => {
-		const { promise: gate, resolve: open } = Promise.withResolvers<void>();
-		onTestFinished(() => open());
-		const pool = new CountingPool(1);
-		// The only slot stays busy, so the CLI's call waits in the queue.
-		const held = pool.run(() => gate);
-		const served = await serve({}, undefined, { pool });
+	// Windows has no SIGINT for a child: kill() there terminates it at once.
+	it.skipIf(process.platform === 'win32')(
+		'cancels a queued call on Ctrl-C and exits 130',
+		async () => {
+			const { promise: gate, resolve: open } = Promise.withResolvers<void>();
+			onTestFinished(() => open());
+			const pool = new CountingPool(1);
+			// The only slot stays busy, so the CLI's call waits in the queue.
+			const held = pool.run(() => gate);
+			const served = await serve({}, undefined, { pool });
 
-		const cli = startCli(served.server.port, ['get-profile']);
-		await vi.waitFor(() => expect(pool.waiting).toBe(1), { timeout: 10_000, interval: 10 });
-		cli.child.kill('SIGINT');
-		const run = await cli.done;
+			const cli = startCli(served.server.port, ['get-profile']);
+			await vi.waitFor(() => expect(pool.waiting).toBe(1), { timeout: 10_000, interval: 10 });
+			cli.child.kill('SIGINT');
+			const run = await cli.done;
 
-		expect(run).toMatchObject({ code: 130, stdout: '', stderr: '' });
-		await vi.waitFor(() => expect(pool.waiting).toBe(0), { timeout: 5000, interval: 10 });
-		expect(served.logs).toContainEqual(
-			expect.objectContaining({ event: 'tool_failed', code: 'cancelled' })
-		);
-		open();
-		await held;
-		expect(served.upstream.calls).toEqual([]);
-	});
+			expect(run).toMatchObject({ code: 130, stdout: '', stderr: '' });
+			await vi.waitFor(() => expect(pool.waiting).toBe(0), { timeout: 5000, interval: 10 });
+			expect(served.logs).toContainEqual(
+				expect.objectContaining({ event: 'tool_failed', code: 'cancelled' })
+			);
+			open();
+			await held;
+			expect(served.upstream.calls).toEqual([]);
+		}
+	);
 });

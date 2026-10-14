@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { dirname, join } from 'node:path';
+import { posix } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { LineMcpError } from '../errors.ts';
 import { serviceTemplate } from '../paths.ts';
@@ -9,6 +9,9 @@ import type { DryRun, Service, ServiceDeps } from './index.ts';
 export const label = 'io.github.stickerdaniel.line-mcp';
 
 const launchctl = '/bin/launchctl';
+
+// launchd paths are POSIX paths on every OS the tests run this backend on.
+const { dirname, join } = posix;
 
 /** Variables the daemon needs to see the same state root and ports as `install`. */
 const forwarded = ['LINE_MCP_HOME', 'LINE_MCP_LOCK_PORT', 'LINE_MCP_PORT'];
