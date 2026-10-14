@@ -8,14 +8,15 @@ import { afterEach } from 'vitest';
 import { archiveStatus } from '../src/archive.ts';
 import { startMcpServer, type McpServer } from '../src/mcp/server.ts';
 import { attachmentsDir } from '../src/paths.ts';
-import { statePrivacy } from '../src/privacy.ts';
-import { openSession, type LogEntry, type Session } from '../src/session.ts';
+import type { StatePrivacy } from '../src/privacy.ts';
+import type { LogEntry, Session } from '../src/session.ts';
 import { Pool } from '../src/sync/loop.ts';
 import {
 	type FakeUpstream,
 	fakeUpstream,
-	freePort,
+	fixtureSession,
 	type Handler,
+	modePrivacy,
 	seedLive,
 	selfMid,
 	tempRoot
@@ -45,6 +46,8 @@ export interface ServeOptions {
 	upstream?: FakeUpstream;
 	/** The server's upstream pool; two slots by default. */
 	pool?: Pool;
+	/** The session's and server's privacy guard; `modePrivacy` by default. */
+	privacy?: StatePrivacy;
 }
 
 /** The MCP server on a free port over a real session on a temporary state root. */
@@ -57,14 +60,8 @@ export async function serve(
 	if (!options.root) seedLive(root, selfMid, { authToken: 'token' });
 	const upstream =
 		options.upstream ?? fakeUpstream({ getProfile: () => ({ mid: selfMid }), ...handlers }, fetch);
-	const privacy = statePrivacy();
-	const session = await openSession({
-		root,
-		lockPort: await freePort(),
-		createClient: upstream.createClient,
-		log: () => {},
-		privacy
-	});
+	const privacy = options.privacy ?? modePrivacy;
+	const session = await fixtureSession(root, upstream, privacy);
 	const logs: LogEntry[] = [];
 	const server = await startMcpServer(
 		{

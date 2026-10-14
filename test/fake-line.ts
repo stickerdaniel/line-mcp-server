@@ -4,12 +4,14 @@ import { Buffer } from 'node:buffer';
 import { createCipheriv } from 'node:crypto';
 import {
 	copyFileSync,
+	existsSync,
 	linkSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
-	symlinkSync
+	symlinkSync,
+	writeFileSync
 } from 'node:fs';
 import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -18,8 +20,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { BaseClient, InternalError } from '@evex/linejs/base';
 import type { BaseStorage } from '@evex/linejs/storage';
 import { type NestedArray, Protocols } from '@evex/linejs/thrift';
-import { bindAccount, openDatabase } from '../src/db.ts';
+import { bindAccount, migrate, openDatabase } from '../src/db.ts';
 import { databasePath } from '../src/paths.ts';
+import { type StatePrivacy, statePrivacy } from '../src/privacy.ts';
+import { openSession, type Session } from '../src/session.ts';
 import { SqliteStorage } from '../src/storage.ts';
 
 export const selfMid = `u${'a'.repeat(32)}`;
@@ -228,6 +232,34 @@ export function tempRoot(): string {
 	return mkdtempSync(join(tmpdir(), 'line-mcp-test-'));
 }
 
+/** The macOS and Linux privacy guard, which leaves privacy to file modes. */
+export const modePrivacy = statePrivacy('linux');
+
+/**
+ * The real session of the shared fixtures (`serve`, `syncFixture`), whose
+ * tests assert neither the Windows privacy check nor durability. Without
+ * `privacy` it keeps privacy to file modes, and it commits without fsync. On
+ * the Windows runner the state stays on C: in the profile: there the check
+ * started PowerShell for up to 11 s on each open, and each commit's fsync took
+ * 5 to 50 ms and stalled for up to 2.4 s. Tests never cut power, the only
+ * thing `synchronous = FULL` guards against.
+ */
+export async function fixtureSession(
+	root: string,
+	upstream: FakeUpstream,
+	privacy: StatePrivacy = modePrivacy
+): Promise<Session> {
+	const session = await openSession({
+		root,
+		lockPort: await freePort(),
+		createClient: upstream.createClient,
+		log: () => {},
+		privacy
+	});
+	session.db.exec('PRAGMA synchronous = OFF');
+	return session;
+}
+
 /**
  * The running Node at `<dir>/node`: a symlink, or on Windows `node.exe` as a
  * hard link (a copy across volumes), since a symlink there needs a privilege.
@@ -256,9 +288,32 @@ export async function freePort(): Promise<number> {
 	return port;
 }
 
-/** A live store with a bound account and the given `line_kv` rows. */
+/** An empty archive at the current schema, in WAL mode, migrated once per test process. */
+let emptyArchive: Buffer | undefined;
+
+function migratedArchive(): Buffer {
+	const path = join(tempRoot(), 'empty.sqlite');
+	const db = new DatabaseSync(path);
+	db.exec('PRAGMA journal_mode = WAL');
+	db.exec('PRAGMA synchronous = OFF');
+	migrate(db);
+	db.close();
+	return readFileSync(path);
+}
+
+/**
+ * A live store with a bound account and the given `line_kv` rows. A new
+ * database starts as a copy of `emptyArchive` and takes the rows without
+ * fsync: migrating and seeding it took ten fsyncs (see `fixtureSession`).
+ */
 export function seedLive(root: string, mid: string, rows: Record<string, string>): void {
+	const path = databasePath(root);
+	if (!existsSync(path)) {
+		mkdirSync(root, { recursive: true });
+		writeFileSync(path, (emptyArchive ??= migratedArchive()));
+	}
 	const db = openDatabase(root);
+	db.exec('PRAGMA synchronous = OFF');
 	bindAccount(db, { mid, device: 'ANDROIDSECONDARY', linejsVersion: '3.5.0' }, 'seeded');
 	const storage = new SqliteStorage(db);
 	for (const [key, value] of Object.entries(rows)) storage.setSync(key, value);

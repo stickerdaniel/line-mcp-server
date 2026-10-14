@@ -1429,7 +1429,7 @@ describe('upstream tools', () => {
 				fetched.push(new URL(request.url).pathname);
 				return new Response(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 			};
-			const first = await serve({}, fetch);
+			const first = await serve({}, fetch, { privacy: statePrivacy() });
 			store(first.session.db, media('41'), media('42'));
 			const refused = { isError: true, data: { error: { code: 'insecure_directory' } } };
 
@@ -1438,7 +1438,7 @@ describe('upstream tools', () => {
 			const cached = await downloadMedia(first.server.port, '41');
 			grant(join(first.root, 'attachments'), '*S-1-1-0:(OI)(CI)(R)');
 			// Another process checks the cache directory before it reads or writes there.
-			const second = await serve({}, fetch, { root: first.root });
+			const second = await serve({}, fetch, { root: first.root, privacy: statePrivacy() });
 			const fresh = await downloadMedia(second.server.port, '42');
 
 			expect(saved.data).toMatchObject({ cached: false });
