@@ -237,6 +237,15 @@ export function taskScheduler({
 		if (!reached(task)) throw new LineMcpError(code, `${command} failed (${exit}); ${remedy}`);
 	}
 
+	/**
+	 * Checks the launcher, the XML and the log right before anything enables
+	 * or runs the task, so a stale restore (a login's, say, after an
+	 * overlapping install failed this check) never runs it against them.
+	 */
+	async function checkFiles(): Promise<void> {
+		for (const file of [launcher, definitionXml, paths.log]) await privacy.file(file);
+	}
+
 	const startFailed = (why: string, task: Task) =>
 		new LineMcpError(
 			'start_failed',
@@ -245,12 +254,13 @@ export function taskScheduler({
 		);
 
 	/**
-	 * Enables and runs the task, then waits until an instance runs and its
-	 * daemon holds the lock port. Never runs it while another process holds
+	 * Checks the task's files, enables and runs the task, then waits until an
+	 * instance runs and its daemon holds the lock port. Never runs it while another process holds
 	 * the port: then `lock_held`, with nothing changed. A slow start is
 	 * reported with `start_failed`, not stopped.
 	 */
 	async function start(deadline = Date.now() + startTimeoutMs): Promise<void> {
+		await checkFiles();
 		if (await lockHeld(port(), { timeoutMs: Math.min(requestMs, left(deadline)) })) {
 			throw new LineMcpError(
 				'lock_held',
@@ -336,6 +346,7 @@ export function taskScheduler({
 			return;
 		}
 		if (prior.running) return await start();
+		await checkFiles();
 		await change(['/Change', '/Enable'], enabled, Date.now() + defaultToolTimeoutMs, {
 			remedy: 'the scheduled task stays disabled; run line-mcp install'
 		});
@@ -352,6 +363,7 @@ export function taskScheduler({
 			throw new LineMcpError('task_scheduler_failed', `${await taskName()} is gone`);
 		}
 		if (prior.enabled && !task.enabled) {
+			await checkFiles();
 			await change(['/Change', '/Enable'], enabled, deadline, {
 				remedy: 'the scheduled task stays disabled'
 			});

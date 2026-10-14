@@ -338,6 +338,10 @@ describe('Task Scheduler (Windows)', { timeout: 15_000 }, () => {
 			`privacy file ${paths.xml}`,
 			`privacy file ${paths.log}`,
 			`schtasks /Create /XML ${paths.xml} /F`,
+			// Again right before the task is enabled.
+			`privacy file ${paths.launcher}`,
+			`privacy file ${paths.xml}`,
+			`privacy file ${paths.log}`,
 			'schtasks /Change /Enable',
 			'schtasks /Run'
 		]);
@@ -512,6 +516,23 @@ describe('Task Scheduler (Windows)', { timeout: 15_000 }, () => {
 			expect(warn).toHaveBeenCalledTimes(initial === 'disabled, running' ? 1 : 0);
 		});
 
+		it.each(['enabled, running', 'enabled, idle'] as const)(
+			'keeps a task that was %s disabled when its files fail their check before the restore',
+			async (initial) => {
+				const fake = await fakeScheduler({ initial });
+				// An install between the stop and the restore found an exposed log.
+				let exposed = false;
+				const paths = scheduler(fake, { refuse: (path) => exposed && path === paths.log });
+
+				const restore = await paths.service.stop();
+				exposed = true;
+
+				await expect(restore()).rejects.toMatchObject({ code: 'insecure_directory' });
+				expect(fake.schtasks()).toEqual(['/Change /Disable']);
+				expect([taskState(fake), fake.bound()]).toEqual(['disabled, idle', false]);
+			}
+		);
+
 		it('waits for a daemon that has not bound the lock port yet', async () => {
 			const fake = await fakeScheduler({ initial: 'enabled, idle', bindDelayMs: 700 });
 			const { service } = scheduler(fake);
@@ -649,6 +670,21 @@ describe('Task Scheduler (Windows)', { timeout: 15_000 }, () => {
 
 			await expect(service.stop()).rejects.toMatchObject({ code: 'task_scheduler_failed' });
 			expect(taskState(fake)).toBe('enabled, running');
+		});
+
+		it('keeps the task disabled when its files fail their check before the rollback', async () => {
+			const fake = await fakeScheduler({
+				initial: 'enabled, running',
+				fault: (call, n) => (call === 'cscript' && n === 1 ? { stdout: '' } : undefined)
+			});
+			const paths = scheduler(fake, { refuse: (path) => path === paths.log });
+
+			await expect(paths.service.stop()).rejects.toMatchObject({
+				code: 'service_state_unknown',
+				message: expect.stringContaining(`${paths.log} is not private`)
+			});
+			expect(fake.schtasks()).toEqual(['/Change /Disable']);
+			expect(taskState(fake)).toBe('disabled, running');
 		});
 
 		it('fails as unknown when the rollback cannot read the task either', async () => {
