@@ -119,12 +119,13 @@ export function launchd({ home, runner, stopTimeoutMs = 30_000 }: ServiceDeps): 
 				.filter((name) => env[name])
 				.map((name) => `\n\t\t<key>${name}</key>\n\t\t<string>${xml(env[name]!)}</string>`)
 				.join('');
+			// Replacer functions, so a `$&` or `$'` in a path stays literal.
 			return readFileSync(serviceTemplate(`${label}.plist`), 'utf-8')
 				.replace(/<!--.*?-->\n/s, '')
-				.replaceAll('{{NODE}}', xml(node))
-				.replaceAll('{{CLI}}', xml(cli))
-				.replaceAll('{{LOG}}', xml(paths.log))
-				.replaceAll('{{ENVIRONMENT}}', environment);
+				.replaceAll('{{NODE}}', () => xml(node))
+				.replaceAll('{{CLI}}', () => xml(cli))
+				.replaceAll('{{LOG}}', () => xml(paths.log))
+				.replaceAll('{{ENVIRONMENT}}', () => environment);
 		},
 		async install(definition, { dryRun } = {}) {
 			if (dryRun) {

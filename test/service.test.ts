@@ -114,6 +114,20 @@ describe('launchd', () => {
 `);
 	});
 
+	it("keeps $& and $' in paths as they are", () => {
+		const service = serviceFor('darwin', { home: '/Users/me', env: {}, runner });
+
+		const plist = service.render({
+			node: '/Users/me/$&/node',
+			cli: "/Users/me/$'/cli.js",
+			env: { LINE_MCP_HOME: '/Users/me/$`' }
+		});
+
+		expect(plist).toContain('<string>/Users/me/$&amp;/node</string>');
+		expect(plist).toContain("<string>/Users/me/$'/cli.js</string>");
+		expect(plist).toContain('<string>/Users/me/$`</string>');
+	});
+
 	const domain = `gui/${userInfo().uid}`;
 	const target = `${domain}/io.github.stickerdaniel.line-mcp`;
 
