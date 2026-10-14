@@ -4,6 +4,7 @@ import { readAccount } from '../../db.ts';
 import {
 	listChangesPage,
 	listChatsPage,
+	listUnreadPage,
 	readMessagesPage,
 	renderTime,
 	searchMessagesPage,
@@ -64,6 +65,18 @@ export const listChats = defineTool({
 			...(args.service ? { service: args.service } : {}),
 			...(args.name ? { name: args.name } : {}),
 			...(args.limit ? { limit: args.limit } : {}),
+			...(args.cursor ? { cursor: args.cursor } : {})
+		})
+});
+
+export const listUnread = defineTool({
+	name: 'list_unread',
+	description:
+		"Every unread message across chats in one call, from the local archive. Marks nothing as read. Read positions come from LINE through sync and snapshots that become due every 10 minutes, so a message read elsewhere a moment ago can still be listed. For a chat with a known read position, messages from others stay listed until line-mcp sees them read, as read_messages items in message ID order. A chat whose read position is unknown has messages_unknown true and no messages. OpenChat thread messages are not included. unread_count counts the archive; line_unread_count is LINE's own count as of line_unread_as_of and can differ. A larger result continues with next_cursor; continued marks a chat carried over from the previous page.",
+	input: z.object({ service: service.optional(), cursor }),
+	run: (args, { db, selfMid }) =>
+		listUnreadPage(db, selfMid, {
+			...(args.service ? { service: args.service } : {}),
 			...(args.cursor ? { cursor: args.cursor } : {})
 		})
 });

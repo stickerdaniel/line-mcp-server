@@ -62,7 +62,7 @@ To revoke the session itself, log the device out in LINE's device list on your p
 
 The daemon serves Streamable HTTP at `http://127.0.0.1:47822/mcp`, stateless, for as long as it runs. `LINE_MCP_PORT` changes the port (set it before `install`, which passes it on to the LaunchAgent); it must differ from the lock port 47821 (`LINE_MCP_LOCK_PORT`).
 
-Read tools: `status`, `list_chats`, `read_messages`, `search_messages`, `list_changes`, `get_attachment`, `get_announcements`, `get_profile`. Every result reports `stale` and the last sync times. Each time is an ISO 8601 string with the offset of the daemon's system time zone, which `status` reports as `time_zone`. Message and chat items leave out fields without a value.
+Read tools: `status`, `list_chats`, `list_unread`, `read_messages`, `search_messages`, `list_changes`, `get_attachment`, `get_announcements`, `get_profile`. `list_unread` returns every unread message across chats in one call and marks nothing as read. Every result reports `stale` and the last sync times. Each time is an ISO 8601 string with the offset of the daemon's system time zone, which `status` reports as `time_zone`. Message and chat items leave out fields without a value.
 
 Mutating tools: `send_message`, `react`, `unsend`. Each call needs an `idempotency_key`; a retry with the same key and arguments never acts twice. A result with state `unknown` means LINE may have acted, and line-mcp never resends it on its own.
 

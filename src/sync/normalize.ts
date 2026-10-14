@@ -6,6 +6,8 @@ import { readState, type Service, upsertChat, upsertParticipant, writeState } fr
 import { mapError } from '../errors.ts';
 import { decryptMessage } from '../keys.ts';
 import { decimal } from '../probe.ts';
+import { advanceMarker, readMarker } from '../read-state.ts';
+import type { Log } from '../session.ts';
 
 export type DecryptState = 'ok' | 'missing_key' | 'invalid';
 
@@ -30,11 +32,14 @@ export interface MessageRow {
 export type Change =
 	| { kind: 'message'; row: MessageRow }
 	| { kind: 'unsend'; service: Service; chatId: string; messageId: string }
-	| { kind: 'participant'; service: Service; id: string; displayName: string };
+	| { kind: 'participant'; service: Service; id: string; displayName: string }
+	/** The account read the chat up to `marker`, a canonical decimal message ID. */
+	| { kind: 'read'; service: Service; chatId: string; marker: string };
 
 export interface NormalizeContext {
 	base: BaseClient;
 	selfMid: string;
+	log?: Log;
 }
 
 /** Enum values arrive as names when LINEJS knows them and as numbers otherwise. */
@@ -284,6 +289,13 @@ export async function normalizeOperations(
 				chatId: String(operation.param1 ?? ''),
 				messageId: String(operation.param2)
 			});
+		} else if (name === 'SEND_CHAT_CHECKED' && nonEmpty(operation.param1)) {
+			// The account read the chat (param1) up to message param2 on another
+			// device (verified against a live account).
+			const marker = readMarker(context.log, 'talk', operation.param2);
+			if (marker !== null) {
+				batch.changes.push({ kind: 'read', service: 'talk', chatId: operation.param1, marker });
+			}
 		} else if (talkKeyOps.has(name)) {
 			batch.keysChanged = true;
 		} else if (talkChatOps.has(name) && nonEmpty(operation.param1)) {
@@ -401,6 +413,32 @@ export async function normalizeSquareEvents(
 	return batch;
 }
 
+/**
+ * The account's read positions in `fetchMyEvents` events. Only that stream
+ * carries them in its own order; a chat's history replays old status events,
+ * so `normalizeSquareEvents` never produces `read` changes. The event's
+ * unread count is left out: a replay must not overwrite a newer snapshot.
+ */
+export function squareReadChanges(context: NormalizeContext, events: SquareEvent[]): Change[] {
+	const changes: Change[] = [];
+	for (const event of events) {
+		if (enumName(enums.SquareEventType, event.type) !== 'NOTIFIED_UPDATE_SQUARE_CHAT_STATUS') {
+			continue;
+		}
+		const status = event.payload?.notifiedUpdateSquareChatStatus;
+		const chatId = nonEmpty(status?.squareChatMid);
+		const marker = readMarker(
+			context.log,
+			'square',
+			status?.statusWithoutMessage?.markedAsReadMessageId
+		);
+		if (chatId && marker !== null) {
+			changes.push({ kind: 'read', service: 'square', chatId, marker });
+		}
+	}
+	return changes;
+}
+
 export interface ApplyResult {
 	/** Rows inserted or changed, each with a fresh `seq`. */
 	changed: number;
@@ -442,6 +480,8 @@ export function applyChanges(
 			upsertParticipant(db, change.service, change.id, change.displayName, now);
 		} else if (change.kind === 'unsend') {
 			result.changed += applyUnsend(db, change.service, change.chatId, change.messageId);
+		} else if (change.kind === 'read') {
+			advanceMarker(db, change.service, change.chatId, change.marker);
 		} else {
 			const { row } = change;
 			upsertChat(

@@ -1,6 +1,6 @@
 ---
 name: line-mcp
-description: Read, search and act in the chats of the LINE account connected to the local line-mcp daemon (one-to-one, groups, OpenChat). Use to list chats, read or search messages, list changes since a sequence number, fetch attachments, announcements and profiles, and, when the user asks, send messages or images, reply, react and unsend.
+description: Read, search and act in the chats of the LINE account connected to the local line-mcp daemon (one-to-one, groups, OpenChat). Use to list unread messages, list chats, read or search messages, list changes since a sequence number, fetch attachments, announcements and profiles, and, when the user asks, send messages or images, reply, react and unsend.
 ---
 
 # line-mcp CLI
@@ -16,6 +16,7 @@ A command prints its result as JSON on stdout. On failure it prints a JSON error
 `line-mcp <command> --help` shows a command's flags.
 
 - `sync-status`: session health, last sync times, coverage gaps, backfill progress and `time_zone`
+- `list-unread`: every unread message across chats in one call
 - `list-chats`: chats with display names and each chat's latest message, most recent activity first
 - `read-messages`: messages of one chat or thread, one page at a time
 - `search-messages`: messages whose text matches, newest first
@@ -26,6 +27,10 @@ A command prints its result as JSON on stdout. On failure it prints a JSON error
 - `send-message`: send text or a local file, optionally as a reply
 - `react`: react to a message
 - `unsend`: unsend a message the connected account sent
+
+## What is new
+
+Run `list-unread` first when the user asks what is new. It returns every unread message across chats in one call, from the local archive, and marks nothing as read. It covers main chats; OpenChat thread messages are not included. A chat with `messages_unknown: true` has no known read position yet: read it with `read-messages`. `unread_count` counts the archive; `line_unread_count` is LINE's own count as of `line_unread_as_of` and can differ. A message read elsewhere a moment ago can still be listed. Pass `next_cursor` back when the result has one.
 
 ## Acting on LINE
 

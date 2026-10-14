@@ -1,5 +1,6 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { LineMcpError } from './errors.ts';
+import { above, idOrder } from './read-state.ts';
 
 export type Service = 'talk' | 'square';
 export type Health = 'online' | 'catching_up' | 'offline' | 'needs_login' | 'storage_error';
@@ -564,6 +565,67 @@ function scanRows(
 			ORDER BY 2 DESC, 1 DESC`,
 		params: [from.sentAt, from.sentAt, from.rowId, from.sentAt, from.rowId]
 	};
+}
+
+/** SQL: `column` holds a canonical decimal ID (digits, no leading zero). */
+export const canonicalId = (column: string) =>
+	`(${column} GLOB '[1-9]*' AND NOT ${column} GLOB '*[^0-9]*')`;
+
+/**
+ * SQL over `m` (a message) that keeps the unread messages of one chat
+ * (architecture, Read state): `chat` in `service` (SQL expressions), with a
+ * canonical ID above the message ID `after`, at or below the row id
+ * `:boundary`, in the main chat, not unsent, and not known to be the
+ * account's own (`:self` in Talk, any recorded own member in Square). A
+ * message without a sender stays. The ID range uses `message_numeric_order`.
+ */
+export const unreadWhere = (service: string, chat: string, after: string) =>
+	`m.service = ${service} AND m.chat_id = ${chat} AND ${above('m.message_id', after)}
+	AND ${canonicalId('m.message_id')} AND m.id <= :boundary AND m.thread_id IS NULL AND m.unsent = 0
+	AND NOT coalesce(CASE m.service WHEN 'talk' THEN m.sender = :self ELSE EXISTS (
+		SELECT 1 FROM square_self_member s WHERE s.chat_id = m.chat_id AND s.member_id = m.sender
+	) END, 0)`;
+
+/** One chat's unread messages after the message ID `after` (its read position or a later one). */
+export interface UnreadScope {
+	service: Service;
+	chatId: string;
+	after: string;
+	/** The highest row id a traversal covers (see `messageBoundary`). */
+	boundary: number;
+	selfMid: string;
+}
+
+const unreadParams = (scope: UnreadScope) => ({
+	service: scope.service,
+	chat: scope.chatId,
+	after: scope.after,
+	boundary: scope.boundary,
+	self: scope.selfMid
+});
+
+/** How many unread messages a chat has after `after`. */
+export function unreadCount(db: DatabaseSync, scope: UnreadScope): number {
+	const row = db
+		.prepare(
+			`SELECT count(*) AS unread FROM message m WHERE ${unreadWhere(':service', ':chat', ':after')}`
+		)
+		.get(unreadParams(scope)) as { unread: number };
+	return row.unread;
+}
+
+/** Up to `limit` unread messages of a chat after `after`, in numeric ID order. */
+export function unreadMessages(
+	db: DatabaseSync,
+	scope: UnreadScope & { limit: number }
+): MessageView[] {
+	return db
+		.prepare(
+			`SELECT ${viewColumns} FROM message m WHERE ${unreadWhere(':service', ':chat', ':after')}
+			ORDER BY ${idOrder('m.message_id')} LIMIT :limit`
+		)
+		.all({ ...unreadParams(scope), limit: scope.limit })
+		.map(view);
 }
 
 /** Rows whose last insert or change has `seq > afterSeq`, in `seq` order. */

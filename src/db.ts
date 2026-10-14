@@ -131,7 +131,21 @@ const migrations = [
 		PRIMARY KEY (chat_id, member_id)
 	) STRICT;`,
 	// Search context reads one thread, or the main chat alone, in read order.
-	`CREATE INDEX message_thread_order ON message (service, chat_id, thread_id, coalesce(sent_at, 0), id);`
+	`CREATE INDEX message_thread_order ON message (service, chat_id, thread_id, coalesce(sent_at, 0), id);`,
+	// The account's read position per chat and LINE's unread count with the
+	// position it was reported for (architecture, Read state). A NULL marker
+	// is an unknown position. The index orders a chat's messages by numeric ID
+	// with the key `idOrder` builds.
+	`CREATE TABLE read_state (
+		service TEXT NOT NULL CHECK (service IN ('talk', 'square')),
+		chat_id TEXT NOT NULL,
+		marker TEXT,
+		line_count INTEGER,
+		count_marker TEXT,
+		count_at INTEGER,
+		PRIMARY KEY (service, chat_id)
+	) STRICT;
+	CREATE INDEX message_numeric_order ON message (service, chat_id, (printf('%010d', length(message_id)) || message_id));`
 ];
 
 export const schemaVersion = migrations.length;

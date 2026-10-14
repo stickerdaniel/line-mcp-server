@@ -1,5 +1,5 @@
 import { createServer, type AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openGap, readMessages, searchMessages, upsertChat, writeState } from '../src/archive.ts';
 import { type Daemon, type DaemonOptions, startDaemon } from '../src/daemon.ts';
 import { openDatabase, readAccount, transaction } from '../src/db.ts';
@@ -17,7 +17,7 @@ import {
 	within
 } from './fake-line.ts';
 import { callTool, post } from './mcp-client.ts';
-import { receive, textMessage } from './sync-fixture.ts';
+import { field, receive, squareChat, squareDiscovery, textMessage } from './sync-fixture.ts';
 
 const daemons: Daemon[] = [];
 afterEach(async () => {
@@ -100,6 +100,49 @@ function archiveUnnamedSquareSender(root: string): void {
 		])
 	);
 	db.close();
+}
+
+/** Archives one Talk message from the peer of the one-to-one chat `chatId`. */
+function archiveTalk(root: string, chatId: string, messageId: string): void {
+	const db = openDatabase(root);
+	const row = { messageId, text: 'hello', sentAt: 1 };
+	transaction(db, () =>
+		applyChanges(db, [
+			{
+				kind: 'message',
+				row: {
+					service: 'talk',
+					chatId,
+					chatType: 'user',
+					...row,
+					threadId: null,
+					sender: chatId,
+					editedAt: null,
+					contentType: 'NONE',
+					replyTo: null,
+					mentions: null,
+					envelope: JSON.stringify(row),
+					decryptState: 'ok',
+					missingKey: null
+				}
+			}
+		])
+	);
+	db.close();
+}
+
+/** A `getMessageBoxes` box with the account's read position and one unread message. */
+const readBox = (id: string, marker: bigint) => ({
+	id,
+	midType: 'USER',
+	lastSeenMessageId: marker,
+	unreadCount: 1n
+});
+
+/** Waits until the worker finished the round it was in and ran two more; `rounds` counts started rounds. */
+async function idleRounds(rounds: () => number): Promise<void> {
+	const from = rounds();
+	await until(() => rounds() >= from + 3, 'worker rounds');
 }
 
 describe('daemon', () => {
@@ -540,6 +583,284 @@ describe('daemon', () => {
 		expect(listed.data.chats).toEqual([
 			expect.objectContaining({ chat_id: selfMid, name: '丹尼爾' })
 		]);
+	});
+
+	it('takes a Talk read snapshot at start, every 10 minutes and after a reset', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		// A chat LINE leaves out of every snapshot.
+		const left = `u${'7'.repeat(32)}`;
+		archiveTalk(root, left, '1001');
+		let clock = 1_900_000_000_000;
+		let snapshots = 0;
+		let rounds = 0;
+		let reset = false;
+		const { daemon } = await start(
+			root,
+			{
+				sync: () => {
+					if (!reset) return {};
+					reset = false;
+					return { fullSyncResponse: { nextRevision: 10n, reasons: [] } };
+				},
+				getMessageBoxes: (value) => {
+					if (!field(value, 2, 5)) return { messageBoxes: [], hasNext: false };
+					snapshots++;
+					const box = { id: otherMid, midType: 'USER', lastSeenMessageId: 10n, unreadCount: 1n };
+					return { messageBoxes: [box], hasNext: false };
+				},
+				// Discovery runs every worker round here, so it counts the rounds.
+				getAllChatMids: () => {
+					rounds++;
+					return { memberChatMids: [] };
+				},
+				getContactsV2: () => ({ contacts: {} })
+			},
+			{ notify: () => {}, now: () => clock, discoveryIntervalMs: 0 }
+		);
+
+		await until(() => snapshots === 1 && rounds >= 6, 'worker rounds after the first snapshot');
+		expect(snapshots).toBe(1);
+		const listed = await callTool(daemon.mcp!.port, 'list_unread');
+		expect(listed.data.chats).toEqual([
+			expect.objectContaining({ chat_id: left, messages_unknown: true }),
+			expect.objectContaining({ chat_id: otherMid, unread_count: 0, line_unread_count: 1 })
+		]);
+
+		clock += 10 * 60 * 1000;
+		await until(() => snapshots === 2, 'a snapshot 10 minutes later');
+		reset = true;
+		await until(() => snapshots === 3, 'a snapshot after a reset');
+	});
+
+	it('keeps the pages a failed Talk read snapshot committed and retries it after a backoff', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const [first, second] = [`u${'3'.repeat(32)}`, `u${'4'.repeat(32)}`];
+		let clock = 1_900_000_000_000;
+		let failing = true;
+		let attempts = 0;
+		let rounds = 0;
+		const { daemon } = await start(
+			root,
+			{
+				sync: () => ({}),
+				getMessageBoxes: (value) => {
+					if (!field(value, 2, 5)) return { messageBoxes: [], hasNext: false };
+					if (field(value, 2, 1) !== first) {
+						return { messageBoxes: [readBox(first, 10n)], hasNext: true };
+					}
+					attempts++;
+					if (failing) throw talkError('ILLEGAL_ARGUMENT');
+					return { messageBoxes: [readBox(second, 20n)], hasNext: false };
+				},
+				// Discovery runs every worker round here, so it counts the rounds.
+				getAllChatMids: () => {
+					rounds++;
+					return { memberChatMids: [] };
+				},
+				getContactsV2: () => ({ contacts: {} })
+			},
+			{ notify: () => {}, now: () => clock, discoveryIntervalMs: 0 }
+		);
+		const known = async () =>
+			((await callTool(daemon.mcp!.port, 'list_unread')).data.chats as { chat_id: string }[]).map(
+				(chat) => chat.chat_id
+			);
+		const idle = () => idleRounds(() => rounds);
+
+		await until(() => attempts === 1, 'the first snapshot');
+		await idle();
+		expect(attempts).toBe(1);
+		expect(await known()).toEqual([first]);
+
+		clock += 60_000 - 1;
+		await idle();
+		expect(attempts).toBe(1);
+		clock += 1;
+		await until(() => attempts === 2, 'a retry after 1 minute');
+		await idle();
+
+		clock += 120_000 - 1;
+		await idle();
+		expect(attempts).toBe(2);
+		failing = false;
+		clock += 1;
+		await until(() => attempts === 3, 'a retry after 2 more minutes');
+		await vi.waitFor(async () => expect(await known()).toEqual([first, second]), {
+			timeout: 3000
+		});
+
+		// A success resets the backoff to 1 minute.
+		failing = true;
+		clock += 10 * 60 * 1000;
+		await until(() => attempts === 4, 'the next snapshot 10 minutes later');
+		await idle();
+		clock += 60_000;
+		await until(() => attempts === 5, 'a retry 1 minute after it failed');
+	});
+
+	it('caps the backoff of a failing Talk read snapshot at 10 minutes', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		let clock = 1_900_000_000_000;
+		let attempts = 0;
+		let rounds = 0;
+		await start(
+			root,
+			{
+				sync: () => ({}),
+				getMessageBoxes: (value) => {
+					if (!field(value, 2, 5)) return { messageBoxes: [], hasNext: false };
+					attempts++;
+					throw talkError('ILLEGAL_ARGUMENT');
+				},
+				// Discovery runs every worker round here, so it counts the rounds.
+				getAllChatMids: () => {
+					rounds++;
+					return { memberChatMids: [] };
+				},
+				getContactsV2: () => ({ contacts: {} })
+			},
+			{ notify: () => {}, now: () => clock, discoveryIntervalMs: 0 }
+		);
+		const idle = () => idleRounds(() => rounds);
+
+		// The waits after five failures: 1, 2, 4 and 8 minutes, then 10 rather than 16.
+		for (const [attempt, minutes] of [
+			[1, 1],
+			[2, 2],
+			[3, 4],
+			[4, 8],
+			[5, 10]
+		] as const) {
+			await until(() => attempts === attempt, `attempt ${attempt}`);
+			await idle();
+			clock += minutes * 60_000 - 1;
+			await idle();
+			expect(attempts).toBe(attempt);
+			clock += 1;
+		}
+		await until(() => attempts === 6, 'a retry 10 minutes after the fifth failure');
+	});
+
+	it('backs off a Talk read snapshot that fails transiently and backfills meanwhile', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const message = textMessage('800000000000000003', 'history');
+		const clock = 1_900_000_000_000;
+		let now = clock;
+		let attempts = 0;
+		const { daemon } = await start(
+			root,
+			{
+				sync: () => ({}),
+				getMessageBoxes: (value) => {
+					if (!field(value, 2, 5)) {
+						return { messageBoxes: [{ id: otherMid, midType: 'USER' }], hasNext: false };
+					}
+					attempts++;
+					throw new TypeError('fetch failed');
+				},
+				getContactsV2: () => ({ contacts: {} }),
+				getRecentMessagesV2: () => [message],
+				getPreviousMessagesV2WithRequest: () => [message]
+			},
+			{ notify: () => {}, now: () => now, backfillPageMs: 0 }
+		);
+
+		await until(() => daemon.status().backfill.complete === 1, 'backfill to complete');
+		expect(attempts).toBe(1);
+		now = clock + 60_000;
+		await until(() => attempts === 2, 'a retry after 1 minute');
+	});
+
+	it('takes the Talk read snapshot again when a reset arrives while it runs', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const { promise: gate, resolve: open } = Promise.withResolvers<void>();
+		let snapshots = 0;
+		let syncs = 0;
+		let reset = false;
+		let resetSync: number | undefined;
+		await start(
+			root,
+			{
+				sync: () => {
+					syncs++;
+					if (!reset) return {};
+					reset = false;
+					resetSync = syncs;
+					return { fullSyncResponse: { nextRevision: 10n, reasons: [] } };
+				},
+				getMessageBoxes: async (value) => {
+					if (!field(value, 2, 5)) return { messageBoxes: [], hasNext: false };
+					if (++snapshots === 1) await gate;
+					return { messageBoxes: [readBox(otherMid, 10n)], hasNext: false };
+				}
+			},
+			// The clock stands still: only a reset makes the snapshot due again.
+			{ notify: () => {}, now: () => 1_900_000_000_000 }
+		);
+
+		await until(() => snapshots === 1, 'the first page pending');
+		reset = true;
+		// The Talk loop handles a step before it asks for the next one.
+		await until(() => resetSync !== undefined && syncs > resetSync, 'the reset handled');
+		open();
+		await until(() => snapshots === 2, 'a snapshot after the reset');
+	});
+
+	it('sweeps OpenChat once at start despite a recent sweep, and again after a stall', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const clock = 1_900_000_000_000;
+		const db = openDatabase(root);
+		writeState(db, 'square:sweptAt', clock);
+		db.close();
+		const discovery = squareDiscovery([squareChat]);
+		let sweeps = 0;
+		let fetches = 0;
+		let stallPages = 0;
+		const { daemon } = await start(
+			root,
+			{
+				...discovery.handlers,
+				sync: () => ({}),
+				getSquareChat: (value, base) => ({
+					...(discovery.handlers.getSquareChat!(value, base) as object),
+					squareChatStatus: {
+						otherStatus: { markedAsReadMessageId: '20', unreadMessageCount: ++sweeps }
+					}
+				}),
+				// A token that leads back to itself stalls the stream.
+				fetchMyEvents: () => {
+					fetches++;
+					const stalling = stallPages > 0;
+					if (stalling) stallPages--;
+					return {
+						events: discovery.events,
+						syncToken: 'my-1',
+						...(stalling ? { continuationToken: 'again' } : {})
+					};
+				},
+				fetchSquareChatEvents: () => ({ events: [], syncToken: 'chat-1' })
+			},
+			{ notify: () => {}, now: () => clock, worker: false }
+		);
+
+		await until(() => sweeps === 1, 'a sweep at start');
+		const steps = fetches;
+		await until(() => fetches >= steps + 5, 'more Square steps');
+		expect(sweeps).toBe(1);
+		const listed = await callTool(daemon.mcp!.port, 'list_unread');
+		expect(listed.data.chats).toEqual([
+			expect.objectContaining({ chat_id: squareChat, unread_count: 0, line_unread_count: 1 })
+		]);
+
+		// Two pages under the same token close one cycle: exactly one stall, so the count settles.
+		stallPages = 2;
+		await until(() => sweeps === 2, 'a sweep after the stall');
 	});
 
 	it('reports online once both loops are caught up', async () => {

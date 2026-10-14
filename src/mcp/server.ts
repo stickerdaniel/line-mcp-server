@@ -31,6 +31,7 @@ export function mcpPort(env: NodeJS.ProcessEnv = process.env): number {
 export const readTools = [
 	archiveTools.status,
 	archiveTools.listChats,
+	archiveTools.listUnread,
 	archiveTools.readMessages,
 	archiveTools.searchMessages,
 	archiveTools.listChanges,

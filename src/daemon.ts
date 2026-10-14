@@ -20,7 +20,8 @@ import {
 	backfillRound,
 	discoverChats,
 	nameSquareSenders,
-	pendingBackfill
+	pendingBackfill,
+	snapshotTalkReadState
 } from './sync/backfill.ts';
 import {
 	historyStepMs,
@@ -215,14 +216,26 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 	const rediscoveryMs = 10 * 60 * 1000;
 	const discoveryIntervalMs = options.discoveryIntervalMs ?? 6 * 60 * 60 * 1000;
 	const keyRetryIntervalMs = options.keyRetryIntervalMs ?? 15 * 60 * 1000;
+	/** How often the Talk read state snapshot becomes due. */
+	const readSnapshotIntervalMs = 10 * 60 * 1000;
+	/** The first retry delay after a failed snapshot; it doubles up to the interval. */
+	const readSnapshotRetryMs = 60 * 1000;
+	let readSnapshotDueAt = Number.NEGATIVE_INFINITY;
+	let readSnapshotBackoffMs = readSnapshotRetryMs;
+	/** Talk resets so far, and how many of them the last snapshot began after. */
+	let talkResets = 0;
+	let readSnapshotResets = 0;
 	// A phase LINE refuses for good is logged and retried on its own schedule;
-	// it must not keep the other phases, and backfill, from running.
-	const phase = async (name: string, body: () => Promise<unknown>) => {
+	// it must not keep the other phases, and backfill, from running. Resolves
+	// to whether the phase succeeded.
+	const phase = async (name: string, body: () => Promise<unknown>): Promise<boolean> => {
 		try {
 			await body();
+			return true;
 		} catch (error) {
 			if (isTransient(error, name)) throw error;
 			log({ event: 'worker_phase_failed', ...mapError(error, name) });
+			return false;
 		}
 	};
 	const worker = async (): Promise<number> => {
@@ -233,6 +246,29 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 			discoveryDue = false;
 			// Discovery names Talk senders; this names OpenChat senders no event named.
 			await phase('square_names', () => nameSquareSenders(context, pool));
+		}
+		// Due at start, every 10 minutes and after a Talk reset; a failed
+		// snapshot is due again after a backoff that a success resets. A reset
+		// during a snapshot keeps it due.
+		if (readSnapshotResets !== talkResets || now() >= readSnapshotDueAt) {
+			const started = now();
+			const resets = talkResets;
+			let succeeded = false;
+			// A transient failure still ends this worker round, but it counts as a
+			// failed attempt: the backoff applies, and the next round goes on to
+			// the other phases and backfill instead of retrying the snapshot.
+			try {
+				succeeded = await phase('read_state', () => snapshotTalkReadState(context, pool));
+			} finally {
+				readSnapshotResets = resets;
+				if (succeeded) {
+					readSnapshotDueAt = started + readSnapshotIntervalMs;
+					readSnapshotBackoffMs = readSnapshotRetryMs;
+				} else {
+					readSnapshotDueAt = now() + readSnapshotBackoffMs;
+					readSnapshotBackoffMs = Math.min(readSnapshotBackoffMs * 2, readSnapshotIntervalMs);
+				}
+			}
 		}
 		if (listGaps(db, { service: 'talk', status: 'open' }).length > 0) {
 			await phase('reconcile', () => reconcileTalkGaps(context, pool));
@@ -257,6 +293,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 					catchingUp.talk = step.hasMore;
 					if (step.keysChanged) keysDue = true;
 					if (step.chats.length > 0) discoveryDue = true;
+					// A reset can skip read operations along with the rest.
+					if (step.reset) talkResets++;
 				},
 				// An idle long poll answers only after about 110 s; being held already
 				// shows there is no backlog.
