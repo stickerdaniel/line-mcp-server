@@ -92,9 +92,17 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+  # Every OS the package supports tests the one built artifact.
   smoke:
+    name: smoke (${{ matrix.os }})
     needs: [detect, build]
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
       - name: Checkout code
