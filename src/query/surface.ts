@@ -166,7 +166,7 @@ const notes = [
 	"`content_type` is `NONE` for text (NULL is also text in OpenChat); otherwise LINE's type: `IMAGE`, `VIDEO`, `AUDIO`, `FILE`, `STICKER`, `CALL`, `CHATEVENT`, `FLEX`, `LOCATION`, `CONTACT`. Readable fields of non-text messages: `alt_text` (sticker or Flex text), `file_name`, `duration_ms` (video, audio, call), `image_index` of `image_total` (an image set), `call_type` (`audio`, `video`), `call_result`; a chat event has `event` (joined, left, invited, invitation_canceled, removed, renamed, picture_changed, link_join_allowed, link_join_disabled), `event_by`, `event_members` (member IDs joined by `,`) and `event_name` (the new chat name).",
 	"`unsent = 1`: unsent by its sender, text and fields gone. `decrypt_state = 'missing_key'`: an encrypted message line-mcp cannot decrypt, text NULL. `edited_at`: time of the last edit; `text` is the edited text.",
 	'`thread_id` is set inside an OpenChat thread and NULL in the main chat.',
-	'`seq` grows with every new, edited or unsent message; a row shows only its latest state.',
+	'`seq` grows whenever a message row changes (new, edited, unsent, decrypted later); a row shows only its latest state.',
 	'Text search: `message_fts MATCH \'"term"\'` finds a quoted term of three or more characters anywhere in the text, ignoring case; shorter terms need `instr(text, ...)`.',
 	"Unread: `read_state.marker` is the ID of the last message the user read in that chat; NULL means unknown. Unread messages are in the main chat (`thread_id IS NULL`), not unsent, not the user's own, with an ID numerically above `marker`. `line_count` is LINE's own unread count as of `count_at`, valid while `count_marker = marker`."
 ];
