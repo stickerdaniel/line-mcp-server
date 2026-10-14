@@ -27,10 +27,10 @@ Source paths in this document are relative to the pinned dependency checkouts: L
 ```text
 LINE servers
    |  talk.sync / Square events / history / media / mutations (one session)
-line-mcp daemon (Node 24, LaunchAgent io.github.stickerdaniel.line-mcp)
+line-mcp daemon (Node 24, LaunchAgent or systemd user unit)
    |- session: ANDROIDSECONDARY client, SQLite storage, upstream guards
    |- sync: Talk loop, Square loop, backfill and reconciliation worker
-   |- archive: ~/Library/Application Support/line-mcp/line.db
+   |- archive: <state root>/line.db
    |- MCP: http://127.0.0.1:47822/mcp (Streamable HTTP, stateless, no CORS)
    '- outbox: idempotent mutating actions, never resent on its own
         ^ loopback, native clients only
@@ -39,7 +39,7 @@ Claude Code / Codex / T3 Code          line-mcp CLI and agent skill
 
 ## State
 
-All state lives under `~/Library/Application Support/line-mcp` (`LINE_MCP_HOME` overrides it): one SQLite database, `line.db`, in WAL mode with `synchronous = FULL`. The directory is `0700` and the database files are `0600`.
+All state lives in the state root: `~/Library/Application Support/line-mcp` on macOS, `$XDG_DATA_HOME/line-mcp` on Linux (`~/.local/share/line-mcp` when `XDG_DATA_HOME` is unset or relative). `LINE_MCP_HOME` overrides it; `install` refuses a relative one, since the service runs in another directory. It holds one SQLite database, `line.db`, in WAL mode with `synchronous = FULL`. The directory is `0700` and the database files are `0600`.
 
 | Table            | Purpose                                                                                                  |
 | ---------------- | -------------------------------------------------------------------------------------------------------- |
@@ -95,15 +95,26 @@ One allowlisted mapper sits between upstream failures and both logs and results:
 
 The account has a separate member MID in each square. Discovery records every own member `getSquareChat` reports for a confirmed chat (`squareChatMember.squareMemberMid`) in `square_self_member`, and keeps earlier ones, since LINE may hand out a new member on rejoin. An OpenChat message is `from_self` when its sender is one of the chat's own members. While the chat has none, `from_self` is left out as unknown, never borrowed from another square. A message without a sender, in Talk too, has no `from_self` either.
 
-## Daemon and LaunchAgent
+## Daemon and service
 
-`line-mcp install` writes the per-user LaunchAgent `io.github.stickerdaniel.line-mcp` to `~/Library/LaunchAgents` from `service/io.github.stickerdaniel.line-mcp.plist` and bootstraps it: `RunAtLoad`, `KeepAlive`, `ThrottleInterval` 30, `Umask` 63, logs in `~/Library/Logs/line-mcp` (`0700`). `LINE_MCP_HOME`, `LINE_MCP_LOCK_PORT` and `LINE_MCP_PORT` pass on to the agent. The agent runs an absolute Node path: an override from `--node` or `LINE_MCP_NODE`, which must be an executable Node 24.18 or later, otherwise Homebrew's stable `opt/node@24` link rather than a versioned Cellar path that the next `brew upgrade` removes, otherwise the running Node.
+`install`, `uninstall`, the login handoff and `doctor` reach the service manager only through the `Service` interface in `src/service/`, with one backend per OS: launchd on macOS, systemd on Linux, and launchd elsewhere until Windows gets its own. The service runs an absolute Node path: an override from `--node` or `LINE_MCP_NODE`, which must be an executable Node 24.18 or later, otherwise Homebrew's stable `opt/node@24` link rather than a versioned Cellar path that the next `brew upgrade` removes, otherwise the running Node. `install` and `doctor` warn when the Node or the CLI lies in a versioned directory (Homebrew Cellar, nvm, fnm, Volta, asdf, snap), and `install` refuses to run from the npx cache. A dry run writes no file and changes no service; it may still query the Node version. Every service manager call has a 15 s timeout, and a call that timed out counts as failed, never as stopped or absent. In tests, `LINE_MCP_SERVICE_RUNNER=<file>` runs every service tool call as `node <file> <tool> ...args` (`test/fixtures/service-runner.ts`) instead of the real tool; it never reaches the rendered definition.
 
-`line-mcp uninstall` boots the agent out and removes the plist; the archive stays unless `--purge` is given, which deletes the state root once it can take the lock. `bootout` counts an agent that is not loaded as done and fails on every other launchctl error. It returns while the daemon is still shutting down, so every bootout then waits up to 30 s until `launchctl print` no longer finds the agent; a `bootstrap` or a login right away would fail. `line-mcp login` boots the agent out before it takes the lock and bootstraps it again afterwards. `line-mcp doctor` checks the local setup without contacting LINE: Node, FTS5, permissions, schema, account, sync health, whether the installed plist matches this checkout, whether launchd has the agent loaded, and whether a process holds the lock port.
+**macOS.** `line-mcp install` writes the per-user LaunchAgent `io.github.stickerdaniel.line-mcp` to `~/Library/LaunchAgents` from `service/io.github.stickerdaniel.line-mcp.plist` and bootstraps it: `RunAtLoad`, `KeepAlive`, `ThrottleInterval` 30, `Umask` 63, logs in `~/Library/Logs/line-mcp` (`0700`). `LINE_MCP_HOME`, `LINE_MCP_LOCK_PORT` and `LINE_MCP_PORT` pass on to the agent when set. `uninstall` boots the agent out and removes the plist. `bootout` counts an agent that is not loaded as done and fails on every other launchctl error. It returns while the daemon is still shutting down, so every bootout then waits up to 30 s (`stopTimeoutMs`) until `launchctl print` no longer finds the agent; a `bootstrap` or a login right away would fail.
 
-`install`, `uninstall`, the login handoff and `doctor` reach the service manager only through the `Service` interface in `src/service/`; launchd is its only backend so far. A dry run writes no file and changes no service; it may still query the Node version and the service state. In tests, `LINE_MCP_SERVICE_RUNNER=<file>` runs every service tool call as `node <file> <tool> ...args` (`test/fixtures/service-runner.ts`) instead of the real tool; it never reaches the rendered definition.
+**Linux.** `line-mcp install` writes the systemd user unit `line-mcp.service` to `$XDG_CONFIG_HOME/systemd/user` from `service/line-mcp.service`: `Type=exec`, `Restart=always`, `RestartSec=30s`, `UMask=0077`, output appended to `$XDG_STATE_HOME/line-mcp/daemon.log` (directory `0700`, file `0600`), `WantedBy=default.target`. XDG values count only when absolute. The unit always sets `LINE_MCP_HOME` to the resolved state root, so a user manager with other XDG values opens the same archive; the ports pass on when set.
 
-The daemon reports one health state: `online`, `catching_up`, `offline`, `needs_login` or `storage_error`. When the session leaves `online` for `needs_login` or `storage_error`, every loop stops calling LINE while the archive stays readable, and the daemon shows one macOS notification for the transition, with fixed text and no message content. A failed archive write puts the daemon in `storage_error`.
+- Escaping follows systemd 255's reading of each directive. `%` doubles everywhere. `$` doubles only in `ExecStart=` arguments; the executable path and `Environment=` take it literally. Quoted values escape `\` and `"`. A Node path with a quote, backslash or control character, or a line break in any value, fails with `unsupported_path` before anything is written.
+- `install` queries the unit first: a missing `systemctl` is `systemd_unavailable`, an unreachable user manager `systemd_unreachable`, both before any write. It then stops an existing unit, writes the files, runs `daemon-reload` and checks that the manager loads the unit from the written path; otherwise it removes the written unit and fails with `unit_not_found`. Then it runs `enable` and `start`. Rerunning it converges; it is not transactional.
+- `uninstall` runs `stop` and `disable`, removes the unit and runs `daemon-reload`.
+- A unit is absent only when a successful query reports `LoadState=not-found` with nothing running. When a mutating call fails or times out, the unit's state decides: if it reached the target state the step counts as done; otherwise it fails with its remedy, and if the query fails too, with `service_state_unknown`.
+- The daemon shows notifications through `notify-send` with a 3 s timeout, and none without it, a session bus or a notification server. The unit carries no display variables.
+- Without lingering, the user manager stops at logout and the daemon with it. line-mcp never enables lingering; `doctor` reports it.
+
+**Login handoff.** `line-mcp login` stops an installed service before it takes the lock. `stop()` either leaves the service stopped or fails having changed nothing, and resolves to a `restore` that returns the service to its prior state once the login has released the lock: launchd bootstraps the agent again whenever the plist is there; systemd starts the unit again only if it was `active`, `activating` or `reloading`, and never changes whether it is enabled. A failed stop ends the login before it starts. A failed restore exits 1 with `service_restore_failed` after the login's own result and names `line-mcp install`.
+
+`uninstall` keeps the archive unless `--purge` is given, which deletes the state root once it can take the lock. `line-mcp doctor` checks the local setup without contacting LINE: Node, the Node and CLI paths, FTS5, permissions, schema, account, sync health, whether the installed definition matches this installation, the service manager's view (launchd: loaded; systemd: loaded from the written unit, active, lingering, log permissions), and whether a process holds the lock port.
+
+The daemon reports one health state: `online`, `catching_up`, `offline`, `needs_login` or `storage_error`. When the session leaves `online` for `needs_login` or `storage_error`, every loop stops calling LINE while the archive stays readable, and the daemon shows one desktop notification for the transition, with fixed text and no message content. A failed archive write puts the daemon in `storage_error`.
 
 ## Upstream concurrency
 
@@ -241,4 +252,4 @@ A command calls the daemon on `127.0.0.1` through the FastMCP client, with its o
 
 ## Out of scope
 
-LINE calls, LINE Pay and shopping, account settings changes, joining or leaving groups, contact management, multiple accounts, hosts other than one macOS user account, embeddings, OCR and speech, and MCP resources or prompts beyond the framework defaults.
+LINE calls, LINE Pay and shopping, account settings changes, joining or leaving groups, contact management, multiple accounts, hosts other than one macOS or Linux user account, embeddings, OCR and speech, and MCP resources or prompts beyond the framework defaults.

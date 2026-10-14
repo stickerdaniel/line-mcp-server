@@ -58,6 +58,34 @@ npm rm -g line-mcp-server
 
 To revoke the session itself, log the device out in LINE's device list on your phone.
 
+## Linux
+
+Linux needs line-mcp-server 0.3.0 or later.
+
+The daemon runs as the systemd user unit `line-mcp.service`. Install, upgrade and uninstall work as above. Linux also needs:
+
+- systemd 240 or later with a user manager, so `systemctl --user status` answers.
+- Lingering, for the daemon to keep running after you log out: `loginctl enable-linger "$(id -un)"`. line-mcp never turns it on; `doctor` reports it.
+- An npm prefix you own, so `npm i -g` needs no sudo, with its `bin` on `PATH`. With a distribution Node, `npm config set prefix ~/.local` and `~/.local/bin` on `PATH` do that.
+- The state directory on a local disk. SQLite's WAL mode needs shared memory, which network file systems do not provide.
+
+| What        | Where                                                                      |
+| ----------- | -------------------------------------------------------------------------- |
+| Archive     | `~/.local/share/line-mcp/line.db` (`0600`), under `$XDG_DATA_HOME` if set  |
+| Attachments | `~/.local/share/line-mcp/attachments`                                      |
+| Logs        | `~/.local/state/line-mcp/daemon.log`, under `$XDG_STATE_HOME` if set       |
+| Unit        | `~/.config/systemd/user/line-mcp.service`, under `$XDG_CONFIG_HOME` if set |
+
+`install` writes the state directory into the unit, so the daemon opens the same archive whatever environment the user manager has. The unit must go where the user manager looks: with an `XDG_CONFIG_HOME` set only in your shell, `install` fails with `unit_not_found` and removes the unit again. Notifications go through `notify-send` when it is installed.
+
+A Node from nvm, fnm, Volta, asdf or snap lives in a directory that goes away with its version, and the daemon with it; `install` and `doctor` warn about that. Pass `--node` with a Node that stays, such as the distribution's `/usr/bin/node`, or run `line-mcp install` again after switching versions.
+
+Without systemd, for example in a container, run `line-mcp daemon` in the foreground.
+
+### WSL
+
+WSL 2 with systemd enabled works like Linux. Keep the state directory in the Linux file system, not under `/mnt/c`. A systemd service does not keep WSL running, so the daemon stops when WSL shuts down after its last terminal closes.
+
 ## MCP endpoint
 
 The daemon serves Streamable HTTP at `http://127.0.0.1:47822/mcp`, stateless, for as long as it runs. `LINE_MCP_PORT` changes the port (set it before `install`, which passes it on to the LaunchAgent); it must differ from the lock port 47821 (`LINE_MCP_LOCK_PORT`).
