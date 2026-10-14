@@ -9,3 +9,8 @@ export function stateRoot(env: NodeJS.ProcessEnv = process.env): string {
 export function databasePath(root: string): string {
 	return join(root, 'line.db');
 }
+
+// `../service` from both `src/paths.ts` and the bundled `dist/cli.js`.
+export function serviceTemplate(name: string): URL {
+	return new URL(`../service/${name}`, import.meta.url);
+}

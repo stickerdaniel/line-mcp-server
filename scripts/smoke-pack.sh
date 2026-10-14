@@ -4,8 +4,9 @@
 # serving a cache-only archive and the tool commands calling a test server.
 # Usage: scripts/smoke-pack.sh [tarball]; without one it packs this checkout.
 # Everything runs under a temporary HOME, npm prefix and state root, with an
-# empty npm config (no JSR registry), free ports and a launchctl stub; the real
-# LaunchAgent, archive and LINE stay untouched.
+# empty npm config (no JSR registry), free ports and the service runner
+# fixture in place of launchctl; the real LaunchAgent, archive and LINE stay
+# untouched.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -28,11 +29,9 @@ free_port() {
 mkdir "$work/home"
 : >"$work/npmrc"
 : >"$work/npmrc-global"
-printf '#!/bin/sh\nexit 0\n' >"$work/launchctl"
-chmod +x "$work/launchctl"
 export HOME=$work/home
 export npm_config_userconfig=$work/npmrc npm_config_globalconfig=$work/npmrc-global
-export LINE_MCP_HOME=$work/state LINE_MCP_LAUNCHCTL=$work/launchctl
+export LINE_MCP_HOME=$work/state LINE_MCP_SERVICE_RUNNER=$repo/test/fixtures/service-runner.ts
 LINE_MCP_LOCK_PORT=$(free_port)
 LINE_MCP_PORT=$(free_port)
 export LINE_MCP_LOCK_PORT LINE_MCP_PORT

@@ -4,18 +4,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { archiveStatus } from './archive.ts';
 import { readAccount, schemaVersion } from './db.ts';
 import { mapError } from './errors.ts';
-import {
-	type AgentPaths,
-	agentLoaded,
-	isCellarPath,
-	label,
-	nodeVersion,
-	renderPlist,
-	selectNode,
-	supportedNode
-} from './launchd.ts';
 import { lockInUse } from './lock.ts';
 import { databasePath } from './paths.ts';
+import type { Service } from './service/index.ts';
+import { isCellarPath, nodeVersion, selectNode, supportedNode } from './service/node.ts';
 import { device } from './session.ts';
 
 export interface Check {
@@ -28,12 +20,12 @@ export interface Check {
 
 const mode = (path: string) => statSync(path).mode & 0o777;
 
-/** Local checks only: nothing here calls LINE or changes the LaunchAgent. */
+/** Local checks only: nothing here calls LINE or changes the service. */
 export async function doctor(input: {
 	root: string;
-	paths: AgentPaths;
+	service: Service;
 	env: NodeJS.ProcessEnv;
-	/** The CLI entry `install` writes into the LaunchAgent. */
+	/** The CLI entry `install` writes into the service definition. */
 	cli: string;
 	/** The Node `install` would write; selected like `install` when absent. */
 	node?: string;
@@ -120,30 +112,32 @@ export async function doctor(input: {
 		}
 	}
 
-	const expected = renderPlist({ node, cli: input.cli, log: input.paths.log, env: input.env });
-	const installed = existsSync(input.paths.plist)
-		? readFileSync(input.paths.plist, 'utf-8')
-		: undefined;
+	const { service } = input;
+	const { definition } = service.paths;
+	const expected = service.render({ node, cli: input.cli, env: input.env });
+	const installed = existsSync(definition) ? readFileSync(definition, 'utf-8') : undefined;
 	checks.push({
-		name: 'launch_agent',
+		name: service.check,
 		ok: installed === expected,
 		detail:
 			installed === undefined
-				? `${input.paths.plist} missing; run line-mcp install`
+				? `${definition} missing; run line-mcp install`
 				: installed === expected
-					? `${input.paths.plist} matches this installation`
-					: `${input.paths.plist} differs from this installation; run line-mcp install`
+					? `${definition} matches this installation`
+					: `${definition} differs from this installation; run line-mcp install`
 	});
 	try {
-		const loaded = await agentLoaded(input.env);
+		const loaded = await service.loaded();
 		checks.push({
-			name: 'launch_agent_loaded',
+			name: `${service.check}_loaded`,
 			ok: loaded,
-			detail: loaded ? `${label} is loaded` : `${label} is not loaded; run line-mcp install`
+			detail: loaded
+				? `${service.label} is loaded`
+				: `${service.label} is not loaded; run line-mcp install`
 		});
 	} catch (error) {
 		checks.push({
-			name: 'launch_agent_loaded',
+			name: `${service.check}_loaded`,
 			ok: false,
 			detail: mapError(error, 'doctor').message
 		});

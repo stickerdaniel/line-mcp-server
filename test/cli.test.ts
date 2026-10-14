@@ -1,6 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
 import {
-	chmodSync,
 	cpSync,
 	existsSync,
 	mkdirSync,
@@ -13,10 +12,11 @@ import {
 import { createServer } from 'node:net';
 import { userInfo } from 'node:os';
 import { dirname, join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { healthKey, writeState } from '../src/archive.ts';
 import { openDatabase, setAuthState } from '../src/db.ts';
-import { selectNode } from '../src/launchd.ts';
+import { selectNode } from '../src/service/node.ts';
 import { databasePath } from '../src/paths.ts';
 import { freePort, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
 import { callTool, cliEntry, type ToolCall } from './mcp-client.ts';
@@ -32,7 +32,7 @@ const cli = realpathSync(cliEntry);
 function npxCopy(): string {
 	const pkg = dirname(dirname(cli));
 	const copy = join(tempRoot(), '_npx', '0a1b2c3d4e5f', 'line-mcp-server');
-	for (const part of [relative(pkg, dirname(cli)), 'launchd', 'package.json']) {
+	for (const part of [relative(pkg, dirname(cli)), 'service', 'package.json']) {
 		cpSync(join(pkg, part), join(copy, part), { recursive: true });
 	}
 	symlinkSync(join(pkg, 'node_modules'), join(copy, 'node_modules'));
@@ -53,11 +53,14 @@ interface Run {
 	stderr: string;
 }
 
+const serviceRunner = fileURLToPath(new URL('fixtures/service-runner.ts', import.meta.url));
+
 /**
- * Runs the CLI with a temporary HOME and state root. `launchctl` is a script
- * that only records its arguments, so the test proves dry runs execute nothing.
- * It exits 0, except with the code `exits` names for a subcommand; `print`
- * defaults to 113, launchctl's answer for a service that is not loaded.
+ * Runs the CLI with a temporary HOME and state root. Every launchctl call goes
+ * to the service runner fixture, which only records it, so the test proves dry
+ * runs execute nothing. It exits 0, except with the code `exits` names for a
+ * subcommand; `print` defaults to 113, launchctl's answer for a service that
+ * is not loaded.
  */
 async function runCli(
 	args: string[],
@@ -67,14 +70,11 @@ async function runCli(
 	script = cliEntry
 ) {
 	const state = join(home, 'state');
-	const calls = join(home, 'launchctl-calls');
-	const launchctl = join(home, 'launchctl');
+	const calls = join(home, 'service-calls');
 	const lockPort = await freePort();
-	const cases = Object.entries({ print: 113, ...exits })
-		.map(([command, code]) => `\t${command}) exit ${code} ;;\n`)
-		.join('');
-	writeFileSync(launchctl, `#!/bin/sh\necho "$@" >> '${calls}'\ncase "$1" in\n${cases}esac\n`);
-	chmodSync(launchctl, 0o755);
+	const replies = Object.fromEntries(
+		Object.entries(exits).map(([command, exit]) => [command, { exit }])
+	);
 	const run = await new Promise<Run>((resolve) => {
 		execFile(
 			process.execPath,
@@ -85,7 +85,9 @@ async function runCli(
 					HOME: home,
 					LINE_MCP_HOME: state,
 					LINE_MCP_LOCK_PORT: String(lockPort),
-					LINE_MCP_LAUNCHCTL: launchctl,
+					LINE_MCP_SERVICE_RUNNER: serviceRunner,
+					LINE_MCP_SERVICE_CALLS: calls,
+					LINE_MCP_SERVICE_SCRIPT: JSON.stringify(replies),
 					...env
 				}
 			},
@@ -94,12 +96,16 @@ async function runCli(
 		);
 	});
 	const launched = existsSync(calls)
-		? readFileSync(calls, 'utf-8').trimEnd().split('\n')
-		: ([] as string[]);
+		? readFileSync(calls, 'utf-8')
+				.trimEnd()
+				.split('\n')
+				.map((line) => JSON.parse(line) as string[])
+		: [];
 	return { ...run, home, state, launched: launched.length > 0, calls: launched };
 }
 
-const agent = `gui/${userInfo().uid}/io.github.stickerdaniel.line-mcp`;
+const domain = `gui/${userInfo().uid}`;
+const agent = `${domain}/io.github.stickerdaniel.line-mcp`;
 const plistIn = (home: string) =>
 	join(home, 'Library', 'LaunchAgents', 'io.github.stickerdaniel.line-mcp.plist');
 
@@ -119,8 +125,9 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		const result = await runCli(['install', '--dry-run'], tempRoot(), { LINE_MCP_PORT: '47900' });
 
 		expect(result.code).toBe(0);
-		expect(result.launched).toBe(false);
-		expect(readdirSync(result.home).toSorted()).toEqual(['launchctl']);
+		// Not even a read-only launchctl call, let alone bootout or bootstrap.
+		expect(result.calls).toEqual([]);
+		expect(readdirSync(result.home)).toEqual([]);
 		const plist = result.stdout;
 		for (const setting of [
 			'<string>io.github.stickerdaniel.line-mcp</string>',
@@ -139,9 +146,10 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(plist).not.toContain('{{');
 		// The Node path must survive `brew upgrade`: never a versioned Cellar directory.
 		expect(plist).not.toMatch(/<string>[^<]*\/Cellar\/[^<]*<\/string>/);
-		expect(plist).toMatch(/would run: \S+ bootout gui\/\d+\/io\.github\.stickerdaniel\.line-mcp/);
-		expect(plist).toMatch(
-			/would run: \S+ bootstrap gui\/\d+ \S+\/Library\/LaunchAgents\/io\.github\.stickerdaniel\.line-mcp\.plist/
+		const launchctl = `${process.execPath} ${serviceRunner} launchctl`;
+		expect(plist).toContain(
+			`\nwould run: ${launchctl} bootout ${agent}\n` +
+				`would run: ${launchctl} bootstrap ${domain} ${plistIn(result.home)}\n`
 		);
 	});
 
@@ -157,8 +165,8 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 			`<string>${cli}</string>\n\t\t<string>daemon</string>`
 		);
 		expect(result.calls).toEqual([
-			`bootout ${agent}`,
-			`bootstrap gui/${userInfo().uid} ${plistIn(result.home)}`
+			['launchctl', 'bootout', agent],
+			['launchctl', 'bootstrap', domain, plistIn(result.home)]
 		]);
 	});
 
@@ -168,7 +176,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(install.code).toBe(1);
 		expect(install.stderr).toContain('npm i -g line-mcp-server');
 		expect(install.launched).toBe(false);
-		expect(readdirSync(install.home)).toEqual(['launchctl']);
+		expect(readdirSync(install.home)).toEqual([]);
 	});
 
 	it('still shows the LaunchAgent on a dry run from the npx cache, with the same advice', async () => {
@@ -254,9 +262,12 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 
 		expect(result.code).toBe(1);
 		expect(result.stdout).toContain(`ok   account: ${selfMid} on ANDROIDSECONDARY, active`);
-		expect(result.stdout).toContain('FAIL launch_agent');
+		expect(result.stdout).toContain(
+			`FAIL launch_agent: ${plistIn(home)} missing; run line-mcp install\n` +
+				'FAIL launch_agent_loaded: io.github.stickerdaniel.line-mcp is not loaded'
+		);
 		// Only the read-only `print`: doctor never boots the agent in or out.
-		expect(result.calls).toEqual([`print ${agent}`]);
+		expect(result.calls).toEqual([['launchctl', 'print', agent]]);
 	});
 
 	it.each([
@@ -281,7 +292,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 			const result = await uninstall(bootout);
 
 			expect([result.code, result.plistKept]).toEqual([0, false]);
-			expect(result.calls).toEqual([`bootout ${agent}`]);
+			expect(result.calls).toEqual([['launchctl', 'bootout', agent]]);
 		}
 	);
 
