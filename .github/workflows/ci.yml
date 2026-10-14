@@ -67,14 +67,16 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: bun run test
 
-  # The npm package as users install it. macOS also runs the real LaunchAgent
-  # through the installed bin (test/service-e2e.test.ts).
+  # The npm package as users install it, with the real LaunchAgent or systemd
+  # unit through the installed bin (test/service-e2e.test.ts).
   package-os:
     name: package (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         include:
+          - os: linux
+            runner: ubicloud-standard-2
           - os: macos
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
@@ -98,10 +100,18 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # ubicloud runners linger, but their jobs start without the
+      # XDG_RUNTIME_DIR that systemctl --user needs to reach the user manager.
       - name: Pack, install and test the package
+        shell: bash
         env:
           LINE_MCP_E2E_SERVICE: '1'
-        run: node scripts/smoke-pack.ts
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            XDG_RUNTIME_DIR="/run/user/$(id -u)"
+            export XDG_RUNTIME_DIR
+          fi
+          node scripts/smoke-pack.ts
 
   # Branch protection requires `verify` and `package`. These pass only when
   # every leg of their matrix passed; a failed, cancelled or skipped leg fails them.

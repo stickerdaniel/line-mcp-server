@@ -100,6 +100,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: linux
+            runner: ubicloud-standard-2
           - os: macos
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
