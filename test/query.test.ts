@@ -354,6 +354,10 @@ describe('query', () => {
 				message: 'A query is one SQL statement'
 			});
 		}
+		// node:sqlite finalizes it; the answer is an SQL error, not a stopped runner.
+		const unterminated = errorOf(await query('; /* unterminated'));
+		expect(unterminated.code).toBe('query_failed');
+		expect(unterminated.message).not.toContain('runner');
 		expect((await query('SELECT 1; -- done\n')).data.rows).toEqual([[1]]);
 	});
 

@@ -201,12 +201,15 @@ export class Guard {
 		// in words that differ between Node versions.
 		if (trailing.test(sql)) return failed('A query is one SQL statement');
 		let statement: StatementSync;
+		let source: string;
 		try {
 			statement = this.#db.prepare(sql);
+			// Throws for a statement node:sqlite finalized as empty, such as an
+			// unterminated comment.
+			source = statement.sourceSQL;
 		} catch (error) {
 			return this.#failure(error);
 		}
-		const source = statement.sourceSQL;
 		const rest = sql.slice(sql.indexOf(source) + source.length);
 		if (!trailing.test(rest)) return failed('A query is one SQL statement');
 		statement.setReturnArrays(true);
