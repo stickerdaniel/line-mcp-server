@@ -5,6 +5,7 @@ import { renderTime } from '../time.ts';
 import {
 	deniedFunctions,
 	ftsShadowTables,
+	maxColumns,
 	maxErrorBytes,
 	maxResultBytes,
 	maxRows,
@@ -196,26 +197,24 @@ export class Guard {
 			this.#phase = 'compile';
 		}
 		this.#denial = undefined;
+		// Only comments and semicolons: no statement, which node:sqlite reports
+		// in words that differ between Node versions.
+		if (trailing.test(sql)) return failed('A query is one SQL statement');
 		let statement: StatementSync;
-		let source: string;
 		try {
 			statement = this.#db.prepare(sql);
-			// A statement of only comments has no source: node:sqlite has already
-			// finalized it.
-			source = statement.sourceSQL;
 		} catch (error) {
-			if (this.#denial || !(error instanceof Error) || !/finalized/.test(error.message)) {
-				return this.#failure(error);
-			}
-			return failed('A query is one SQL statement');
+			return this.#failure(error);
 		}
+		const source = statement.sourceSQL;
 		const rest = sql.slice(sql.indexOf(source) + source.length);
-		if (trailing.test(source) || !trailing.test(rest)) {
-			return failed('A query is one SQL statement');
-		}
+		if (!trailing.test(rest)) return failed('A query is one SQL statement');
 		statement.setReturnArrays(true);
 		statement.setReadBigInts(true);
 		const columns = statement.columns().map((column) => column.name);
+		if (columns.length > maxColumns) {
+			return failed(`A result has at most ${maxColumns} columns`);
+		}
 		// The result object with no rows, as large as it gets: `truncated` included.
 		let bytes = Buffer.byteLength(JSON.stringify({ columns, rows: [], truncated: true }));
 		if (bytes > maxResultBytes) {
@@ -225,11 +224,20 @@ export class Guard {
 		try {
 			this.#phase = 'step';
 			for (const raw of statement.iterate() as Iterable<unknown[]>) {
-				const row = raw.map(jsonValue);
-				bytes += Buffer.byteLength(JSON.stringify(row)) + (rows.length > 0 ? 1 : 0);
-				if (rows.length === maxRows || bytes > maxResultBytes) {
-					return { ok: true, columns, rows, truncated: true };
+				if (rows.length === maxRows) return { ok: true, columns, rows, truncated: true };
+				// Each value counts as it is converted, so a wide row stops at the first
+				// value past the budget instead of being serialized whole.
+				const row: unknown[] = [];
+				let rowBytes = rows.length > 0 ? 3 : 2;
+				for (const value of raw) {
+					const converted = jsonValue(value);
+					rowBytes += Buffer.byteLength(JSON.stringify(converted)) + (row.length > 0 ? 1 : 0);
+					if (bytes + rowBytes > maxResultBytes) {
+						return { ok: true, columns, rows, truncated: true };
+					}
+					row.push(converted);
 				}
+				bytes += rowBytes;
 				rows.push(row);
 			}
 		} catch (error) {

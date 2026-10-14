@@ -253,7 +253,7 @@ The archive tools (`status`, `list_chats`, `list_unread`, `read_messages`, `sear
 
 **Runner.** node:sqlite cannot interrupt a statement, so SQL runs in a separate process, started on the first query and kept. Its main thread owns the 5 s limit and kills its own process at the limit or when its IPC channel closes, so a runaway statement never outlives the daemon; a worker thread holds the guard. The daemon runs one query at a time with at most 4 waiting (`query_busy` beyond), checks privacy before every start, starts a new runner when `TZ` changed, and kills the runner when a caller goes away. `McpServer.close()` ends it.
 
-**Results and logs.** A result has at most 200 rows and 64 KiB for the serialized `{ columns, rows, truncated }`; column names alone over 64 KiB fail. An error result stays under 4 KiB, SQLite's message cut to fit. That message can quote archive data, so it reaches only the tool result: every failure logs `tool_failed` with its code, and a denial logs `query_denied` with the action and an object from the surface's names, otherwise `other`.
+**Results and logs.** A result has at most 64 columns, 200 rows and 64 KiB for the serialized `{ columns, rows, truncated }`; column names alone over 64 KiB fail. Values count as they are converted, so a wide row stops at the budget instead of being serialized whole. An error result stays under 4 KiB, SQLite's message cut to fit. That message can quote archive data, so it reaches only the tool result: every failure logs `tool_failed` with its code, and a denial logs `query_denied` with the action and an object from the surface's names, otherwise `other`.
 
 ## Read state
 

@@ -159,14 +159,12 @@ export class QueryRunner {
 		if (!this.#starting) {
 			const starting = this.#start();
 			this.#starting = starting;
-			// A start whose callers all went away settles for nobody.
-			void starting.then(
-				() => {},
-				() => {}
-			);
-			void starting.finally(() => {
+			// Handles the rejection too: a start whose callers all went away settles
+			// for nobody, and an unhandled rejection would end the daemon.
+			const settled = () => {
 				if (this.#starting === starting) this.#starting = undefined;
-			});
+			};
+			void starting.then(settled, settled);
 		}
 		return this.#starting;
 	}

@@ -201,6 +201,10 @@ const runaway =
 const counting = (limit: number) =>
 	`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c LIMIT ${limit}) SELECT x FROM c`;
 
+/** One row of `count` constant columns. */
+const constants = (count: number) =>
+	`SELECT ${Array.from({ length: count }, (_, index) => `${index} AS c${index}`).join(', ')}`;
+
 /** Whether process `pid` still runs. */
 function alive(pid: number): boolean {
 	try {
@@ -539,6 +543,19 @@ describe('query', () => {
 		});
 	});
 
+	it('refuses a result of more than 64 columns', async () => {
+		const { query } = await served();
+
+		const widest = await query(constants(64));
+		const wider = await query(constants(65));
+
+		expect(widest.data.columns).toHaveLength(64);
+		expect(errorOf(wider)).toMatchObject({
+			code: 'query_failed',
+			message: 'A result has at most 64 columns'
+		});
+	});
+
 	it('cuts an error message so the error result stays under 4 KiB', async () => {
 		const { query } = await served();
 
@@ -615,6 +632,25 @@ describe('query', () => {
 		held.release();
 		await Promise.all(calls);
 		expect(outcomes.filter((outcome) => outcome.code === 'ok')).toHaveLength(5);
+	});
+
+	it('answers with an error when the runner cannot start, and keeps serving', async () => {
+		// The session opens first; only the runner's check fails.
+		let refuse = false;
+		const privacy: StatePrivacy = {
+			...modePrivacy,
+			database: (root, options) =>
+				refuse ? Promise.reject(new Error('not private')) : modePrivacy.database(root, options)
+		};
+		const { query } = await served({ privacy });
+		refuse = true;
+
+		// An unhandled rejection of the failed start would fail this file and end a daemon.
+		const first = await query('SELECT 1');
+		const second = await query('SELECT 1');
+
+		expect(first.isError).toBe(true);
+		expect(second.isError).toBe(true);
 	});
 
 	it('starts a new runner after the old one was killed', async () => {

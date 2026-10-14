@@ -12,6 +12,11 @@ export const maxRows = 200;
 export const maxResultBytes = 64 * 1024;
 /** Bytes of a failed result's JSON at most; SQLite's message is cut to fit. */
 export const maxErrorBytes = 4 * 1024;
+/**
+ * Columns one result has at most. node:sqlite hands over a whole row at once,
+ * so with values of at most 1 MiB this bounds the memory one row takes.
+ */
+export const maxColumns = 64;
 
 export interface Relation {
 	name: string;
