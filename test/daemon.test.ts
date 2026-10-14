@@ -139,6 +139,12 @@ const readBox = (id: string, marker: bigint) => ({
 	unreadCount: 1n
 });
 
+/** Waits until the worker finished the round it was in and ran two more; `rounds` counts started rounds. */
+async function idleRounds(rounds: () => number): Promise<void> {
+	const from = rounds();
+	await until(() => rounds() >= from + 3, 'worker rounds');
+}
+
 describe('daemon', () => {
 	it('stops all upstream calls when LINE revokes the session and keeps serving cached reads', async () => {
 		const root = tempRoot();
@@ -661,11 +667,7 @@ describe('daemon', () => {
 			((await callTool(daemon.mcp!.port, 'list_unread')).data.chats as { chat_id: string }[]).map(
 				(chat) => chat.chat_id
 			);
-		// Waits until the worker finished the round it was in and ran two more.
-		const idle = async () => {
-			const from = rounds;
-			await until(() => rounds >= from + 3, 'worker rounds');
-		};
+		const idle = () => idleRounds(() => rounds);
 
 		await until(() => attempts === 1, 'the first snapshot');
 		await idle();
@@ -696,6 +698,86 @@ describe('daemon', () => {
 		await idle();
 		clock += 60_000;
 		await until(() => attempts === 5, 'a retry 1 minute after it failed');
+	});
+
+	it('caps the backoff of a failing Talk read snapshot at 10 minutes', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		let clock = 1_900_000_000_000;
+		let attempts = 0;
+		let rounds = 0;
+		await start(
+			root,
+			{
+				sync: () => ({}),
+				getMessageBoxes: (value) => {
+					if (!field(value, 2, 5)) return { messageBoxes: [], hasNext: false };
+					attempts++;
+					throw talkError('ILLEGAL_ARGUMENT');
+				},
+				// Discovery runs every worker round here, so it counts the rounds.
+				getAllChatMids: () => {
+					rounds++;
+					return { memberChatMids: [] };
+				},
+				getContactsV2: () => ({ contacts: {} })
+			},
+			{ notify: () => {}, now: () => clock, discoveryIntervalMs: 0 }
+		);
+		const idle = () => idleRounds(() => rounds);
+
+		// The waits after five failures: 1, 2, 4 and 8 minutes, then 10 rather than 16.
+		for (const [attempt, minutes] of [
+			[1, 1],
+			[2, 2],
+			[3, 4],
+			[4, 8],
+			[5, 10]
+		] as const) {
+			await until(() => attempts === attempt, `attempt ${attempt}`);
+			await idle();
+			clock += minutes * 60_000 - 1;
+			await idle();
+			expect(attempts).toBe(attempt);
+			clock += 1;
+		}
+		await until(() => attempts === 6, 'a retry 10 minutes after the fifth failure');
+	});
+
+	it('takes the Talk read snapshot again when a reset arrives while it runs', async () => {
+		const root = tempRoot();
+		seedLive(root, selfMid, { authToken: 'token' });
+		const { promise: gate, resolve: open } = Promise.withResolvers<void>();
+		let snapshots = 0;
+		let syncs = 0;
+		let reset = false;
+		let resetSync: number | undefined;
+		await start(
+			root,
+			{
+				sync: () => {
+					syncs++;
+					if (!reset) return {};
+					reset = false;
+					resetSync = syncs;
+					return { fullSyncResponse: { nextRevision: 10n, reasons: [] } };
+				},
+				getMessageBoxes: async (value) => {
+					if (!field(value, 2, 5)) return { messageBoxes: [], hasNext: false };
+					if (++snapshots === 1) await gate;
+					return { messageBoxes: [readBox(otherMid, 10n)], hasNext: false };
+				}
+			},
+			// The clock stands still: only a reset makes the snapshot due again.
+			{ notify: () => {}, now: () => 1_900_000_000_000 }
+		);
+
+		await until(() => snapshots === 1, 'the first page pending');
+		reset = true;
+		// The Talk loop handles a step before it asks for the next one.
+		await until(() => resetSync !== undefined && syncs > resetSync, 'the reset handled');
+		open();
+		await until(() => snapshots === 2, 'a snapshot after the reset');
 	});
 
 	it('sweeps OpenChat once at start despite a recent sweep, and again after a stall', async () => {

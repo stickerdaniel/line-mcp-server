@@ -222,6 +222,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 	const readSnapshotRetryMs = 60 * 1000;
 	let readSnapshotDueAt = Number.NEGATIVE_INFINITY;
 	let readSnapshotBackoffMs = readSnapshotRetryMs;
+	/** Talk resets so far, and how many of them the last snapshot began after. */
+	let talkResets = 0;
+	let readSnapshotResets = 0;
 	// A phase LINE refuses for good is logged and retried on its own schedule;
 	// it must not keep the other phases, and backfill, from running. Resolves
 	// to whether the phase succeeded.
@@ -245,10 +248,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 			await phase('square_names', () => nameSquareSenders(context, pool));
 		}
 		// Due at start, every 10 minutes and after a Talk reset; a failed
-		// snapshot is due again after a backoff that a success resets.
-		if (now() >= readSnapshotDueAt) {
+		// snapshot is due again after a backoff that a success resets. A reset
+		// during a snapshot keeps it due.
+		if (readSnapshotResets !== talkResets || now() >= readSnapshotDueAt) {
 			const started = now();
-			if (await phase('read_state', () => snapshotTalkReadState(context, pool))) {
+			const resets = talkResets;
+			const succeeded = await phase('read_state', () => snapshotTalkReadState(context, pool));
+			readSnapshotResets = resets;
+			if (succeeded) {
 				readSnapshotDueAt = started + readSnapshotIntervalMs;
 				readSnapshotBackoffMs = readSnapshotRetryMs;
 			} else {
@@ -280,7 +287,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 					if (step.keysChanged) keysDue = true;
 					if (step.chats.length > 0) discoveryDue = true;
 					// A reset can skip read operations along with the rest.
-					if (step.reset) readSnapshotDueAt = Number.NEGATIVE_INFINITY;
+					if (step.reset) talkResets++;
 				},
 				// An idle long poll answers only after about 110 s; being held already
 				// shows there is no backlog.
