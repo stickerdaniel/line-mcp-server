@@ -167,6 +167,7 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		);
 		expect(result.calls).toEqual([
 			['launchctl', 'bootout', agent],
+			['launchctl', 'print', agent],
 			['launchctl', 'bootstrap', domain, plistIn(result.home)]
 		]);
 	});
