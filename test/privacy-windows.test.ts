@@ -190,7 +190,7 @@ describe.runIf(windows)('private state on Windows', { timeout: 60_000 }, () => {
 
 	it('prints fixes that PowerShell hands to icacls unchanged', () => {
 		const dir = tempRoot();
-		const path = join(dir, "it's $HOME (ü) x", 'line.db');
+		const path = join(dir, "it's O\u2019Connor\u2018\u201a\u201b $HOME (ü) x", 'line.db');
 		const user = 'S-1-5-21-1-2-3-1001';
 		const fixes = remedy(
 			{

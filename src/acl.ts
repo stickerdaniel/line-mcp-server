@@ -398,12 +398,15 @@ export function protectArgs(dir: string, user: string): string[] {
 /**
  * An icacls call to paste into PowerShell, the default Windows shell. Every
  * argument but a plain switch goes in single quotes, inside which PowerShell
- * expands nothing (`$`, parentheses), with an embedded `'` doubled.
+ * expands nothing (`$`, parentheses). PowerShell also ends such a string at
+ * a curly single quote (U+2018 to U+201B), so each of those is doubled too.
  */
 const command = (args: string[]) =>
 	[
 		'icacls',
-		...args.map((arg) => (/^\/[\w:]+$/.test(arg) ? arg : `'${arg.replaceAll("'", "''")}'`))
+		...args.map((arg) =>
+			/^\/[\w:]+$/.test(arg) ? arg : `'${arg.replace(/['\u2018-\u201b]/g, '$&$&')}'`
+		)
 	].join(' ');
 
 /**
