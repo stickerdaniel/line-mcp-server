@@ -50,20 +50,30 @@ function plain(path: string): string {
 	return path;
 }
 
+export interface Confined {
+	/** The entries from the profile down to the root, outermost first; they need not exist yet. */
+	chain: string[];
+	/**
+	 * The profile entry of `chain`, as written there, which alone gets the
+	 * anchor exception (`exposuresOf`); absent when the root is the profile
+	 * itself, which keeps the strict rule of a root.
+	 */
+	anchor?: string;
+}
+
 /**
- * The chain from the user's profile down to `root`, outermost first, of
- * entries that need not exist yet. Walking up from `root`, the first existing
- * entry whose real path is the profile's is the anchor; real paths make short
- * names and case compare equal. Every existing entry below the anchor must
- * not be a link (Node reports junctions as links), so containment by text is
- * containment on disk. Throws `insecure_directory` when no ancestor is the
- * profile or an entry is a link.
+ * Confines `root` to the user's profile. Walking up from `root`, the first
+ * existing entry whose real path is the profile's is the anchor; real paths
+ * make short names and case compare equal. Every existing entry below the
+ * anchor must not be a link (Node reports junctions as links), so containment
+ * by text is containment on disk. Throws `insecure_directory` when no
+ * ancestor is the profile or an entry is a link.
  */
-export function confine(root: string, home: string): string[] {
+export function confine(root: string, home: string): Confined {
 	const target = resolve(plain(root));
-	let anchor: string;
+	let profile: string;
 	try {
-		anchor = realpathSync.native(home);
+		profile = realpathSync.native(home);
 	} catch (error) {
 		throw new LineMcpError('insecure_directory', `Your user profile ${home} does not resolve`, {
 			cause: error
@@ -79,7 +89,9 @@ export function confine(root: string, home: string): string[] {
 				`${entry} is a link; line-mcp keeps its state in real directories inside your user profile`
 			);
 		}
-		if (stat && realpathSync.native(entry) === anchor) return chain;
+		if (stat && realpathSync.native(entry) === profile) {
+			return entry === target ? { chain } : { chain, anchor: entry };
+		}
 		const parent = dirname(entry);
 		if (parent === entry) {
 			throw new LineMcpError(
@@ -130,11 +142,17 @@ const system32 = (env: NodeJS.ProcessEnv) =>
 
 /**
  * Reads the owner and access list of each path in one PowerShell call and
- * judges them (`exposures`). Rejects with `insecure_directory` when the answer
- * is not exactly one well-formed line per path: a timeout, a non-zero exit,
- * Constrained Language Mode, an unreadable object or any other deviation.
+ * judges them (`exposuresOf`); only the path equal to `anchor`, the profile
+ * entry `confine` verified, gets the anchor exception. Rejects with
+ * `insecure_directory` when the answer is not exactly one well-formed line
+ * per path: a timeout, a non-zero exit, Constrained Language Mode, an
+ * unreadable object or any other deviation.
  */
-export async function checkPrivate(paths: string[], deps: AclDeps): Promise<Inspection> {
+export async function checkPrivate(
+	paths: string[],
+	deps: AclDeps,
+	anchor?: string
+): Promise<Inspection> {
 	const env: NodeJS.ProcessEnv = {};
 	// An inherited module path (from PowerShell 7, say) breaks Windows PowerShell.
 	for (const [name, value] of Object.entries(deps.env)) {
@@ -177,7 +195,10 @@ export async function checkPrivate(paths: string[], deps: AclDeps): Promise<Insp
 		if (exists === '1' && reparse === '1' && sddl === '-') {
 			return { path, exists: true, exposures: [{ kind: 'reparse' }] };
 		}
-		const exposures = exists === '1' && reparse === '0' ? exposuresOf(sddl!, user) : undefined;
+		const exposures =
+			exists === '1' && reparse === '0'
+				? exposuresOf(sddl!, user, { anchor: path === anchor })
+				: undefined;
 		if (!exposures) throw unverified(`PowerShell gave an unreadable access list for ${path}`);
 		return { path, exists: true, exposures };
 	});
@@ -189,8 +210,77 @@ const descriptorPattern = new RegExp(
 	String.raw`^O:(${sidPattern})(?:D:((?:P|AI|AR|NO_ACCESS_CONTROL)*)((?:\([^()]*\))*))?$`
 );
 const acePattern = new RegExp(
-	String.raw`^([A-Z]+);((?:[A-Z]{2})*);(?:0x[0-9a-fA-F]+|[A-Z]+);[^;]*;[^;]*;(${sidPattern})$`
+	String.raw`^([A-Z]+);((?:[A-Z]{2})*);(0x[0-9a-fA-F]+|[A-Z]+);[^;]*;[^;]*;(${sidPattern})$`
 );
+
+/** SDDL access right tokens and their bits. */
+const rightBits: Record<string, number> = {
+	GA: 0x10000000,
+	GR: 0x80000000,
+	GW: 0x40000000,
+	GX: 0x20000000,
+	RC: 0x20000,
+	SD: 0x10000,
+	WD: 0x40000,
+	WO: 0x80000,
+	RP: 0x10,
+	WP: 0x20,
+	CC: 0x1,
+	DC: 0x2,
+	LC: 0x4,
+	SW: 0x8,
+	LO: 0x80,
+	DT: 0x40,
+	CR: 0x100,
+	FA: 0x1f01ff,
+	FR: 0x120089,
+	FW: 0x120116,
+	FX: 0x1200a0,
+	KA: 0xf003f,
+	KR: 0x20019,
+	KW: 0x20006,
+	KX: 0x20019
+};
+
+/**
+ * The access mask of an ACE's rights field, from hex (leading zeros allowed)
+ * or right tokens; undefined for an unknown token or a value beyond 32 bits.
+ */
+function accessMask(rights: string): number | undefined {
+	if (/^0x[0-9a-fA-F]+$/.test(rights)) {
+		const digits = rights.slice(2).replace(/^0+/, '');
+		return digits.length <= 8 ? Number.parseInt(digits || '0', 16) : undefined;
+	}
+	if (!/^(?:[A-Z]{2})+$/.test(rights)) return undefined;
+	let mask = 0;
+	for (const token of rights.match(/../g)!) {
+		const bits = rightBits[token];
+		if (bits === undefined) return undefined;
+		mask = (mask | bits) >>> 0;
+	}
+	return mask;
+}
+
+/** FILE_TRAVERSE | SYNCHRONIZE: passage through a directory, and nothing else. */
+const traverse = 0x100020;
+
+/**
+ * Windows Server 2025 (build 26100) gives every profile directory one such
+ * entry: traverse for the app isolation capability isolatedWin32-userProfileMinimal.
+ * Accepted on the anchor alone: a capability SID (held by app-container
+ * tokens, not by accounts), no inheritance flag, and no right beyond
+ * `traverse`. Traverse grants passage only; every entry below is checked
+ * strictly.
+ */
+function anchorTraverse(sid: string, flags: string, rights: string): boolean {
+	const mask = accessMask(rights);
+	return (
+		sid.startsWith('S-1-15-3-') &&
+		flags === '' &&
+		mask !== undefined &&
+		(mask & ~traverse) >>> 0 === 0
+	);
+}
 
 /** SYSTEM, Administrators and the built-in Administrator account, as aliases and SIDs. */
 const trustedOwners: ReadonlySet<string> = new Set(['SY', 'BA', 'LA', 'S-1-5-18', 'S-1-5-32-544']);
@@ -206,9 +296,15 @@ const trustedGrantees: ReadonlySet<string> = new Set([...trustedOwners, 'CO', 'S
  * owner (the user, SYSTEM, Administrators), a DACL, only allow and deny
  * entries, and allow entries only for the user, SYSTEM, Administrators or
  * CREATOR OWNER. Inherit-only entries count, since children receive them.
- * Deny entries expose nothing.
+ * Deny entries expose nothing. With `anchor`, for the profile directory
+ * `confine` verified, the traverse entry Windows adds there passes too
+ * (`anchorTraverse`).
  */
-export function exposuresOf(sddl: string, user: string): Exposure[] | undefined {
+export function exposuresOf(
+	sddl: string,
+	user: string,
+	{ anchor = false }: { anchor?: boolean } = {}
+): Exposure[] | undefined {
 	const descriptor = descriptorPattern.exec(sddl);
 	if (!descriptor) return undefined;
 	const [, owner, flags, aces] = descriptor;
@@ -219,11 +315,15 @@ export function exposuresOf(sddl: string, user: string): Exposure[] | undefined 
 		return exposures;
 	}
 	for (const ace of aces!.match(/\([^()]*\)/g) ?? []) {
-		const [, type, aceFlags, sid] = acePattern.exec(ace.slice(1, -1)) ?? [];
+		const [, type, aceFlags, rights, sid] = acePattern.exec(ace.slice(1, -1)) ?? [];
 		if (!type) return undefined;
 		if (type === 'D') continue;
 		if (type !== 'A') exposures.push({ kind: 'ace_type', ace });
-		else if (sid !== user && !trustedGrantees.has(sid!)) {
+		else if (
+			sid !== user &&
+			!trustedGrantees.has(sid!) &&
+			!(anchor && anchorTraverse(sid!, aceFlags!, rights!))
+		) {
 			const inherited = aceFlags!.match(/../g)?.includes('ID') ?? false;
 			exposures.push({ kind: 'grant', ace, sid: sid!, inherited });
 		}

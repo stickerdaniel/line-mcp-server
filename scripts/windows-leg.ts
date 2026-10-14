@@ -49,9 +49,15 @@ async function seeded(root: string): Promise<string> {
 }
 
 /** Every exposure of `paths`, flattened; empty when all are private. */
-async function exposures(paths: string[]) {
-	const { objects } = await checkPrivate(paths, deps);
+async function exposures(paths: string[], anchor?: string) {
+	const { objects } = await checkPrivate(paths, deps, anchor);
 	return objects.flatMap((object) => object.exposures);
+}
+
+/** The exposures of the default root's chain, which Windows creates for every profile. */
+async function defaultChain() {
+	const { chain, anchor } = confine(stateRoot(process.env, 'win32'), homedir());
+	return await exposures(chain, anchor);
 }
 
 async function freePort(): Promise<number> {
@@ -74,6 +80,7 @@ async function refusesOpen(root: string, journal: string, message: string | RegE
 
 const phases: Record<string, () => Promise<Record<string, unknown>>> = {
 	async admin() {
+		assert.deepEqual(await defaultChain(), []);
 		const root = await seeded(local('line-mcp-leg-admin'));
 		writeFileSync(join(out, 'admin.json'), JSON.stringify({ database: databasePath(root) }));
 		return { root };
@@ -125,12 +132,18 @@ const phases: Record<string, () => Promise<Record<string, unknown>>> = {
 		};
 
 		await check('the default profile chain is private', async () => {
-			assert.deepEqual(await exposures(confine(stateRoot(process.env, 'win32'), homedir())), []);
+			assert.deepEqual(await defaultChain(), []);
 		});
 		await check('a fresh root ends private', async () => {
-			const chain = confine(prepared.fresh, homedir());
-			assert.deepEqual(await exposures([...chain, databasePath(prepared.fresh)]), []);
+			const { chain, anchor } = confine(prepared.fresh, homedir());
+			assert.deepEqual(await exposures([...chain, databasePath(prepared.fresh)], anchor), []);
 			await privacy.database(prepared.fresh);
+			const { checks, readable } = await privacy.diagnose(prepared.fresh);
+			assert.equal(readable, true);
+			assert.deepEqual(
+				checks.map(({ ok }) => ok),
+				[true]
+			);
 		});
 		await check('a root outside the profile fails before anything is written', async () => {
 			const outside = join(out, 'outside', 'line-mcp');

@@ -6,6 +6,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync
@@ -13,7 +14,7 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { join, parse } from 'node:path';
 import { describe, expect, it, onTestFinished } from 'vitest';
-import { type AclDeps, checkPrivate, confine } from '../src/acl.ts';
+import { type AclDeps, checkPrivate, confine, exposuresOf } from '../src/acl.ts';
 import { openDatabase, openReadOnly } from '../src/db.ts';
 import { databasePath, stateRoot } from '../src/paths.ts';
 import { statePrivacy } from '../src/privacy.ts';
@@ -26,8 +27,8 @@ const deps: AclDeps = { home: homedir(), env: process.env, runner: toolRunner({}
 const icacls = (...args: string[]) => execFileSync('icacls', args, { stdio: 'ignore' });
 
 /** The exposures of each path, as the real check reports them. */
-async function exposures(...paths: string[]) {
-	const { objects } = await checkPrivate(paths, deps);
+async function exposures(paths: string[], anchor?: string) {
+	const { objects } = await checkPrivate(paths, deps, anchor);
 	return objects.map((object) => object.exposures);
 }
 
@@ -47,12 +48,17 @@ describe.runIf(windows)('private state on Windows', { timeout: 60_000 }, () => {
 		await statePrivacy().database(root, { create: true });
 		openDatabase(root).close();
 
-		expect(await exposures(...defaultChain)).toEqual(defaultChain.map(() => []));
-		const chain = confine(root, homedir());
-		expect(await exposures(...chain, databasePath(root))).toEqual([...chain, root].map(() => []));
+		expect(defaultChain.anchor).toBe(homedir());
+		expect(await exposures(defaultChain.chain, defaultChain.anchor)).toEqual(
+			defaultChain.chain.map(() => [])
+		);
+		const { chain, anchor } = confine(root, homedir());
+		expect(await exposures([...chain, databasePath(root)], anchor)).toEqual(
+			[...chain, root].map(() => [])
+		);
 		// Protected: a grant on its parent does not reach it.
 		icacls(join(root, '..'), '/grant', '*S-1-1-0:(OI)(CI)(R)');
-		expect(await exposures(root, databasePath(root))).toEqual([[], []]);
+		expect(await exposures([root, databasePath(root)])).toEqual([[], []]);
 	});
 
 	it('confines short names and \\\\?\\ paths to the same chain', async () => {
@@ -70,8 +76,13 @@ describe.runIf(windows)('private state on Windows', { timeout: 60_000 }, () => {
 		);
 
 		expect(short.toLowerCase()).not.toBe(root.toLowerCase());
-		expect(confine(short, homedir()).at(-1)).toBe(short);
-		expect(confine(`\\\\?\\${root}`, homedir())).toEqual(confine(root, homedir()));
+		const confined = confine(root, homedir());
+		const shortened = confine(short, homedir());
+		expect(shortened.chain.at(-1)).toBe(short);
+		// The anchor stays the profile, however the input names it; the
+		// database check passes only because it keeps the anchor exception.
+		expect(realpathSync.native(shortened.anchor!)).toBe(realpathSync.native(homedir()));
+		expect(confine(`\\\\?\\${root}`, homedir())).toEqual(confined);
 		await statePrivacy().database(short);
 		await statePrivacy().database(`\\\\?\\${root}`);
 	});
@@ -83,7 +94,7 @@ describe.runIf(windows)('private state on Windows', { timeout: 60_000 }, () => {
 		writeFileSync(file, '');
 		icacls(file, '/grant', '*S-1-1-0:(R)');
 
-		expect(await exposures(root, file)).toEqual([
+		expect(await exposures([root, file])).toEqual([
 			[],
 			[{ kind: 'grant', ace: '(A;;FR;;;WD)', sid: 'WD', inherited: false }]
 		]);
@@ -110,7 +121,7 @@ describe.runIf(windows)('private state on Windows', { timeout: 60_000 }, () => {
 		await expect(
 			statePrivacy().database(join(junction, 'line-mcp'), { create: true })
 		).rejects.toThrow(`${junction} is a link`);
-		expect(await exposures(junction)).toEqual([[{ kind: 'reparse' }]]);
+		expect(await exposures([junction])).toEqual([[{ kind: 'reparse' }]]);
 		expect(readdirSync(to)).toEqual([]);
 	});
 
@@ -152,6 +163,30 @@ describe.runIf(windows)('private state on Windows', { timeout: 60_000 }, () => {
 		);
 		expect(readFileSync(journal, 'utf-8')).toBe('hot journal');
 	});
+
+	it.each(['0x100020', '0x00100020'])(
+		'reads the profile traverse entry as .NET prints it, from %s',
+		(rights) => {
+			const capability =
+				'S-1-15-3-65536-599108337-2355189375-1353122160-3480128286-3345335107-485756383-4087318168-230526575';
+			const profile = `O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)(A;;0x100020;;;${capability})`;
+			const { PSModulePath: _modules, ...env } = process.env;
+			// An in-memory descriptor: no access list on disk changes.
+			const printed = execFileSync(
+				'powershell.exe',
+				[
+					'-NoProfile',
+					'-Command',
+					"$s = [System.Security.AccessControl.DirectorySecurity]::new(); $s.SetSecurityDescriptorSddlForm($env:SDDL); [Console]::Out.Write($s.GetSecurityDescriptorSddlForm('Owner, Access'))"
+				],
+				{ env: { ...env, SDDL: profile.replace('0x100020', rights) }, encoding: 'utf-8' }
+			);
+
+			expect(printed).toBe(profile);
+			// It names no user, so any user SID gives the same answer.
+			expect(exposuresOf(printed, 'S-1-5-21-1-2-3-1001', { anchor: true })).toEqual([]);
+		}
+	);
 
 	it('keeps SQLite temporary storage in memory', async () => {
 		const root = join(tempRoot(), 'line-mcp');

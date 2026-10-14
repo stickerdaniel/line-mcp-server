@@ -24,6 +24,17 @@ const user = 'S-1-5-21-1-2-3-1001';
 const other = 'S-1-5-21-1-2-3-1002';
 /** What icacls leaves on a directory line-mcp created. */
 const protectedDir = `O:${user}D:PAI(A;OICI;FA;;;${user})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`;
+/** isolatedWin32-userProfileMinimal, which Windows Server 2025 lets traverse every profile. */
+const capability =
+	'S-1-15-3-65536-599108337-2355189375-1353122160-3480128286-3345335107-485756383-4087318168-230526575';
+const traverseAce = `(A;;0x100020;;;${capability})`;
+/** A profile directory on windows-latest, with `ace` in place of its traverse entry. */
+const profileDir = (ace = traverseAce, grantee = user) =>
+	`O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;${grantee})${ace}`;
+/** The one exposure an allow entry `ace` for `sid` gives. */
+const refused = (ace: string, sid = capability) => [
+	{ kind: 'grant', ace, sid, inherited: ace.includes(';ID;') }
+];
 
 interface Call {
 	tool: string;
@@ -122,6 +133,64 @@ describe('the private predicate', () => {
 		['text around it', ` O:${user}D:P`]
 	])('cannot read %s, so nothing counts as private', (_kind, sddl) => {
 		expect(exposuresOf(sddl, user)).toBeUndefined();
+	});
+});
+
+describe('the anchor exception', () => {
+	it.each([
+		['the administrator', profileDir(traverseAce, 'LA')],
+		['a standard user', profileDir()]
+	])('accepts the traverse entry on the profile of %s', (_kind, sddl) => {
+		expect(exposuresOf(sddl, user, { anchor: true })).toEqual([]);
+	});
+
+	it.each(['0x00100020', '0x0000000000100020', '0x20', '0x100000', 'WP'])(
+		'accepts traverse written as %s',
+		(rights) => {
+			expect(
+				exposuresOf(profileDir(`(A;;${rights};;;${capability})`), user, { anchor: true })
+			).toEqual([]);
+		}
+	);
+
+	it.each(['OI', 'CI', 'IO', 'NP', 'ID'])('refuses it with the %s flag', (flag) => {
+		const ace = `(A;${flag};0x100020;;;${capability})`;
+
+		expect(exposuresOf(profileDir(ace), user, { anchor: true })).toEqual(refused(ace));
+	});
+
+	it.each([
+		['FILE_ADD_FILE', '0x100022'],
+		['FILE_ADD_SUBDIRECTORY', '0x100024'],
+		['FILE_DELETE_CHILD', '0x100060'],
+		['DELETE', '0x110020'],
+		['WRITE_DAC', '0x140020'],
+		['WRITE_OWNER', '0x180020'],
+		['FILE_LIST_DIRECTORY', '0x100021'],
+		['read', '0x120089'],
+		['read as a token', 'FR'],
+		['execute as a token', 'FX'],
+		['two tokens', 'SWFX'],
+		['an unknown token', 'WPZZ'],
+		['an odd token', 'WPX'],
+		['a mask beyond 32 bits', '0x100100020']
+	])('refuses it with %s (%s)', (_right, rights) => {
+		const ace = `(A;;${rights};;;${capability})`;
+
+		expect(exposuresOf(profileDir(ace), user, { anchor: true })).toEqual(refused(ace));
+	});
+
+	it.each(['WD', 'BU', other, 'S-1-15-2-1'])('refuses traverse for %s, not a capability', (sid) => {
+		const ace = `(A;;0x100020;;;${sid})`;
+
+		expect(exposuresOf(profileDir(ace), user, { anchor: true })).toEqual(refused(ace, sid));
+	});
+
+	it('refuses the entry below the profile and a foreign owner on it', () => {
+		expect(exposuresOf(profileDir(), user)).toEqual(refused(traverseAce));
+		expect(exposuresOf(profileDir().replace('O:SY', `O:${other}`), user, { anchor: true })).toEqual(
+			[{ kind: 'owner', sid: other }]
+		);
 	});
 });
 
@@ -229,12 +298,16 @@ describe('confine', () => {
 		const home = profile();
 		mkdirSync(join(home, 'a'));
 
-		expect(confine(join(home, 'a', 'b', 'c'), home)).toEqual([
-			home,
-			join(home, 'a'),
-			join(home, 'a', 'b'),
-			join(home, 'a', 'b', 'c')
-		]);
+		expect(confine(join(home, 'a', 'b', 'c'), home)).toEqual({
+			chain: [home, join(home, 'a'), join(home, 'a', 'b'), join(home, 'a', 'b', 'c')],
+			anchor: home
+		});
+	});
+
+	it('gives no anchor when the root is the profile itself', () => {
+		const home = profile();
+
+		expect(confine(home, home)).toEqual({ chain: [home] });
 	});
 
 	it('refuses a root outside the profile', () => {
@@ -374,6 +447,65 @@ describe('the Windows state guard', () => {
 		);
 		expect(readFileSync(journal, 'utf-8')).toBe('hot journal');
 		expect(existsSync(`${databasePath(root)}-wal`)).toBe(false);
+	});
+
+	it('passes the traverse entry on the profile, and doctor names no remedy', async () => {
+		const home = profile();
+		const root = join(home, 'line-mcp');
+		const fake = fakeWindows((path) => (path === home ? profileDir() : protectedDir));
+		const privacy = statePrivacy('win32', depsFor(home, fake.runner));
+
+		await privacy.database(root, { create: true });
+		seedLive(root, selfMid, { authToken: 'token' });
+
+		expect(await privacy.diagnose(root)).toEqual({
+			checks: [{ name: 'privacy', ok: true, detail: expect.stringContaining(root) }],
+			readable: true
+		});
+	});
+
+	it.each([
+		['a directory below the profile', (root: string) => dirname(root)],
+		['the root', (root: string) => root],
+		['the database', databasePath]
+	])('refuses the traverse entry on %s, even first in a batch', async (_kind, exposed) => {
+		const home = profile();
+		const root = join(home, 'AppData', 'line-mcp');
+		mkdirSync(root, { recursive: true });
+		writeFileSync(databasePath(root), '');
+		const path = exposed(root);
+		const fake = fakeWindows((at) =>
+			at === home ? profileDir() : at === path ? `${protectedDir}${traverseAce}` : protectedDir
+		);
+		const deps = depsFor(home, fake.runner);
+
+		const { objects } = await checkPrivate([path, home], deps, home);
+
+		expect(objects.map(({ exposures }) => exposures)).toEqual([refused(traverseAce), []]);
+		await expect(statePrivacy('win32', deps).database(root)).rejects.toThrow(
+			`${path} is not private: it grants ${capability} access`
+		);
+	});
+
+	it('refuses the traverse entry when the root is the profile itself', async () => {
+		const home = profile();
+		const fake = fakeWindows((path) => (path === home ? profileDir() : protectedDir));
+
+		await expect(statePrivacy('win32', depsFor(home, fake.runner)).database(home)).rejects.toThrow(
+			`${home} is not private: it grants ${capability} access`
+		);
+	});
+
+	it('refuses the traverse entry on a directory it created', async () => {
+		const home = profile();
+		const root = join(home, 'line-mcp');
+		const fake = fakeWindows((path) =>
+			path === home ? profileDir() : path === root ? `${protectedDir}${traverseAce}` : protectedDir
+		);
+
+		await expect(
+			statePrivacy('win32', depsFor(home, fake.runner)).database(root, { create: true })
+		).rejects.toThrow(`${root} is not private: it grants ${capability} access`);
 	});
 
 	it('gives doctor one remedy per object that is not private, and reads no archive', async () => {

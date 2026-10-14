@@ -71,12 +71,13 @@ function windowsPrivacy(deps: AclDeps): StatePrivacy {
 	 * missing part of the chain is created private, top down, then checked.
 	 */
 	async function secure(target: string, files: string[], create: boolean): Promise<void> {
-		const chain = confine(target, deps.home);
-		const inspection = await checkPrivate([...chain, ...files], deps);
+		const { chain, anchor } = confine(target, deps.home);
+		const inspection = await checkPrivate([...chain, ...files], deps, anchor);
 		refuseExposed(inspection);
 		const missing = chain.filter((_, index) => !inspection.objects[index]!.exists);
 		if (!create || missing.length === 0) return;
 		for (const dir of missing) await createPrivate(dir, inspection.user, deps);
+		// New directories only, and never the anchor: no exception applies.
 		refuseExposed(await checkPrivate(missing, deps));
 	}
 	const directories = new Map<string, Promise<void>>();
@@ -97,10 +98,11 @@ function windowsPrivacy(deps: AclDeps): StatePrivacy {
 			const name = 'privacy';
 			let inspection: Inspection;
 			try {
-				const chain = confine(root, deps.home);
+				const { chain, anchor } = confine(root, deps.home);
 				inspection = await checkPrivate(
 					[...chain, ...databaseFiles(root), attachmentsDir(root)],
-					deps
+					deps,
+					anchor
 				);
 			} catch (error) {
 				return {
