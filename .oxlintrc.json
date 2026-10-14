@@ -8,5 +8,5 @@
 		"no-unused-vars": "error",
 		"no-console": "off"
 	},
-	"ignorePatterns": ["scratch/", "dist/"]
+	"ignorePatterns": ["scratch/", "dist/", "dist-leg/"]
 }

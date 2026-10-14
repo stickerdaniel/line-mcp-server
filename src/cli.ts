@@ -3,17 +3,17 @@ import { once } from 'node:events';
 import { existsSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { archiveStatus } from './archive.ts';
 import { type Daemon, startDaemon } from './daemon.ts';
-import { readAccount } from './db.ts';
+import { openReadOnly, readAccount } from './db.ts';
 import { doctor } from './doctor.ts';
 import { LineMcpError, mapError } from './errors.ts';
 import { acquireLock, lockInUse } from './lock.ts';
 import { runLogin } from './login-cli.ts';
 import { databasePath, stateRoot } from './paths.ts';
+import { statePrivacy } from './privacy.ts';
 import { probe } from './probe.ts';
 import { serviceFor } from './service/index.ts';
 import { selectNode, versionedLayout } from './service/node.ts';
@@ -84,7 +84,8 @@ async function runStatus(): Promise<number> {
 		console.log(JSON.stringify({ ...status, account: null }, null, 2));
 		return 0;
 	}
-	const db = new DatabaseSync(path, { readOnly: true });
+	await statePrivacy().database(root);
+	const db = openReadOnly(root);
 	try {
 		const keys = db
 			.prepare('SELECT key FROM line_kv')
@@ -240,6 +241,7 @@ async function runDoctor(): Promise<number> {
 	const checks = await doctor({
 		root: stateRoot(),
 		service: service(),
+		privacy: statePrivacy(),
 		env: process.env,
 		cli: cliPath
 	});

@@ -3,11 +3,12 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { request } from 'node:http';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach } from 'vitest';
 import { archiveStatus } from '../src/archive.ts';
 import { startMcpServer, type McpServer } from '../src/mcp/server.ts';
+import { attachmentsDir } from '../src/paths.ts';
+import { statePrivacy } from '../src/privacy.ts';
 import { openSession, type LogEntry, type Session } from '../src/session.ts';
 import { Pool } from '../src/sync/loop.ts';
 import {
@@ -56,11 +57,13 @@ export async function serve(
 	if (!options.root) seedLive(root, selfMid, { authToken: 'token' });
 	const upstream =
 		options.upstream ?? fakeUpstream({ getProfile: () => ({ mid: selfMid }), ...handlers }, fetch);
+	const privacy = statePrivacy();
 	const session = await openSession({
 		root,
 		lockPort: await freePort(),
 		createClient: upstream.createClient,
-		log: () => {}
+		log: () => {},
+		privacy
 	});
 	const logs: LogEntry[] = [];
 	const server = await startMcpServer(
@@ -69,7 +72,8 @@ export async function serve(
 			base: session.base,
 			selfMid,
 			pool: options.pool ?? new Pool(2),
-			attachments: join(root, 'attachments'),
+			attachments: attachmentsDir(root),
+			privacy,
 			...(options.maxAttachmentBytes ? { maxAttachmentBytes: options.maxAttachmentBytes } : {}),
 			status: () => archiveStatus(session.db),
 			log: (entry) => void logs.push(entry)

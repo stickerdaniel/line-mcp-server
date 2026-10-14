@@ -2,7 +2,15 @@
 // client gets a fetch that throws, and RPCs are answered by local handlers.
 import { Buffer } from 'node:buffer';
 import { createCipheriv } from 'node:crypto';
-import { copyFileSync, linkSync, mkdirSync, mkdtempSync, symlinkSync } from 'node:fs';
+import {
+	copyFileSync,
+	linkSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	symlinkSync
+} from 'node:fs';
 import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -268,6 +276,18 @@ export function snapshot(root: string): unknown {
 	} finally {
 		db.close();
 	}
+}
+
+/** Every file under `dir` with its bytes, to show that nothing changed. */
+export function tree(dir: string): Record<string, string> {
+	return Object.fromEntries(
+		readdirSync(dir, { recursive: true, withFileTypes: true })
+			.filter((entry) => entry.isFile())
+			.map((entry) => {
+				const path = join(entry.parentPath, entry.name);
+				return [path, readFileSync(path, 'base64')];
+			})
+	);
 }
 
 export function within<T>(ms: number, promise: Promise<T>, what: string): Promise<T> {

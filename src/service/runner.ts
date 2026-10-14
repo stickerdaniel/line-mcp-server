@@ -14,6 +14,8 @@ export interface ToolResult {
 export interface RunOptions {
 	/** How long the call may take before the runner kills it; 15 s by default. */
 	timeoutMs?: number;
+	/** The tool's whole environment; this process's by default. */
+	env?: NodeJS.ProcessEnv;
 }
 
 /** Runs the service manager's command-line tools; backends get it injected. */
@@ -39,7 +41,7 @@ export function toolRunner(env: NodeJS.ProcessEnv = process.env): ToolRunner {
 	const command = (tool: string, args: string[]): [string, string[]] =>
 		fake ? [process.execPath, [fake, parse(tool).name, ...args]] : [tool, args];
 	return {
-		run: (tool, args, { timeoutMs = defaultToolTimeoutMs } = {}) =>
+		run: (tool, args, { timeoutMs = defaultToolTimeoutMs, env: toolEnv } = {}) =>
 			new Promise((resolve) => {
 				const [file, argv] = command(tool, args);
 				// `detached` gives the tool its own session and process group;
@@ -47,7 +49,8 @@ export function toolRunner(env: NodeJS.ProcessEnv = process.env): ToolRunner {
 				const ownGroup = process.platform !== 'win32';
 				const child = spawn(file, argv, {
 					stdio: ['ignore', 'pipe', 'ignore'],
-					detached: ownGroup
+					detached: ownGroup,
+					env: toolEnv
 				});
 				let stdout = '';
 				let timedOut = false;

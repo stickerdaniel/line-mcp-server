@@ -22,6 +22,8 @@ export type ErrorCode =
 	| 'service_restore_failed'
 	| 'unsupported_path'
 	| 'invalid_state_root'
+	| 'insecure_directory'
+	| 'service_unsupported'
 	| 'qr_expired'
 	| 'invalid_node'
 	| 'npx_cache'

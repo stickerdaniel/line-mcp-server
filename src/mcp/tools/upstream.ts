@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from 'node:buffer';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { type FileHandle, open } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { type BaseClient, InternalError } from '@evex/linejs/base';
@@ -358,11 +358,11 @@ export const getAttachment = defineTool({
 		// media it counts the ciphertext with its HMAC trailer.
 		const announced = limit + (info.e2ee ? e2eeTrailerBytes : 0);
 		if (info.file_size !== null && info.file_size > announced) throw tooLarge(limit);
-		mkdirSync(context.attachments, { recursive: true, mode: 0o700 });
-		chmodSync(context.attachments, 0o700);
+		await context.privacy.directory(context.attachments);
 		const stem = cacheStem(args.service, found.messageId);
 		const cached = findCached(context.attachments, stem);
 		if (cached) {
+			await context.privacy.file(cached);
 			return { message: described, attachment: await named(), path: cached, cached: true };
 		}
 		// Written under a temporary name, so a reader never sees half a file.
@@ -380,6 +380,7 @@ export const getAttachment = defineTool({
 				plainExtension(info.file_name) ?? plainExtension(file.name) ?? sniffExtension(file.head);
 			const path = join(context.attachments, `${stem}${random}${extension ?? ''}`);
 			renameSync(partial, path);
+			await context.privacy.file(path);
 			return {
 				message: described,
 				attachment: {

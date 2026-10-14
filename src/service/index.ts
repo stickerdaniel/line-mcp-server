@@ -3,6 +3,7 @@ import { LineMcpError, mapError } from '../errors.ts';
 import { launchd } from './launchd.ts';
 import type { ToolRunner } from './runner.ts';
 import { systemd } from './systemd.ts';
+import { unsupported } from './unsupported.ts';
 
 export interface ServicePaths {
 	/** The definition file the service manager reads. */
@@ -34,6 +35,11 @@ export type Restore = () => Promise<void>;
  * said so.
  */
 export interface Service {
+	/**
+	 * False for a platform without a backend yet (Windows), where every
+	 * mutation rejects with `service_unsupported` and nothing is installed.
+	 */
+	readonly supported: boolean;
 	/** The manager's name for the service, as messages show it. */
 	readonly label: string;
 	/** Doctor's check for the definition. */
@@ -63,10 +69,11 @@ export interface Service {
 
 const backends: Partial<Record<NodeJS.Platform, (deps: ServiceDeps) => Service>> = {
 	darwin: launchd,
-	linux: systemd
+	linux: systemd,
+	win32: unsupported
 };
 
-/** The backend for `platform`; until Windows gets its own, launchd's. */
+/** The backend for `platform`; launchd's on a platform without one of its own. */
 export function serviceFor(platform: NodeJS.Platform, deps: ServiceDeps): Service {
 	return (backends[platform] ?? launchd)(deps);
 }

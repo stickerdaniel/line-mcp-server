@@ -1,11 +1,12 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { archiveStatus } from './archive.ts';
-import { readAccount, schemaVersion } from './db.ts';
+import { openReadOnly, readAccount, schemaVersion } from './db.ts';
 import { mapError } from './errors.ts';
 import { lockInUse } from './lock.ts';
 import { databasePath } from './paths.ts';
+import type { StatePrivacy } from './privacy.ts';
 import type { Service } from './service/index.ts';
 import { nodeVersion, selectNode, supportedNode, versionedLayout } from './service/node.ts';
 import { device } from './session.ts';
@@ -18,12 +19,12 @@ export interface Check {
 	detail: string;
 }
 
-const mode = (path: string) => statSync(path).mode & 0o777;
-
 /** Local checks only: nothing here calls LINE or changes the service. */
 export async function doctor(input: {
 	root: string;
 	service: Service;
+	/** Checks the state before the archive is read (file modes, or Windows access lists). */
+	privacy: StatePrivacy;
 	env: NodeJS.ProcessEnv;
 	/** The CLI entry `install` writes into the service definition. */
 	cli: string;
@@ -63,6 +64,10 @@ export async function doctor(input: {
 		checks.push({ name: 'fts5_trigram', ok: false, detail: 'SQLite lacks FTS5 trigram' });
 	}
 
+	// Before the archive exists too: a first login on Windows refuses an
+	// exposed state root and points here.
+	const privacy = await input.privacy.diagnose(input.root);
+	checks.push(...privacy.checks);
 	const path = databasePath(input.root);
 	if (!existsSync(path)) {
 		checks.push({
@@ -70,64 +75,15 @@ export async function doctor(input: {
 			ok: false,
 			detail: `${path} does not exist; run line-mcp login`
 		});
-	} else {
-		checks.push({
-			name: 'permissions',
-			ok: mode(input.root) === 0o700 && mode(path) === 0o600,
-			detail: `state root ${mode(input.root).toString(8)}, database ${mode(path).toString(8)}`
-		});
-		const db = new DatabaseSync(path, { readOnly: true });
-		try {
-			const { user_version: version } = db.prepare('PRAGMA user_version').get() as {
-				user_version: number;
-			};
-			checks.push({
-				name: 'schema',
-				ok: version === schemaVersion,
-				detail: `version ${version} of ${schemaVersion}${version < schemaVersion ? ' (the daemon migrates on start)' : ''}`
-			});
-			const account = readAccount(db);
-			checks.push({
-				name: 'account',
-				ok: account?.device === device && account.authState === 'active',
-				detail: account
-					? `${account.mid} on ${account.device}, ${account.authState}`
-					: 'no account bound; run line-mcp login'
-			});
-			if (version >= 2) {
-				const status = archiveStatus(db);
-				checks.push({
-					name: 'sync',
-					ok: status.health === 'online' || status.health === 'catching_up',
-					detail:
-						`health ${status.health}, talk synced ${time(status.talkSyncedAt)}, ` +
-						`square synced ${time(status.squareSyncedAt)}, ` +
-						`${status.unreconciledGaps} unreconciled gap(s)`
-				});
-			}
-		} finally {
-			db.close();
-		}
+	} else if (privacy.readable) {
+		// On Windows an archive that is not private is not read.
+		checks.push(...archiveChecks(input.root));
 	}
 
 	const { service } = input;
-	const { definition } = service.paths;
-	const installed = existsSync(definition) ? readFileSync(definition, 'utf-8') : undefined;
-	try {
-		const expected = service.render({ node, cli: input.cli, env: input.env });
-		checks.push({
-			name: service.check,
-			ok: installed === expected,
-			detail:
-				installed === undefined
-					? `${definition} missing; run line-mcp install`
-					: installed === expected
-						? `${definition} matches this installation`
-						: `${definition} differs from this installation; run line-mcp install`
-		});
-	} catch (error) {
-		checks.push({ name: service.check, ok: false, detail: mapError(error, 'doctor').message });
-	}
+	// Without a backend there is no definition to compare; diagnose says so.
+	if (service.supported)
+		checks.push(definitionCheck(service, { node, cli: input.cli, env: input.env }));
 	checks.push(...(await service.diagnose()));
 	const held = await lockInUse();
 	checks.push({
@@ -137,6 +93,68 @@ export async function doctor(input: {
 			? 'the lock port is held (daemon or login running)'
 			: 'no process holds the lock port'
 	});
+	return checks;
+}
+
+/** Whether the service definition on disk is the one `install` would write now. */
+function definitionCheck(
+	service: Service,
+	input: { node: string; cli: string; env: NodeJS.ProcessEnv }
+): Check {
+	const { definition } = service.paths;
+	const installed = existsSync(definition) ? readFileSync(definition, 'utf-8') : undefined;
+	try {
+		const expected = service.render(input);
+		return {
+			name: service.check,
+			ok: installed === expected,
+			detail:
+				installed === undefined
+					? `${definition} missing; run line-mcp install`
+					: installed === expected
+						? `${definition} matches this installation`
+						: `${definition} differs from this installation; run line-mcp install`
+		};
+	} catch (error) {
+		return { name: service.check, ok: false, detail: mapError(error, 'doctor').message };
+	}
+}
+
+/** Schema, account and sync health, read from the archive in `root`. */
+function archiveChecks(root: string): Check[] {
+	const checks: Check[] = [];
+	const db = openReadOnly(root);
+	try {
+		const { user_version: version } = db.prepare('PRAGMA user_version').get() as {
+			user_version: number;
+		};
+		checks.push({
+			name: 'schema',
+			ok: version === schemaVersion,
+			detail: `version ${version} of ${schemaVersion}${version < schemaVersion ? ' (the daemon migrates on start)' : ''}`
+		});
+		const account = readAccount(db);
+		checks.push({
+			name: 'account',
+			ok: account?.device === device && account.authState === 'active',
+			detail: account
+				? `${account.mid} on ${account.device}, ${account.authState}`
+				: 'no account bound; run line-mcp login'
+		});
+		if (version >= 2) {
+			const status = archiveStatus(db);
+			checks.push({
+				name: 'sync',
+				ok: status.health === 'online' || status.health === 'catching_up',
+				detail:
+					`health ${status.health}, talk synced ${time(status.talkSyncedAt)}, ` +
+					`square synced ${time(status.squareSyncedAt)}, ` +
+					`${status.unreconciledGaps} unreconciled gap(s)`
+			});
+		}
+	} finally {
+		db.close();
+	}
 	return checks;
 }
 

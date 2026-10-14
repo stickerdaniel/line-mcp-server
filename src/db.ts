@@ -150,7 +150,19 @@ const migrations = [
 
 export const schemaVersion = migrations.length;
 
-/** Opens the archive with a private directory (0700) and private files (0600). */
+/**
+ * On Windows SQLite would put temporary tables and sort spills into files
+ * under TEMP, outside the checked state root; there they stay in memory.
+ */
+export function keepTempInMemory(db: DatabaseSync): DatabaseSync {
+	if (process.platform === 'win32') db.exec('PRAGMA temp_store = MEMORY');
+	return db;
+}
+
+/**
+ * Opens the archive with a private directory (0700) and private files (0600).
+ * On Windows the caller has run `StatePrivacy.database` first.
+ */
 export function openDatabase(root: string): DatabaseSync {
 	mkdirSync(root, { recursive: true, mode: 0o700 });
 	chmodSync(root, 0o700);
@@ -160,6 +172,7 @@ export function openDatabase(root: string): DatabaseSync {
 	chmodSync(path, 0o600);
 	const db = new DatabaseSync(path);
 	try {
+		keepTempInMemory(db);
 		db.exec('PRAGMA journal_mode = WAL');
 		// FULL makes a committed token write survive power loss, not only a crash.
 		db.exec('PRAGMA synchronous = FULL');
@@ -170,6 +183,15 @@ export function openDatabase(root: string): DatabaseSync {
 		throw error;
 	}
 	return db;
+}
+
+/**
+ * Opens an existing archive read-only (status, doctor), which neither creates
+ * nor migrates anything. On Windows the caller has run
+ * `StatePrivacy.database` first.
+ */
+export function openReadOnly(root: string): DatabaseSync {
+	return keepTempInMemory(new DatabaseSync(databasePath(root), { readOnly: true }));
 }
 
 export function migrate(db: DatabaseSync): void {

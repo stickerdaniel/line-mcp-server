@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join, posix } from 'node:path';
+import { join, posix, win32 } from 'node:path';
 
 /**
  * An XDG base directory from `env`, or `fallback` under `home`. The XDG spec
@@ -17,8 +17,10 @@ export function xdgDir(
 
 /**
  * State root; `LINE_MCP_HOME` overrides it so tests never touch the real
- * archive. Linux keeps it under `$XDG_DATA_HOME/line-mcp`; every other OS
- * under `~/Library/Application Support/line-mcp`.
+ * archive. Linux keeps it under `$XDG_DATA_HOME/line-mcp`; Windows under
+ * `%LOCALAPPDATA%\line-mcp`, or `<home>\AppData\Local\line-mcp` when that is
+ * not an absolute path; every other OS under
+ * `~/Library/Application Support/line-mcp`.
  */
 export function stateRoot(
 	env: NodeJS.ProcessEnv = process.env,
@@ -29,11 +31,28 @@ export function stateRoot(
 	if (platform === 'linux') {
 		return posix.join(xdgDir(env, 'XDG_DATA_HOME', home, '.local/share'), 'line-mcp');
 	}
+	if (platform === 'win32') {
+		const local = env.LOCALAPPDATA;
+		// A drive and its root, or a UNC path: `\dir` and `C:dir` depend on the current directory.
+		const absolute = local !== undefined && /^(?:[a-z]:[\\/]|[\\/]{2})/i.test(local);
+		return win32.join(absolute ? local : win32.join(home, 'AppData', 'Local'), 'line-mcp');
+	}
 	return join(home, 'Library', 'Application Support', 'line-mcp');
 }
 
 export function databasePath(root: string): string {
 	return join(root, 'line.db');
+}
+
+/** The database and every file SQLite keeps beside it. */
+export function databaseFiles(root: string): string[] {
+	const path = databasePath(root);
+	return [path, `${path}-wal`, `${path}-shm`, `${path}-journal`];
+}
+
+/** The private cache `get_attachment` downloads into. */
+export function attachmentsDir(root: string): string {
+	return join(root, 'attachments');
 }
 
 // `../service` from both `src/paths.ts` and the bundled `dist/cli.js`.

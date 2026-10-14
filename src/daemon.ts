@@ -1,5 +1,4 @@
 import { execFile } from 'node:child_process';
-import { join } from 'node:path';
 import {
 	type ArchiveStatus,
 	archiveStatus,
@@ -14,7 +13,8 @@ import {
 import { transaction } from './db.ts';
 import { LineMcpError, mapError } from './errors.ts';
 import { type McpServer, startMcpServer } from './mcp/server.ts';
-import { stateRoot } from './paths.ts';
+import { attachmentsDir, stateRoot } from './paths.ts';
+import { statePrivacy } from './privacy.ts';
 import { type Log, openSession, type Session, type SessionOptions, stderrLog } from './session.ts';
 import {
 	backfillRound,
@@ -123,7 +123,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 		log(entry);
 		if (entry.event === 'session_state') update();
 	};
-	const session = await openSession({ ...options, log: sessionLog });
+	// One guard for the process, so the attachment cache is checked once.
+	const privacy = options.privacy ?? statePrivacy();
+	const session = await openSession({ ...options, privacy, log: sessionLog });
 	const { db } = session;
 	// The own chat (Keep Memo) is named after the profile the session restored.
 	const ownName = session.base.profile?.displayName;
@@ -188,7 +190,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 					base: session.base,
 					selfMid: session.account.mid,
 					pool,
-					attachments: join(options.root ?? stateRoot(), 'attachments'),
+					attachments: attachmentsDir(options.root ?? stateRoot()),
+					privacy,
 					status,
 					log
 				},

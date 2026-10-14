@@ -7,7 +7,7 @@ import { LineMcpError } from '../src/errors.ts';
 import { type Service, serviceFor, withServiceStopped } from '../src/service/index.ts';
 import { versionedLayout } from '../src/service/node.ts';
 import { type ToolResult, type ToolRunner, toolRunner } from '../src/service/runner.ts';
-import { tempRoot, within } from './fake-line.ts';
+import { tempRoot, tree, within } from './fake-line.ts';
 
 const runner = toolRunner({
 	LINE_MCP_SERVICE_RUNNER: fileURLToPath(new URL('fixtures/service-runner.ts', import.meta.url))
@@ -1040,6 +1040,72 @@ describe('systemd', () => {
 				}
 			]);
 		});
+	});
+});
+
+/** A home with a stray LaunchAgent and systemd unit, and a runner that only records. */
+function stray() {
+	const home = tempRoot();
+	for (const definition of [
+		posix.join(home, 'Library', 'LaunchAgents', 'io.github.stickerdaniel.line-mcp.plist'),
+		unitIn(home)
+	]) {
+		mkdirSync(posix.dirname(definition), { recursive: true });
+		writeFileSync(definition, 'stray');
+	}
+	const calls: string[][] = [];
+	const recording: ToolRunner = {
+		run: async (tool, args) => {
+			calls.push([tool, ...args]);
+			return exit(0);
+		},
+		describe: (tool, args) => [tool, ...args].join(' ')
+	};
+	return { home, calls, service: serviceFor('win32', { home, env: {}, runner: recording }) };
+}
+
+describe('a platform without a backend (Windows)', () => {
+	it('refuses every change before it writes, prints or runs anything', async () => {
+		const { home, calls, service } = stray();
+		const before = tree(home);
+		const log = vi.spyOn(console, 'log');
+		onTestFinished(() => log.mockRestore());
+		const unsupported = expect.objectContaining({
+			code: 'service_unsupported',
+			message: expect.stringContaining('run line-mcp daemon in the foreground')
+		});
+
+		expect(service.supported).toBe(false);
+		expect(() => service.render({ node: '/usr/bin/node', cli: '/cli.js', env: {} })).toThrow(
+			unsupported
+		);
+		for (const change of [
+			() => service.install('definition'),
+			() => service.install('definition', { dryRun: true }),
+			() => service.uninstall(),
+			() => service.uninstall({ dryRun: true }),
+			() => service.start()
+		]) {
+			await expect(change()).rejects.toEqual(unsupported);
+		}
+
+		expect(service.installed()).toBe(false);
+		expect(await service.diagnose()).toEqual([
+			{ name: 'service', ok: true, warning: true, detail: expect.stringContaining('Windows') }
+		]);
+		expect(calls).toEqual([]);
+		expect(log).not.toHaveBeenCalled();
+		expect(tree(home)).toEqual(before);
+	});
+
+	it('runs a login without stopping or restoring anything', async () => {
+		const { calls, service } = stray();
+
+		expect(await withServiceStopped(service, async () => 'logged in')).toBe('logged in');
+		await (
+			await service.stop()
+		)();
+		expect(calls).toEqual([]);
 	});
 });
 
