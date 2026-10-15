@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   detect:
-    runs-on: ubicloud-standard-2
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       release: ${{ steps.plan.outputs.release }}
@@ -52,7 +52,7 @@ jobs:
   build:
     needs: detect
     if: needs.detect.outputs.release == 'true'
-    runs-on: ubicloud-standard-2
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
@@ -101,7 +101,7 @@ jobs:
       matrix:
         include:
           - os: linux
-            runner: ubicloud-standard-2
+            runner: ubuntu-latest
           - os: macos
             runner: macos-latest
           - os: windows
@@ -190,7 +190,7 @@ jobs:
   # Runs no repository code: it holds the only write token.
   release:
     needs: [detect, publish-npm]
-    runs-on: ubicloud-standard-2
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write
