@@ -1,7 +1,7 @@
 import type { Message } from '@evex/linejs-types';
 import type { NestedArray } from '@evex/linejs/thrift';
 import { describe, expect, it } from 'vitest';
-import { readMessages, readState, stateKeys } from '../src/archive.ts';
+import { readState, stateKeys } from '../src/archive.ts';
 import {
 	backfillKey,
 	backfillRound,
@@ -10,6 +10,7 @@ import {
 } from '../src/sync/backfill.ts';
 import { Pool } from '../src/sync/loop.ts';
 import { groupMid, otherMid, talkError } from './fake-line.ts';
+import { chatMessages } from './stored.ts';
 import { field, syncFixture, textMessage } from './sync-fixture.ts';
 
 const roomMid = `r${'9'.repeat(32)}`;
@@ -69,11 +70,10 @@ describe('backfill', () => {
 			'upstream:NOT_A_MEMBER'
 		]);
 		expect(endIds).toEqual([9_223_372_036_854_775_806n, 9_223_372_036_854_775_805n]);
-		expect(
-			readMessages(fixture.session.db, { service: 'talk', chatId: otherMid }).map(
-				(m) => m.messageId
-			)
-		).toEqual(['9223372036854775806', '9223372036854775805']);
+		expect(chatMessages(fixture.session.db, 'talk', otherMid).map((m) => m.messageId)).toEqual([
+			'9223372036854775806',
+			'9223372036854775805'
+		]);
 	});
 
 	it('completes a chat whose older page holds only the cursor message and newer ones', async () => {

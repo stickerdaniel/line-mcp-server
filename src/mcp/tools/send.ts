@@ -382,7 +382,7 @@ async function planSquare(context: ServedContext, send: Send): Promise<Plan> {
 export const sendMessage = defineTool({
 	name: 'send_message',
 	description:
-		'Sends a message from the connected LINE account: text, or a local image (JPEG, PNG, GIF) or file, optionally as a reply. Talk messages are end-to-end encrypted wherever the chat is. In OpenChat, a reply to a thread message goes into its thread; media cannot go into a thread or be a reply there. Needs an idempotency_key: a retry with the same key never sends twice. A result with state unknown means LINE may have sent it; check read_messages before anything else.',
+		'Sends a message from the connected LINE account: text, or a local image (JPEG, PNG, GIF) or file, optionally as a reply. Talk messages are end-to-end encrypted wherever the chat is. In OpenChat, a reply to a thread message goes into its thread; media cannot go into a thread or be a reply there. Needs an idempotency_key: a retry with the same key never sends twice. A result with state unknown means LINE may have sent it; check the newest messages of the chat with query before anything else.',
 	upstream: true,
 	mutating: true,
 	input: z.object({
@@ -409,7 +409,7 @@ export const sendMessage = defineTool({
 			.min(1)
 			.max(100)
 			.optional()
-			.describe('Send into this OpenChat thread (thread_id from read_messages)')
+			.describe("Send into this OpenChat thread (a message's thread_id from query)")
 	}),
 	run: async (args, context, signal) => {
 		const kind = chatKind(args.service, args.chat_id);

@@ -2,7 +2,7 @@ import { InternalError } from '@evex/linejs/base';
 import type { SquareEvent } from '@evex/linejs-types';
 import type { NestedArray } from '@evex/linejs/thrift';
 import { describe, expect, it } from 'vitest';
-import { listGaps, openGap, readMessages, readState, writeState } from '../src/archive.ts';
+import { listGaps, openGap, readState, writeState } from '../src/archive.ts';
 import { transaction } from '../src/db.ts';
 import { type BackfillState, backfillRound, backfillStep } from '../src/sync/backfill.ts';
 import { historyStepMs, Pool } from '../src/sync/loop.ts';
@@ -20,6 +20,7 @@ import {
 	targetKey
 } from '../src/sync/square.ts';
 import { type Handler, talkError } from './fake-line.ts';
+import { chatMessages } from './stored.ts';
 import { field, squareChat, squareDiscovery, squareEvent, syncFixture } from './sync-fixture.ts';
 
 // FetchSquareChatEventsRequest fields: subscriptionId 1, squareChatMid 2,
@@ -33,7 +34,8 @@ const request = (value: NestedArray) => ({
 });
 
 const texts = (fixture: Awaited<ReturnType<typeof syncFixture>>, threadId?: string) =>
-	readMessages(fixture.session.db, { service: 'square', chatId: squareChat, threadId })
+	chatMessages(fixture.session.db, 'square', squareChat)
+		.filter((m) => threadId === undefined || m.threadId === threadId)
 		.map((m) => m.text)
 		.toSorted();
 
@@ -322,7 +324,7 @@ describe('Square chat events', () => {
 
 		expect(readState<BackfillState>(db, key)?.stopReason).toBe('complete');
 		expect(
-			readMessages(db, { service: 'square', chatId: squareChat, limit: 100 })
+			chatMessages(db, 'square', squareChat)
 				.map((m) => m.messageId)
 				.toSorted()
 		).toEqual(history.map((_, index) => `h${String(index + 1).padStart(2, '0')}`));
@@ -1152,10 +1154,7 @@ describe('Square chat events', () => {
 			syncToken: 'thread-1'
 		});
 		expect(
-			readMessages(fixture.session.db, { service: 'square', chatId: squareChat }).map((m) => [
-				m.text,
-				m.threadId
-			])
+			chatMessages(fixture.session.db, 'square', squareChat).map((m) => [m.text, m.threadId])
 		).toEqual(
 			expect.arrayContaining([
 				['thread root', null],
@@ -1175,9 +1174,9 @@ describe('Square chat events', () => {
 
 		await syncSquareOnce(fixture.context);
 
-		expect(
-			readMessages(fixture.session.db, { service: 'square', chatId: squareChat })
-		).toMatchObject([{ messageId: 's1', text: null, unsent: true }]);
+		expect(chatMessages(fixture.session.db, 'square', squareChat)).toMatchObject([
+			{ messageId: 's1', text: null, unsent: true }
+		]);
 	});
 
 	it('keeps a joined square without a confirmed chat as an open gap until it is covered', async () => {

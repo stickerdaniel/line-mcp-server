@@ -34,7 +34,6 @@ export type ErrorCode =
 	| 'daemon_unreachable'
 	| 'request_failed'
 	| 'invalid_argument'
-	| 'invalid_cursor'
 	| 'not_found'
 	| 'message_unsent'
 	| 'no_attachment'

@@ -1,18 +1,13 @@
 import type { NestedArray } from '@evex/linejs/thrift';
 import { describe, expect, it } from 'vitest';
-import {
-	listChanges,
-	readMessages,
-	readState,
-	searchMessages,
-	talkSyncedAtKey
-} from '../src/archive.ts';
+import { readState, talkSyncedAtKey } from '../src/archive.ts';
 import { backoffMs, runLoop, type Sleep } from '../src/sync/loop.ts';
 import { openDatabase } from '../src/db.ts';
 import { createClient } from '../src/session.ts';
 import { SqliteStorage } from '../src/storage.ts';
 import { readTalkCursor, runTalkLoop, syncTalkOnce, talkDelay } from '../src/sync/talk.ts';
 import { otherMid, tempRoot } from './fake-line.ts';
+import { changedSince, chatMessages, indexed } from './stored.ts';
 import { field, receive, syncFixture, textMessage } from './sync-fixture.ts';
 
 const first = textMessage('100000000000000001', 'first');
@@ -51,9 +46,10 @@ describe('Talk sync commit', () => {
 		session.db.exec('DROP TRIGGER fail');
 		await syncTalkOnce(context);
 		expect(readTalkCursor(session.db).revision).toBe('12');
-		expect(
-			readMessages(session.db, { service: 'talk', chatId: otherMid }).map((m) => m.text)
-		).toEqual(['second', 'first']);
+		expect(chatMessages(session.db, 'talk', otherMid).map((m) => m.text)).toEqual([
+			'second',
+			'first'
+		]);
 	});
 
 	it('neither duplicates nor loses messages when a commit dies after the messages', async () => {
@@ -64,7 +60,7 @@ describe('Talk sync commit', () => {
 			BEGIN SELECT RAISE(ABORT, 'crash'); END`);
 
 		await expect(syncTalkOnce(context)).rejects.toThrow();
-		expect(listChanges(session.db, { afterSeq: 0 })).toEqual([]);
+		expect(changedSince(session.db)).toEqual([]);
 
 		session.db.exec('DROP TRIGGER crash');
 		await syncTalkOnce(context);
@@ -72,7 +68,7 @@ describe('Talk sync commit', () => {
 		await syncTalkOnce(context);
 		await syncTalkOnce(context);
 
-		const changes = listChanges(session.db, { afterSeq: 0 });
+		const changes = changedSince(session.db);
 		expect(changes.map((m) => m.text)).toEqual(['first', 'second', 'third']);
 		expect(changes.map((m) => m.seq)).toEqual([1, 2, 3]);
 		expect(readTalkCursor(session.db).revision).toBe('13');
@@ -134,12 +130,12 @@ describe('Talk sync commit', () => {
 
 		await syncTalkOnce(context);
 
-		const messages = readMessages(session.db, { service: 'talk', chatId: otherMid });
+		const messages = chatMessages(session.db, 'talk', otherMid);
 		expect(messages.map((m) => [m.messageId, m.text, m.unsent])).toEqual([
 			[second.id, null, true],
 			[first.id, 'first, edited', false]
 		]);
-		expect(searchMessages(session.db, { query: 'second' }).messages).toEqual([]);
+		expect(indexed(session.db, 'second')).toEqual([]);
 	});
 });
 

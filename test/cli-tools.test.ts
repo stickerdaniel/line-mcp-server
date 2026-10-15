@@ -90,12 +90,17 @@ describe('tool commands', { timeout: 30_000 }, () => {
 		store(served, '今晚晚餐吃什麼', '晚餐好了', '明天見', '晚餐在哪');
 		const { port } = served.server;
 
-		const run = await runCli(port, ['search-messages', '--query', '晚餐', '--limit', '2']);
+		const sql = `SELECT message_id, text FROM message WHERE instr(text, '晚餐') ORDER BY id DESC LIMIT 2`;
 
-		const expected = await callTool(port, 'search_messages', { query: '晚餐', limit: 2 });
+		const run = await runCli(port, ['query', '--sql', sql]);
+
+		const expected = await callTool(port, 'query', { sql });
 		expect(run).toMatchObject({ code: 0, stderr: '' });
 		expect(JSON.parse(run.stdout)).toEqual(expected.data);
-		expect(expected.data.messages).toHaveLength(2);
+		expect(expected.data.rows).toEqual([
+			['4', '晚餐在哪'],
+			['2', '晚餐好了']
+		]);
 	});
 
 	it('finishes quietly when the reader closes the pipe early', async () => {
@@ -141,17 +146,19 @@ describe('tool commands', { timeout: 30_000 }, () => {
 	});
 
 	it.each([
-		['an unknown flag', ['search-messages', '--query', '晚餐', '--sort', 'new'], "'--sort'"],
-		['a missing required flag', ['search-messages', '--limit', '2'], '--query is required'],
-		['a value outside the enum', ['list-chats', '--service', 'line'], '--service:'],
-		['a non-integer', ['list-chats', '--limit', 'ten'], '--limit:'],
-		['an integer out of range', ['list-chats', '--limit', '500'], '--limit:'],
+		['an unknown flag', ['query', '--sql', 'SELECT 1', '--sort', 'new'], "'--sort'"],
+		['a missing required flag', ['query'], '--sql is required'],
 		[
-			'a time without an offset',
-			['search-messages', '--query', '晚餐', '--since', '2026-10-12T06:30:00'],
-			'--since:'
+			'a value outside the enum',
+			['get-announcements', '--service', 'line', '--chat-id', otherMid],
+			'--service:'
 		],
-		['a positional argument', ['list-chats', 'extra'], "'extra'"]
+		[
+			'a value its schema refuses',
+			['get-attachment', '--service', 'talk', '--chat-id', otherMid, '--message-id', 'ten'],
+			'--message-id:'
+		],
+		['a positional argument', ['sync-status', 'extra'], "'extra'"]
 	])('refuses %s with exit 2 before any request', async (_case, args, names) => {
 		const listener = await counter();
 

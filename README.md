@@ -111,7 +111,7 @@ A Node from nvm-windows lives in a directory that goes away with its version, an
 
 The daemon serves Streamable HTTP at `http://127.0.0.1:47822/mcp`, stateless, for as long as it runs. `LINE_MCP_PORT` changes the port (set it before `install`, which passes it on to the service); it must differ from the lock port 47821 (`LINE_MCP_LOCK_PORT`).
 
-Read tools: `status`, `list_chats`, `list_unread`, `read_messages`, `search_messages`, `list_changes`, `get_attachment`, `get_announcements`, `get_profile`. `list_unread` returns every unread message across chats in one call and marks nothing as read. Every result reports `stale` and the last sync times. Each time is an ISO 8601 string with the offset of the daemon's system time zone, which `status` reports as `time_zone`. Message and chat items leave out fields without a value.
+Read tools: `status`, `query`, `get_attachment`, `get_announcements`, `get_profile`. `query` runs one read-only SQL `SELECT` over the local archive: chats, names, messages, read state and full-text search. Its description lists the readable tables and columns and what they mean, and it never marks anything as read. A result holds at most 200 rows and 64 KiB. Every result reports `stale` and the last sync times. The archive stores times as UTC milliseconds; `local_time(ms)` in a query, and every time the other tools return, is an ISO 8601 string with the offset of the daemon's system time zone, which `status` reports as `time_zone`.
 
 Mutating tools: `send_message`, `react`, `unsend`. Each call needs an `idempotency_key`; a retry with the same key and arguments never acts twice. A result with state `unknown` means LINE may have acted, and line-mcp never resends it on its own.
 
@@ -159,7 +159,7 @@ T3 Code runs Claude Code and Codex, which read the configuration above. Nothing 
 Every tool is also a `line-mcp` command that calls the running daemon:
 
 ```bash
-line-mcp search-messages --query 晚餐
+line-mcp query --sql "SELECT local_time(sent_at), text FROM message WHERE instr(text, '晚餐') ORDER BY sent_at DESC LIMIT 5"
 ```
 
 Commands and flags are the tool and field names in kebab case; the `status` tool is `sync-status`, since `line-mcp status` reports the local setup without the daemon. `line-mcp help` lists the commands and `line-mcp <command> --help` a command's flags. A result is JSON on stdout. An error is JSON on stderr with exit code 1, or 2 for a usage error.

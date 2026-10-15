@@ -6,7 +6,7 @@ import { discoverChats, nameSquareSenders, squareMemberBatch } from '../src/sync
 import { Pool, type SyncContext } from '../src/sync/loop.ts';
 import { applyChanges, type Change, type MessageRow } from '../src/sync/normalize.ts';
 import { groupMid, type Handler, otherMid, selfMid, talkError } from './fake-line.ts';
-import { callTool, type Served, serve } from './mcp-client.ts';
+import { query, type Served, serve } from './mcp-client.ts';
 import { field, squareChat } from './sync-fixture.ts';
 
 const roomMid = `r${'9'.repeat(32)}`;
@@ -102,24 +102,16 @@ function apply(served: Served, ...changes: Change[]) {
 	transaction(db, () => applyChanges(db, changes));
 }
 
-/** The sender name read_messages, search_messages and list_changes show for one message. */
-async function shownNames(served: Served, message: ReturnType<typeof archive>) {
-	const { port } = served.server;
-	const pick = (data: Record<string, unknown>, key: string) =>
-		(data[key] as { message_id: string; sender_name: string | null }[]).find(
-			(item) => item.message_id === message.messageId
-		)?.sender_name;
-	const read = await callTool(port, 'read_messages', {
-		service: message.service,
-		chat_id: message.chatId
-	});
-	const search = await callTool(port, 'search_messages', { query: message.text });
-	const changes = await callTool(port, 'list_changes', { limit: 200 });
-	return [
-		pick(read.data, 'messages'),
-		pick(search.data, 'messages'),
-		pick(changes.data, 'changes')
-	];
+/** The sender name of one message, as `query` joins it from `participant`. */
+async function shownName(served: Served, message: ReturnType<typeof archive>) {
+	const [row] = await query(
+		served.server.port,
+		`SELECT p.display_name FROM message m
+		LEFT JOIN participant p ON p.service = m.service AND p.participant_id = m.sender
+		WHERE m.service = '${message.service}' AND m.chat_id = '${message.chatId}'
+			AND m.message_id = '${message.messageId}'`
+	);
+	return row?.display_name;
 }
 
 describe('sender names', () => {
@@ -132,10 +124,12 @@ describe('sender names', () => {
 
 		await discoverChats(context(served), new Pool(2));
 
-		const listed = await callTool(served.server.port, 'list_chats');
-		expect(listed.data.chats).toContainEqual(
-			expect.objectContaining({ chat_id: selfMid, name: 'Name aaa' })
-		);
+		expect(
+			await query(
+				served.server.port,
+				'SELECT name FROM chat WHERE chat_id = (SELECT mid FROM account)'
+			)
+		).toEqual([{ name: 'Name aaa' }]);
 	});
 
 	it('names a group member with no one-to-one chat as soon as they write', async () => {
@@ -144,7 +138,7 @@ describe('sender names', () => {
 		await discoverChats(context(served), new Pool(2));
 		const message = archive(served, 'talk', groupMid, groupOnly);
 
-		expect(await shownNames(served, message)).toEqual(Array(3).fill('Name 001'));
+		expect(await shownName(served, message)).toBe('Name 001');
 	});
 
 	it('names archived senders no member list holds: departed members and room senders', async () => {
@@ -154,8 +148,8 @@ describe('sender names', () => {
 
 		await discoverChats(context(served), new Pool(2));
 
-		expect(await shownNames(served, left)).toEqual(Array(3).fill('Name 002'));
-		expect(await shownNames(served, room)).toEqual(Array(3).fill('Name 003'));
+		expect(await shownName(served, left)).toBe('Name 002');
+		expect(await shownName(served, room)).toBe('Name 003');
 	});
 
 	it('keeps stored names when a lookup is partial, empty or refused', async () => {
@@ -167,13 +161,13 @@ describe('sender names', () => {
 
 		answer = () => ({ [otherMid]: 'Renamed' });
 		await discoverChats(context(served), new Pool(2));
-		expect(await shownNames(served, fromPeer)).toEqual(Array(3).fill('Renamed'));
-		expect(await shownNames(served, fromMember)).toEqual(Array(3).fill('Name 001'));
+		expect(await shownName(served, fromPeer)).toBe('Renamed');
+		expect(await shownName(served, fromMember)).toBe('Name 001');
 
 		for (const next of [() => ({}), () => talkError('NOT_FOUND')]) {
 			answer = next;
 			await discoverChats(context(served), new Pool(2));
-			expect(await shownNames(served, fromMember)).toEqual(Array(3).fill('Name 001'));
+			expect(await shownName(served, fromMember)).toBe('Name 001');
 		}
 	});
 
@@ -189,7 +183,7 @@ describe('sender names', () => {
 
 		await nameSquareSenders(context(served), new Pool(2));
 
-		expect(await shownNames(served, message)).toEqual(Array(3).fill('Square Name'));
+		expect(await shownName(served, message)).toBe('Square Name');
 	});
 
 	it('keeps an event name that arrives while the OpenChat lookup is in flight', async () => {
@@ -209,7 +203,7 @@ describe('sender names', () => {
 
 		await nameSquareSenders(context(served), new Pool(2));
 
-		expect(await shownNames(served, message)).toEqual(Array(3).fill('Event Name'));
+		expect(await shownName(served, message)).toBe('Event Name');
 	});
 
 	it('names more senders than one request holds, in requests of bounded size', async () => {
@@ -235,16 +229,14 @@ describe('sender names', () => {
 		await nameSquareSenders(context(served), new Pool(2));
 		const talkLast = archive(served, 'talk', groupMid, members.at(-1)!);
 
-		expect(await shownNames(served, talkLast)).toEqual(Array(3).fill('Name 249'));
-		const page = await callTool(served.server.port, 'read_messages', {
-			service: 'square',
-			chat_id: squareChat,
-			limit: 200
-		});
-		const names = (page.data.messages as { sender_name: string | null }[]).map(
-			(item) => item.sender_name
+		expect(await shownName(served, talkLast)).toBe('Name 249');
+		const names = await query(
+			served.server.port,
+			`SELECT p.display_name FROM message m
+			LEFT JOIN participant p ON p.service = m.service AND p.participant_id = m.sender
+			WHERE m.service = 'square'`
 		);
-		expect(names).toEqual(Array(60).fill('Square'));
+		expect(names).toEqual(Array.from({ length: 60 }, () => ({ display_name: 'Square' })));
 		expect(Math.max(...asked.talk)).toBeLessThanOrEqual(100);
 		expect(Math.max(...asked.square)).toBeLessThanOrEqual(squareMemberBatch);
 	});
