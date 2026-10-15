@@ -5,7 +5,7 @@ import { openDatabase, transaction } from '../src/db.ts';
 import { sweepSquareChats } from '../src/sync/square.ts';
 import { applyChanges, type MessageRow } from '../src/sync/normalize.ts';
 import { dropNonTextColumns, otherMid, seedLive, selfMid, tempRoot } from './fake-line.ts';
-import { callTool, type Served, serve } from './mcp-client.ts';
+import { query, type Served, serve } from './mcp-client.ts';
 import { field } from './sync-fixture.ts';
 
 const mid = (prefix: string, digit: string) => `${prefix}${digit.repeat(32)}`;
@@ -98,26 +98,24 @@ function archive(served: Served, ...rows: MessageRow[]) {
 	return rows.map((entry) => entry.messageId);
 }
 
-type Item = { message_id: string; from_self?: boolean };
-
 /**
- * `from_self` per message ID as read_messages, search_messages and list_changes
- * each show it; `absent` where the item leaves it out.
+ * Whether each message is the user's own, by message ID, as an agent tells it
+ * with `query` and the rule its description gives: 1 or 0, null where it
+ * cannot be told (no sender, or an OpenChat without a confirmed own member).
  */
-async function shownFromSelf(served: Served, chats: [string, string][]) {
-	const { port } = served.server;
-	const byId = (items: Item[]) =>
-		Object.fromEntries(
-			items.map((item) => [item.message_id, 'from_self' in item ? item.from_self : 'absent'])
-		);
-	const read: Item[] = [];
-	for (const [service, chatId] of chats) {
-		const page = await callTool(port, 'read_messages', { service, chat_id: chatId });
-		read.push(...(page.data.messages as Item[]));
-	}
-	const search = await callTool(port, 'search_messages', { query: 'from self check' });
-	const changes = await callTool(port, 'list_changes', { limit: 200 });
-	return [byId(read), byId(search.data.messages as Item[]), byId(changes.data.changes as Item[])];
+async function own(served: Served): Promise<Record<string, unknown>> {
+	const rows = await query(
+		served.server.port,
+		`SELECT m.message_id, CASE
+			WHEN m.sender IS NULL THEN NULL
+			WHEN m.service = 'talk' THEN m.sender = (SELECT mid FROM account)
+			WHEN NOT EXISTS (SELECT 1 FROM square_self_member s WHERE s.chat_id = m.chat_id) THEN NULL
+			ELSE EXISTS (
+				SELECT 1 FROM square_self_member s WHERE s.chat_id = m.chat_id AND s.member_id = m.sender
+			)
+		END AS own FROM message m`
+	);
+	return Object.fromEntries(rows.map((entry) => [entry.message_id, entry.own]));
 }
 
 /** Runs one Square discovery sweep over the served session. */
@@ -146,24 +144,16 @@ describe('own OpenChat messages', () => {
 			row('talk', otherMid, null)
 		);
 
-		const expected = {
-			[ownA!]: true,
-			[otherA!]: false,
-			[ownB!]: true,
-			[otherB!]: false,
-			[unconfirmed!]: 'absent',
-			[ownTalk!]: true,
-			[otherTalk!]: false,
-			[noSenderTalk!]: 'absent'
-		};
-		expect(
-			await shownFromSelf(served, [
-				['square', a!.chat],
-				['square', b!.chat],
-				['square', unconfirmedChat],
-				['talk', otherMid]
-			])
-		).toEqual([expected, expected, expected]);
+		expect(await own(served)).toEqual({
+			[ownA!]: 1,
+			[otherA!]: 0,
+			[ownB!]: 1,
+			[otherB!]: 0,
+			[unconfirmed!]: null,
+			[ownTalk!]: 1,
+			[otherTalk!]: 0,
+			[noSenderTalk!]: null
+		});
 	});
 
 	it('keeps marking messages of an earlier own member after LINE confirms another one', async () => {
@@ -185,17 +175,12 @@ describe('own OpenChat messages', () => {
 			row('square', a!.chat, otherMember)
 		);
 
-		const expected = {
-			[ownBefore!]: true,
-			[otherBefore!]: false,
-			[ownAfter!]: true,
-			[otherAfter!]: false
-		};
-		expect(await shownFromSelf(served, [['square', a!.chat]])).toEqual([
-			expected,
-			expected,
-			expected
-		]);
+		expect(await own(served)).toEqual({
+			[ownBefore!]: 1,
+			[otherBefore!]: 0,
+			[ownAfter!]: 1,
+			[otherAfter!]: 0
+		});
 	});
 
 	it('keeps archived chats and messages when it migrates a database of schema 5', async () => {
@@ -214,15 +199,13 @@ describe('own OpenChat messages', () => {
 		db.close();
 
 		const served = await serve({}, undefined, { root });
-		const page = await callTool(served.server.port, 'read_messages', {
-			service: 'square',
-			chat_id: message.chatId
-		});
+		const rows = await query(
+			served.server.port,
+			`SELECT c.name, m.message_id, m.text FROM chat c
+			JOIN message m ON m.service = c.service AND m.chat_id = c.chat_id`
+		);
 
-		expect(page.data.chat).toMatchObject({ name: 'Kept' });
-		expect(page.data.messages).toMatchObject([
-			{ message_id: message.messageId, text: message.text }
-		]);
-		expect((page.data.messages as object[])[0]).not.toHaveProperty('from_self');
+		expect(rows).toEqual([{ name: 'Kept', message_id: message.messageId, text: message.text }]);
+		expect(await own(served)).toEqual({ [message.messageId]: null });
 	});
 });

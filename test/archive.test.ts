@@ -2,7 +2,6 @@ import { Buffer } from 'node:buffer';
 import { BaseClient } from '@evex/linejs/base';
 import type { Message } from '@evex/linejs-types';
 import { describe, expect, it } from 'vitest';
-import { listChanges, readMessages, searchMessages } from '../src/archive.ts';
 import { openDatabase, transaction } from '../src/db.ts';
 import { SqliteStorage } from '../src/storage.ts';
 import type { SyncContext } from '../src/sync/loop.ts';
@@ -13,6 +12,7 @@ import {
 	retryMissingKeys
 } from '../src/sync/normalize.ts';
 import { keyPair, otherMid, selfMid, storedKey, tempRoot } from './fake-line.ts';
+import { changedSince, chatMessages, indexed } from './stored.ts';
 import { textMessage } from './sync-fixture.ts';
 
 function archive(): SyncContext {
@@ -42,20 +42,19 @@ const unsend = (message: Message): Change => ({
 });
 
 describe('unsend', () => {
-	it('removes the text from search, read_messages and the retained envelope', async () => {
+	it('removes the text from the row, the search index and the retained envelope', async () => {
 		const context = archive();
 		const message = textMessage('300000000000000001', '今天晚上吃什麼', {
 			location: { title: '台北車站', latitude: 25.04, longitude: 121.51 },
 			contentMetadata: { MENTION: '{"MENTIONEES":[]}', note: 'plain-metadata' }
 		} as unknown as Partial<Message>);
 		await store(context, message);
-		expect(searchMessages(context.db, { query: '晚上吃' }).messages).toHaveLength(1);
+		expect(indexed(context.db, '晚上吃')).toEqual([message.id]);
 
 		apply(context, unsend(message));
 
-		expect(searchMessages(context.db, { query: '晚上吃' }).messages).toEqual([]);
-		expect(searchMessages(context.db, { query: '晚上' }).messages).toEqual([]);
-		const [row] = readMessages(context.db, { service: 'talk', chatId: otherMid });
+		expect(indexed(context.db, '晚上吃')).toEqual([]);
+		const [row] = chatMessages(context.db, 'talk', otherMid);
 		expect(row).toMatchObject({ messageId: message.id, unsent: true, text: null, mentions: null });
 		const stored = context.db
 			.prepare('SELECT envelope FROM message WHERE message_id = ?')
@@ -74,9 +73,9 @@ describe('unsend', () => {
 		await store(context, message);
 		await store(context, { ...message, contentMetadata: { UPDATED_TIME: '1900000000000' } });
 
-		const rows = readMessages(context.db, { service: 'talk', chatId: otherMid });
+		const rows = chatMessages(context.db, 'talk', otherMid);
 		expect(rows.map((row) => [row.text, row.unsent])).toEqual([[null, true]]);
-		expect(searchMessages(context.db, { query: 'late history' }).messages).toEqual([]);
+		expect(indexed(context.db, 'late history')).toEqual([]);
 	});
 
 	it('beats a decryption that completes after the unsend', async () => {
@@ -93,7 +92,7 @@ describe('unsend', () => {
 			chunks: context.base.e2ee.encryptE2EETextMessage(5, 2, shared, 2, '秘密', selfMid, otherMid)
 		} as unknown as Message;
 		await store(context, message);
-		expect(readMessages(context.db, { service: 'talk', chatId: otherMid })[0]).toMatchObject({
+		expect(chatMessages(context.db, 'talk', otherMid)[0]).toMatchObject({
 			decryptState: 'missing_key'
 		});
 
@@ -102,9 +101,8 @@ describe('unsend', () => {
 		await retryMissingKeys(context.db, context, (body) => transaction(context.db, body));
 		await store(context, message);
 
-		const [row] = readMessages(context.db, { service: 'talk', chatId: otherMid });
+		const [row] = chatMessages(context.db, 'talk', otherMid);
 		expect(row).toMatchObject({ text: null, unsent: true });
-		expect(searchMessages(context.db, { query: '秘密' }).messages).toEqual([]);
 	});
 
 	it('lets a newer edit replace older content but not the other way round', async () => {
@@ -117,7 +115,7 @@ describe('unsend', () => {
 		});
 		await store(context, message);
 
-		expect(readMessages(context.db, { service: 'talk', chatId: otherMid })[0]?.text).toBe('edited');
+		expect(chatMessages(context.db, 'talk', otherMid)[0]?.text).toBe('edited');
 	});
 
 	it('decrypts a missing_key row once its key generation arrives', async () => {
@@ -137,7 +135,7 @@ describe('unsend', () => {
 		storage.setSync('e2eeKeys:2', storedKey(self));
 		await retryMissingKeys(context.db, context, (body) => transaction(context.db, body));
 
-		expect(readMessages(context.db, { service: 'talk', chatId: otherMid })[0]).toMatchObject({
+		expect(chatMessages(context.db, 'talk', otherMid)[0]).toMatchObject({
 			text: '你好',
 			decryptState: 'ok'
 		});
@@ -172,27 +170,27 @@ describe('unsend', () => {
 			retryMissingKeys(context.db, context, (body) => transaction(context.db, body), 2);
 
 		expect([await retry(), await retry()]).toEqual([0, 1]);
-		expect(searchMessages(context.db, { query: '找回來了' }).messages).toHaveLength(1);
+		expect(indexed(context.db, '找回來了')).toHaveLength(1);
 		// Wrapped back to the first rows, which still have no key.
 		expect(await retry()).toBe(0);
 	});
 });
 
-describe('list_changes', () => {
-	it('returns a row again with its new seq when it changes between pages', async () => {
+describe('seq', () => {
+	it('moves a row changed after a read past every seq that read saw', async () => {
 		const context = archive();
 		const [a, b, c] = ['400000000000000001', '400000000000000002', '400000000000000003'].map(
 			(id, index) => textMessage(id, `message ${index}`)
 		) as [Message, Message, Message];
 		for (const message of [a, b, c]) await store(context, message);
 
-		const page1 = listChanges(context.db, { afterSeq: 0, limit: 2 });
+		const page1 = changedSince(context.db).slice(0, 2);
 		await store(context, {
 			...a,
 			text: 'message 0, edited',
 			contentMetadata: { UPDATED_TIME: '1800000000000' }
 		});
-		const page2 = listChanges(context.db, { afterSeq: page1.at(-1)!.seq, limit: 2 });
+		const page2 = changedSince(context.db, page1.at(-1)!.seq);
 
 		expect(page1.map((row) => row.messageId)).toEqual([a.id, b.id]);
 		expect(page2.map((row) => [row.messageId, row.text])).toEqual([
@@ -201,32 +199,13 @@ describe('list_changes', () => {
 		]);
 	});
 
-	it('does not report a message again when the same content arrives twice', async () => {
+	it('stays when the same content arrives twice', async () => {
 		const context = archive();
 		const message = textMessage('400000000000000004', 'once');
 		await store(context, message);
+		const [first] = changedSince(context.db);
 		await store(context, message);
 
-		expect(listChanges(context.db, { afterSeq: 0 })).toHaveLength(1);
-	});
-});
-
-describe('search', () => {
-	it('finds one- and two-character queries that the trigram index cannot match', async () => {
-		const context = archive();
-		await store(context, textMessage('500000000000000001', '今天晚上吃什麼'));
-		await store(context, textMessage('500000000000000002', '明天見'));
-
-		expect(searchMessages(context.db, { query: '晚上' })).toMatchObject({
-			mode: 'scan',
-			messages: [{ text: '今天晚上吃什麼' }]
-		});
-		expect(
-			searchMessages(context.db, { query: '天', chatId: otherMid }).messages.map((m) => m.text)
-		).toEqual(['明天見', '今天晚上吃什麼']);
-		expect(searchMessages(context.db, { query: '晚上吃' })).toMatchObject({
-			mode: 'fts',
-			messages: [{ text: '今天晚上吃什麼' }]
-		});
+		expect(changedSince(context.db, first!.seq)).toEqual([]);
 	});
 });

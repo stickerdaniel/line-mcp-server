@@ -172,6 +172,14 @@ export async function callTool(
 	};
 }
 
+/** Runs `sql` through the `query` tool; each row as an object keyed by its column. */
+export async function query(port: number, sql: string): Promise<Record<string, unknown>[]> {
+	const call = await callTool(port, 'query', { sql });
+	if (call.isError) throw new Error(`query failed: ${call.text}`);
+	const { columns, rows } = call.data as { columns: string[]; rows: unknown[][] };
+	return rows.map((row) => Object.fromEntries(columns.map((column, at) => [column, row[at]])));
+}
+
 export async function listTools(port: number) {
 	const response = message(
 		await post(port, { jsonrpc: '2.0', id: nextId++, method: 'tools/list' })

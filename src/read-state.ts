@@ -56,14 +56,12 @@ function parseCount(value: unknown): number | null {
 
 /**
  * SQL: a text key that orders canonical decimal IDs numerically, the length
- * zero-padded to 10 digits (enough for any SQLite string), then the ID. Over
- * `message_id` it is the key of the `message_numeric_order` index, which a
- * comparison or ORDER BY uses only while this text matches the index exactly.
+ * zero-padded to 10 digits (enough for any SQLite string), then the ID.
  */
-export const idOrder = (id: string) => `(printf('%010d', length(${id})) || ${id})`;
+const idOrder = (id: string) => `(printf('%010d', length(${id})) || ${id})`;
 
 /** SQL: canonical decimal `a` is numerically above canonical decimal `b`. */
-export const above = (a: string, b: string) => `${idOrder(a)} > ${idOrder(b)}`;
+const above = (a: string, b: string) => `${idOrder(a)} > ${idOrder(b)}`;
 
 /** Stores `marker` as the chat's read position when it is above the stored one. */
 export function advanceMarker(

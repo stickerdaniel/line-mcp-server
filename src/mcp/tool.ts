@@ -7,7 +7,7 @@ import type { ArchiveStatus } from '../archive.ts';
 import { LineMcpError, MappedFailure, mapError } from '../errors.ts';
 import type { Outbox } from '../outbox.ts';
 import type { StatePrivacy } from '../privacy.ts';
-import { freshness, maxLimit } from '../queries.ts';
+import { freshness } from '../queries.ts';
 import type { Log } from '../session.ts';
 import type { Pool } from '../sync/loop.ts';
 import type { QueryRunner } from './tools/query.ts';
@@ -43,18 +43,11 @@ export interface ServedContext extends ToolContext {
 export const service = z
 	.enum(['talk', 'square'])
 	.describe('talk: one-to-one chats, groups and rooms; square: OpenChat');
-export const chatId = z.string().min(1).max(100).describe('Chat ID from list_chats');
+export const chatId = z.string().min(1).max(100).describe("The chat's chat_id from query");
 export const messageId = z
 	.string()
 	.regex(/^\d{1,20}$/)
 	.describe('LINE message ID (decimal string)');
-export const limit = z
-	.number()
-	.int()
-	.min(1)
-	.max(maxLimit)
-	.optional()
-	.describe(`Items per page, 1 to ${maxLimit}; default 50`);
 export const idempotencyKey = z
 	.string()
 	.min(8)
@@ -63,12 +56,6 @@ export const idempotencyKey = z
 	.describe(
 		'Unique key for this one intended action (for example a UUID), 8 to 200 printable ASCII characters. Reuse it only to retry the same action: a retry never acts twice. A new action needs a new key.'
 	);
-export const cursor = z
-	.string()
-	.min(1)
-	.max(1024)
-	.optional()
-	.describe('Continuation from a previous result of this tool with the same filters');
 
 export interface ToolDefinition<S extends z.ZodObject> {
 	name: string;

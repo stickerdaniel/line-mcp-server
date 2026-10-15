@@ -1,13 +1,14 @@
 import type { Message } from '@evex/linejs-types';
 import type { NestedArray } from '@evex/linejs/thrift';
 import { describe, expect, it } from 'vitest';
-import { archiveStatus, listGaps, readMessages, writeState } from '../src/archive.ts';
+import { archiveStatus, listGaps, writeState } from '../src/archive.ts';
 import { transaction } from '../src/db.ts';
 import { Pool, type SyncContext } from '../src/sync/loop.ts';
 import { applyChanges, messageBoundary, normalizeMessage } from '../src/sync/normalize.ts';
 import { reconcileTalkGaps } from '../src/sync/reset.ts';
 import { readTalkCursor, syncTalkOnce } from '../src/sync/talk.ts';
 import { groupMid, type Handler, otherMid } from './fake-line.ts';
+import { chatMessages } from './stored.ts';
 import { field, receive, syncFixture, textMessage } from './sync-fixture.ts';
 
 const archived = textMessage('600000000000000001', 'before the reset');
@@ -95,10 +96,10 @@ describe('sync resets', () => {
 
 			expect(listGaps(session.db)).toMatchObject([{ status: 'reconciled' }]);
 			expect(archiveStatus(session.db).unreconciledGaps).toBe(0);
-			expect(
-				readMessages(session.db, { service: 'talk', chatId: otherMid }).map((m) => m.text)
-			).toContain('during the reset');
-			expect(readMessages(session.db, { service: 'talk', chatId: groupMid })[0]?.text).toBe(
+			expect(chatMessages(session.db, 'talk', otherMid).map((m) => m.text)).toContain(
+				'during the reset'
+			);
+			expect(chatMessages(session.db, 'talk', groupMid)[0]?.text).toBe(
 				'group message during the reset'
 			);
 		});
@@ -127,9 +128,10 @@ describe('sync resets', () => {
 			'reconciled',
 			'reconciled'
 		]);
-		expect(
-			readMessages(session.db, { service: 'talk', chatId: otherMid }).map((m) => m.text)
-		).toEqual(['during the reset', 'before the reset']);
+		expect(chatMessages(session.db, 'talk', otherMid).map((m) => m.text)).toEqual([
+			'during the reset',
+			'before the reset'
+		]);
 	});
 
 	it('pages past a message the reset itself delivered to reach history archived before it', async () => {
@@ -151,9 +153,11 @@ describe('sync resets', () => {
 		await reconcileTalkGaps(context, new Pool(2));
 
 		expect(previous).toBe(1);
-		expect(
-			readMessages(session.db, { service: 'talk', chatId: otherMid }).map((m) => m.text)
-		).toEqual(['after the reset', 'during the reset', 'before the reset']);
+		expect(chatMessages(session.db, 'talk', otherMid).map((m) => m.text)).toEqual([
+			'after the reset',
+			'during the reset',
+			'before the reset'
+		]);
 		expect(listGaps(session.db)).toMatchObject([{ status: 'reconciled' }]);
 	});
 
@@ -176,9 +180,9 @@ describe('sync resets', () => {
 		failing = false;
 		await reconcileTalkGaps(context, new Pool(2));
 
-		expect(
-			readMessages(session.db, { service: 'talk', chatId: otherMid }).map((m) => m.text)
-		).toContain('during the reset');
+		expect(chatMessages(session.db, 'talk', otherMid).map((m) => m.text)).toContain(
+			'during the reset'
+		);
 		expect(listGaps(session.db)).toMatchObject([{ status: 'reconciled' }]);
 	});
 
@@ -205,9 +209,11 @@ describe('sync resets', () => {
 		await reconcileTalkGaps(context, new Pool(2));
 
 		expect(previous).toBe(1);
-		expect(
-			readMessages(session.db, { service: 'talk', chatId: otherMid }).map((m) => m.text)
-		).toEqual(['archived by backfill meanwhile', 'during the reset', 'before the reset']);
+		expect(chatMessages(session.db, 'talk', otherMid).map((m) => m.text)).toEqual([
+			'archived by backfill meanwhile',
+			'during the reset',
+			'before the reset'
+		]);
 		expect(listGaps(session.db)).toMatchObject([{ status: 'reconciled' }]);
 	});
 
@@ -240,9 +246,9 @@ describe('sync resets', () => {
 		await reconcileTalkGaps(context, new Pool(2));
 
 		expect(previous).toBe(1);
-		expect(
-			readMessages(session.db, { service: 'talk', chatId: otherMid }).map((m) => m.text)
-		).toContain('during the reset');
+		expect(chatMessages(session.db, 'talk', otherMid).map((m) => m.text)).toContain(
+			'during the reset'
+		);
 		expect(listGaps(session.db)).toMatchObject([{ status: 'reconciled' }]);
 	});
 
@@ -280,9 +286,7 @@ describe('sync resets', () => {
 			await reconcileTalkGaps(context, new Pool(2));
 
 			expect(previous).toBeGreaterThan(0);
-			expect(
-				readMessages(session.db, { service: 'talk', chatId: otherMid, limit: 200 })
-			).toHaveLength(100);
+			expect(chatMessages(session.db, 'talk', otherMid)).toHaveLength(100);
 		});
 	}
 

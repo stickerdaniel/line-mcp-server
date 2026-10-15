@@ -1,6 +1,6 @@
 import { createServer, type AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { openGap, readMessages, searchMessages, upsertChat, writeState } from '../src/archive.ts';
+import { openGap, upsertChat, writeState } from '../src/archive.ts';
 import { type Daemon, type DaemonOptions, startDaemon } from '../src/daemon.ts';
 import { openDatabase, readAccount, transaction } from '../src/db.ts';
 import { acquireLock, requestStop } from '../src/lock.ts';
@@ -17,7 +17,8 @@ import {
 	tempRoot,
 	within
 } from './fake-line.ts';
-import { callTool, post } from './mcp-client.ts';
+import { callTool, post, query } from './mcp-client.ts';
+import { chatMessages, indexed } from './stored.ts';
 import { field, receive, squareChat, squareDiscovery, textMessage } from './sync-fixture.ts';
 
 const daemons: Daemon[] = [];
@@ -140,6 +141,15 @@ const readBox = (id: string, marker: bigint) => ({
 	unreadCount: 1n
 });
 
+/** Each chat's read position and LINE's count with its position, as `query` reads them. */
+const readStates = (daemon: Daemon) =>
+	query(
+		daemon.mcp!.port,
+		`SELECT c.chat_id, r.marker, r.line_count, r.count_marker
+		FROM chat c LEFT JOIN read_state r ON r.service = c.service AND r.chat_id = c.chat_id
+		ORDER BY c.chat_id`
+	);
+
 /** Waits until the worker finished the round it was in and ran two more; `rounds` counts started rounds. */
 async function idleRounds(rounds: () => number): Promise<void> {
 	const from = rounds();
@@ -177,8 +187,8 @@ describe('daemon', () => {
 		expect(daemon.status()).toMatchObject({ health: 'needs_login', stale: true });
 		expect(daemon.status().talkSyncedAt).toEqual(expect.any(Number));
 		const { db } = daemon.session;
-		expect(readMessages(db, { service: 'talk', chatId: otherMid })[0]?.text).toBe('晚安，明天見');
-		expect(searchMessages(db, { query: '明天' }).messages).toHaveLength(1);
+		expect(chatMessages(db, 'talk', otherMid)[0]?.text).toBe('晚安，明天見');
+		expect(indexed(db, '明天見')).toHaveLength(1);
 		expect(readAccount(db)?.authState).toBe('needs_login');
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).not.toContain('晚安');
@@ -249,7 +259,8 @@ describe('daemon', () => {
 			}
 		);
 		const { db } = daemon.session;
-		await until(() => searchMessages(db, { query: '存好' }).messages.length === 1, 'first sync');
+		const texts = () => chatMessages(db, 'talk', otherMid).map((m) => m.text);
+		await until(() => texts().length === 1, 'first sync');
 		// The disk is full from here on: no write can grow the database.
 		const { page_count: pages } = db.prepare('PRAGMA page_count').get() as { page_count: number };
 		db.exec(`PRAGMA max_page_count = ${pages}`);
@@ -263,7 +274,7 @@ describe('daemon', () => {
 		expect(upstream.calls).toHaveLength(calls);
 		expect(healths.slice(healths.indexOf('storage_error'))).toEqual(['storage_error']);
 		expect(daemon.status()).toMatchObject({ health: 'storage_error', stale: true });
-		expect(searchMessages(db, { query: '存好' }).messages).toHaveLength(1);
+		expect(texts()).toEqual(['已經存好了']);
 		expect(notices).toEqual(['line-mcp cannot write its archive. Sync is stopped.']);
 	});
 
@@ -615,10 +626,14 @@ describe('daemon', () => {
 		);
 		upsertChat(daemon.session.db, { service: 'talk', chatId: selfMid, type: 'user' });
 
-		const listed = await callTool(daemon.mcp!.port, 'list_chats');
-		expect(listed.data.chats).toEqual([
-			expect.objectContaining({ chat_id: selfMid, name: '丹尼爾' })
-		]);
+		expect(
+			await query(
+				daemon.mcp!.port,
+				`SELECT c.chat_id, coalesce(c.name, p.display_name) AS name
+				FROM chat c LEFT JOIN participant p ON p.service = c.service AND p.participant_id = c.chat_id
+				WHERE c.chat_id = (SELECT mid FROM account)`
+			)
+		).toEqual([{ chat_id: selfMid, name: '丹尼爾' }]);
 	});
 
 	it('takes a Talk read snapshot at start, every 10 minutes and after a reset', async () => {
@@ -657,10 +672,9 @@ describe('daemon', () => {
 
 		await until(() => snapshots === 1 && rounds >= 6, 'worker rounds after the first snapshot');
 		expect(snapshots).toBe(1);
-		const listed = await callTool(daemon.mcp!.port, 'list_unread');
-		expect(listed.data.chats).toEqual([
-			expect.objectContaining({ chat_id: left, messages_unknown: true }),
-			expect.objectContaining({ chat_id: otherMid, unread_count: 0, line_unread_count: 1 })
+		expect(await readStates(daemon)).toEqual([
+			{ chat_id: left, marker: null, line_count: null, count_marker: null },
+			{ chat_id: otherMid, marker: '10', line_count: 1, count_marker: '10' }
 		]);
 
 		clock += 10 * 60 * 1000;
@@ -699,10 +713,7 @@ describe('daemon', () => {
 			},
 			{ notify: () => {}, now: () => clock, discoveryIntervalMs: 0 }
 		);
-		const known = async () =>
-			((await callTool(daemon.mcp!.port, 'list_unread')).data.chats as { chat_id: string }[]).map(
-				(chat) => chat.chat_id
-			);
+		const known = async () => (await readStates(daemon)).map((chat) => chat.chat_id);
 		const idle = () => idleRounds(() => rounds);
 
 		await until(() => attempts === 1, 'the first snapshot');
@@ -889,9 +900,8 @@ describe('daemon', () => {
 		const steps = fetches;
 		await until(() => fetches >= steps + 5, 'more Square steps');
 		expect(sweeps).toBe(1);
-		const listed = await callTool(daemon.mcp!.port, 'list_unread');
-		expect(listed.data.chats).toEqual([
-			expect.objectContaining({ chat_id: squareChat, unread_count: 0, line_unread_count: 1 })
+		expect(await readStates(daemon)).toEqual([
+			{ chat_id: squareChat, marker: '20', line_count: 1, count_marker: '20' }
 		]);
 
 		// Two pages under the same token close one cycle: exactly one stall, so the count settles.

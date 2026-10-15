@@ -752,7 +752,7 @@ describe('surface', () => {
 		expect(text).not.toMatch(/\n\s*\n/);
 		expect(text.length).toBeLessThan(4000);
 		expect(Buffer.byteLength(text)).toBeLessThan(4000);
-		expect(text).toContain('valid while `count_marker = marker`.');
+		expect(text).toContain('valid while `count_marker IS marker`.');
 		for (const relation of relations) {
 			expect(text).toContain(`\`${relation.name}(${relation.columns.join(', ')})\``);
 		}
