@@ -20,7 +20,7 @@ interface Flag {
 	field: string;
 	/** The flag without dashes, `chat-id`. */
 	name: string;
-	type: 'string' | 'integer' | 'boolean';
+	type: 'string' | 'boolean';
 	/** The values an enum field allows. */
 	choices?: readonly string[];
 	required: boolean;
@@ -60,7 +60,6 @@ function flagOf(field: string, schema: unknown): Flag {
 	if (inner instanceof z.ZodEnum) {
 		return { ...flag, type: 'string', choices: inner.options.map(String) };
 	}
-	if (inner instanceof z.ZodNumber && inner.isInt) return { ...flag, type: 'integer' };
 	if (inner instanceof z.ZodBoolean) return { ...flag, type: 'boolean' };
 	throw new Error(`The CLI has no flag type for the input field ${field}`);
 }
@@ -116,11 +115,9 @@ function helpText(command: ToolCommand): string {
 
 class UsageError extends Error {}
 
-/** A flag value as the tool takes it: integers as numbers, `file_path` absolute. */
+/** A flag value as the tool takes it: `file_path` absolute. */
 function convert(flag: Flag, raw: string | boolean): unknown {
 	if (typeof raw === 'boolean') return raw;
-	// Anything but an integer stays a string, which the schema then refuses.
-	if (flag.type === 'integer') return /^-?\d+$/.test(raw) ? Number(raw) : raw;
 	// The tool wants an absolute path; a shell user gives one relative to here.
 	if (flag.field === 'file_path') return raw && resolve(raw);
 	return raw;

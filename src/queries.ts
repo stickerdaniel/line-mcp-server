@@ -1,6 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { ArchiveStatus, MessageView, Service } from './archive.ts';
-import type { NonTextFields } from './non-text.ts';
 import { renderTime } from './time.ts';
 
 // How tools show the archive outside `query`: the freshness every result
@@ -103,19 +102,12 @@ interface MessageItem {
 	from_self?: boolean;
 	sent_at?: string;
 	edited_at?: string;
-	/**
-	 * `text` for LINE's `NONE`, otherwise LINE's content type in lower case,
-	 * such as `image` or `chatevent`; left out only for a tombstone of a
-	 * message never archived.
-	 */
+	/** LINE's content type in lower case: `image`, `video`, `audio` or `file`. */
 	content_type?: string;
-	// What a non-text message holds, from its stored fields (see `details`).
-	alt_text?: string;
+	// What a media message holds, from its stored fields (see `details`).
 	file_name?: string;
 	duration_ms?: number;
 	image_set?: { index: number; total: number };
-	call?: { type?: 'audio' | 'video'; result?: string };
-	event?: ChatEvent;
 	text?: string;
 	reply_to?: string;
 	mentions?: string[];
@@ -194,64 +186,24 @@ function fromSelf(names: Names, selfMid: string, message: MessageView): boolean 
 	return own.size === 0 ? null : own.has(message.sender);
 }
 
-/** A person a chat event names, with the archived display name when there is one. */
-export interface EventPerson {
-	id: string;
-	name?: string;
-}
-
-/** A membership or settings change LINE reports as a CHATEVENT message. */
-export interface ChatEvent {
-	type: string;
-	by?: EventPerson;
-	members?: EventPerson[];
-	/** The new chat name of a `renamed` event. */
-	name?: string;
-}
-
-/** LINE's content type as tools show it: `text` for `NONE`, otherwise the name in lower case. */
-const contentTypeName = (contentType: string | null) =>
-	contentType === null ? null : contentType === 'NONE' ? 'text' : contentType.toLowerCase();
-
-/** A chat event from its stored fields, with the names the archive has for its MIDs now. */
-function chatEvent(names: Names, service: Service, fields: NonTextFields): ChatEvent | null {
-	if (fields.event === null) return null;
-	const person = (id: string): EventPerson => ({
-		id,
-		...present({ name: names.person(service, id) })
-	});
-	return {
-		type: fields.event,
-		...present({
-			by: fields.event_by === null ? null : person(fields.event_by),
-			members: fields.event_members === null ? null : fields.event_members.split(',').map(person),
-			name: fields.event_name
-		})
-	};
-}
-
 /**
- * What a non-text message holds, from the fields the archive stored when it
- * was written (architecture, Non-text messages). Each is null when LINE gave
- * no valid value for it; text and unsent messages have none.
+ * What a media message holds, from the fields the archive stored when it was
+ * written (architecture, Non-text messages). Each is null when LINE gave no
+ * valid value for it.
  */
-function details(names: Names, message: MessageView) {
+function details(message: MessageView) {
 	const fields = message.nonText;
-	const call = present({ type: fields.call_type, result: fields.call_result });
 	return {
-		alt_text: fields.alt_text,
 		file_name: fields.file_name,
 		duration_ms: fields.duration_ms,
 		image_set:
 			fields.image_index !== null && fields.image_total !== null
 				? { index: fields.image_index, total: fields.image_total }
-				: null,
-		call: Object.keys(call).length > 0 ? call : null,
-		event: chatEvent(names, message.service, fields)
+				: null
 	};
 }
 
-/** One message as tools show it, with its chat and sender names. */
+/** A media message as `get_attachment` shows it, with its chat and sender names. */
 export function describeMessage(
 	db: DatabaseSync,
 	selfMid: string,
@@ -270,8 +222,8 @@ export function describeMessage(
 			from_self: fromSelf(names, selfMid, message),
 			sent_at: renderTime(message.sentAt),
 			edited_at: renderTime(message.editedAt),
-			content_type: contentTypeName(message.contentType),
-			...details(names, message),
+			content_type: message.contentType?.toLowerCase() ?? null,
+			...details(message),
 			// The archive clears an unsent message's text; a tombstone never shows any.
 			text: message.unsent ? null : message.text,
 			reply_to: message.replyTo,
