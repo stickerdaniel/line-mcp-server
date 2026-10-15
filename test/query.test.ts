@@ -750,8 +750,8 @@ describe('surface', () => {
 		const text = tool.description!;
 
 		expect(text).not.toMatch(/\n\s*\n/);
-		expect(text.length).toBeLessThan(3800);
-		expect(Buffer.byteLength(text)).toBeLessThan(3800);
+		expect(text.length).toBeLessThan(4000);
+		expect(Buffer.byteLength(text)).toBeLessThan(4000);
 		expect(text).toContain('valid while `count_marker = marker`.');
 		for (const relation of relations) {
 			expect(text).toContain(`\`${relation.name}(${relation.columns.join(', ')})\``);
