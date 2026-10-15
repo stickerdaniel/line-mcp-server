@@ -35,6 +35,7 @@ const session = await openSession({
 const server = await startMcpServer(
 	{
 		db: session.db,
+		root,
 		base: session.base,
 		selfMid,
 		pool: new Pool(2),

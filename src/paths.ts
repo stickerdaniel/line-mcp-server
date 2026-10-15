@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join, posix, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * An XDG base directory from `env`, or `fallback` under `home`. The XDG spec
@@ -69,4 +70,14 @@ export function attachmentsDir(root: string): string {
 // `../service` from both `src/paths.ts` and the bundled `dist/cli.js`.
 export function serviceTemplate(name: string): URL {
 	return new URL(`../service/${name}`, import.meta.url);
+}
+
+/**
+ * The query runner's entry beside this module: `src/query-runner.ts` from the
+ * sources, `dist/query-runner.js` from the package, whose bundle gives every
+ * module the URL of `dist/cli.js`.
+ */
+export function queryRunnerPath(): string {
+	const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
+	return fileURLToPath(new URL(`./query-runner.${extension}`, import.meta.url));
 }

@@ -1,10 +1,11 @@
-// Builds dist/cli.js for the npm package. Bun bundles src/ and the JSR
+// Builds dist/cli.js and, beside it, dist/query-runner.js, the process the
+// `query` tool runs SQL in, for the npm package. Bun bundles src/ and the JSR
 // packages, which npm consumers cannot install without a JSR registry entry;
 // every package in `dependencies` stays external, so npm installs it with its
-// own license. Fails when the bundle takes in anything else, or a bundled JSR
+// own license. Fails when a bundle takes in anything else, or a bundled JSR
 // package at a version THIRD_PARTY_NOTICES.md does not name.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -22,6 +23,9 @@ const root = join(import.meta.dirname, '..');
 const read = (path: string) => readFileSync(join(root, path), 'utf-8');
 const manifest = (path: string) => JSON.parse(read(path)) as Manifest;
 
+/** Each entry becomes `dist/<name>.js`; `src/paths.ts` finds the runner beside the CLI. */
+const entries = ['src/cli.ts', 'src/query-runner.ts'];
+
 const work = mkdtempSync(join(tmpdir(), 'line-mcp-build-'));
 const metafile = join(work, 'meta.json');
 const external = Object.keys(manifest('package.json').dependencies ?? {});
@@ -31,10 +35,11 @@ try {
 		'bun',
 		[
 			'build',
-			'src/cli.ts',
+			...entries,
 			'--target=node',
 			'--format=esm',
-			'--outfile=dist/cli.js',
+			'--root=src',
+			'--outdir=dist',
 			`--metafile=${metafile}`,
 			...external.map((name) => `--external=${name}`)
 		],
@@ -54,6 +59,10 @@ try {
 		else if (!notices.includes(`@${jsr[1]}/${jsr[2]}@${pkg.version}`)) {
 			problems.add(`THIRD_PARTY_NOTICES.md does not name @${jsr[1]}/${jsr[2]}@${pkg.version}`);
 		}
+	}
+	for (const entry of entries) {
+		const output = entry.replace(/^src\/(.*)\.ts$/, 'dist/$1.js');
+		if (!existsSync(join(root, output))) problems.add(`${output} was not built`);
 	}
 	if (!read('dist/cli.js').startsWith('#!/usr/bin/env node\n')) {
 		problems.add('dist/cli.js lost its shebang');

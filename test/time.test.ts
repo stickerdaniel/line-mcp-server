@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { renderTime } from '../src/queries.ts';
+import { renderTime } from '../src/time.ts';
 import { callTool, serve } from './mcp-client.ts';
 
 // Pinned before the imports load, so anything that captured the zone at import

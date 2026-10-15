@@ -10,10 +10,13 @@ import type { StatePrivacy } from '../privacy.ts';
 import { freshness, maxLimit } from '../queries.ts';
 import type { Log } from '../session.ts';
 import type { Pool } from '../sync/loop.ts';
+import type { QueryRunner } from './tools/query.ts';
 
 /** What the tools work with: the daemon's archive, session client and upstream pool. */
 export interface ToolContext {
 	db: DatabaseSync;
+	/** The state root; the `query` tool's runner opens its archive read-only. */
+	root: string;
 	base: BaseClient;
 	selfMid: string;
 	/** The bounded pool history and media share (architecture, Upstream concurrency). */
@@ -24,14 +27,17 @@ export interface ToolContext {
 	privacy: StatePrivacy;
 	/** Largest attachment download in bytes; 100 MiB by default. */
 	maxAttachmentBytes?: number;
+	/** Time limit of one `query` in milliseconds; 5 s by default. */
+	queryTimeoutMs?: number;
 	/** Current health; cached reads report it in every result. */
 	status(): ArchiveStatus;
 	log: Log;
 }
 
-/** The context the served tools get: the caller's, plus the outbox the server opened. */
+/** The context the served tools get: the caller's, plus the outbox and query runner of the server. */
 export interface ServedContext extends ToolContext {
 	outbox: Outbox;
+	queries: QueryRunner;
 }
 
 export const service = z
@@ -72,6 +78,11 @@ export interface ToolDefinition<S extends z.ZodObject> {
 	upstream?: boolean;
 	/** True when the tool acts on LINE (send, react, unsend) through the outbox. */
 	mutating?: boolean;
+	/**
+	 * True when a failure's message may quote archive data (SQLite's
+	 * diagnostics in `query`): the result keeps it, the log gets the code alone.
+	 */
+	quotesArchive?: boolean;
 	/** `signal` aborts when the client goes away or the server shuts down. */
 	run: (args: z.output<S>, context: ServedContext, signal: AbortSignal) => Promise<object> | object;
 }
@@ -150,7 +161,12 @@ export function registerTool<S extends z.ZodObject>(
 					return { ...freshness(context.status()), ...result };
 				} catch (error) {
 					const mapped = mapError(error, definition.name);
-					context.log({ event: 'tool_failed', ...mapped });
+					context.log({
+						event: 'tool_failed',
+						...(definition.quotesArchive
+							? { code: mapped.code, operation: mapped.operation }
+							: mapped)
+					});
 					const details = error instanceof MappedFailure ? error.details : {};
 					return new ToolResult({
 						content: [{ type: 'text', text: JSON.stringify({ error: mapped, ...details }) }],

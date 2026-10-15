@@ -20,7 +20,7 @@ import { lockInUse, requestStop } from '../src/lock.ts';
 import { selectNode } from '../src/service/node.ts';
 import { databasePath } from '../src/paths.ts';
 import { freePort, nodeAt, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
-import { callTool, cliEntry, type ToolCall } from './mcp-client.ts';
+import { callTool, cliEntry, runCli as runTool, type ToolCall } from './mcp-client.ts';
 
 /** The real path of the CLI under test, which `install` writes into the LaunchAgent. */
 const cli = realpathSync(cliEntry);
@@ -891,8 +891,9 @@ describe('commands', { timeout: 15_000 }, () => {
 		expect(line.time).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 	});
 
-	// The timeout covers the 10 s start deadline in serving() plus the 5 s exit wait.
-	it('serves a cache-only archive over MCP', async () => {
+	// The timeout covers the 10 s start deadline in serving() and a cold start of
+	// the query runner, with its privacy check on Windows.
+	it('serves a cache-only archive over MCP, also to line-mcp query', async () => {
 		const daemon = await cacheOnlyDaemon();
 		try {
 			expect((await serving(daemon.port)).data).toMatchObject({
@@ -900,10 +901,14 @@ describe('commands', { timeout: 15_000 }, () => {
 				stale: true,
 				account: { mid: selfMid, auth_state: 'needs_login' }
 			});
+			// From the package, the daemon runs the runner bundled beside dist/cli.js.
+			const query = await runTool(daemon.port, ['query', '--sql', 'SELECT mid FROM account']);
+			expect(query.code).toBe(0);
+			expect(JSON.parse(query.stdout)).toMatchObject({ health: 'needs_login', rows: [[selfMid]] });
 		} finally {
 			daemon.child.kill();
 		}
-	}, 20_000);
+	}, 30_000);
 
 	// Windows has no SIGTERM: kill() there terminates the process at once.
 	it.skipIf(windows)(

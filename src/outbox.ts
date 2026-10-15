@@ -124,7 +124,7 @@ export function chunksDigest(chunks: readonly (Uint8Array | string)[]): string {
 const evidenceWindowMs = 10 * 60 * 1000;
 
 /** Resolves like `promise`, or rejects with the signal's reason as soon as it aborts. */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 	if (signal.aborted) return Promise.reject(signal.reason);
 	return new Promise((resolve, reject) => {
 		const abort = () => reject(signal.reason);

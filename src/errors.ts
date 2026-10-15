@@ -47,11 +47,18 @@ export type ErrorCode =
 	| 'outcome_unknown'
 	| 'unsupported_action'
 	| 'file_error'
-	| 'upload_failed';
+	| 'upload_failed'
+	| 'query_denied'
+	| 'query_failed'
+	| 'query_timeout'
+	| 'query_busy';
 
 /**
  * An error raised by line-mcp itself. Its message is fixed text written in this
  * repository and never carries upstream data, so it is safe to log and return.
+ * The one exception is the `query` tool's failures, which carry SQLite's
+ * message and so may quote archive data: they reach only the tool result
+ * (`ToolDefinition.quotesArchive`).
  */
 export class LineMcpError extends Error {
 	readonly code: ErrorCode;

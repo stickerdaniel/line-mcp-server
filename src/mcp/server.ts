@@ -7,6 +7,7 @@ import { lockPort } from '../lock.ts';
 import { Outbox } from '../outbox.ts';
 import { Invocations, type ToolContext, registerTool } from './tool.ts';
 import * as archiveTools from './tools/archive.ts';
+import { QueryRunner, query } from './tools/query.ts';
 import { react } from './tools/react.ts';
 import { sendMessage } from './tools/send.ts';
 import { unsend } from './tools/unsend.ts';
@@ -30,6 +31,7 @@ export function mcpPort(env: NodeJS.ProcessEnv = process.env): number {
 
 export const readTools = [
 	archiveTools.status,
+	query,
 	archiveTools.listChats,
 	archiveTools.listUnread,
 	archiveTools.readMessages,
@@ -48,7 +50,8 @@ export interface McpServer {
 	readonly url: string;
 	/**
 	 * Stops listening, drops open connections, cancels every tool call and
-	 * resolves once the port is free and every call has settled.
+	 * resolves once the port is free, every call has settled and the query
+	 * runner has exited.
 	 */
 	close(): Promise<void>;
 }
@@ -93,7 +96,16 @@ export async function startMcpServer(
 		logLevel: 'warn'
 	});
 	const invocations = new Invocations();
-	const served = { ...context, outbox: new Outbox(context.db, { log: context.log }) };
+	const served = {
+		...context,
+		outbox: new Outbox(context.db, { log: context.log }),
+		// Started on the first query; `close` ends it.
+		queries: new QueryRunner({
+			root: context.root,
+			privacy: context.privacy,
+			...(context.queryTimeoutMs ? { timeoutMs: context.queryTimeoutMs } : {})
+		})
+	};
 	for (const tool of [...readTools, ...mutatingTools]) {
 		registerTool(mcp, served, tool, invocations);
 	}
@@ -158,6 +170,7 @@ export async function startMcpServer(
 				const settled = invocations.close();
 				await done;
 				await settled;
+				await served.queries.close();
 				await mcp.close();
 			})())
 	};
