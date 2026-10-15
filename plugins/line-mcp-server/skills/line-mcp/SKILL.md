@@ -26,7 +26,7 @@ A command prints its result as JSON on stdout. On failure it prints a JSON error
 
 `line-mcp query --help` is the schema: the tables, their columns and what they mean, including names, own messages, times, non-text messages, search and the unread rule. Read it before the first query and write SQL against it; pass the statement with `--sql`. A query reads only the local archive and marks nothing as read. A result holds at most 200 rows and 64 KiB; `truncated: true` means rows were cut, so narrow the query or continue after the last row's key.
 
-When the user asks what is new, start with the unread messages across chats, by the unread rule in the schema. A chat whose read position is unknown (`read_state.marker` is NULL) has no unread list; show its latest messages instead. A message read elsewhere a moment ago can still count as unread.
+When the user asks what is new, start with the unread messages across chats, by the unread rule in the schema. A chat whose read position is unknown (no `read_state` row, or `marker` NULL) has no unread list; show its latest messages instead. A message read elsewhere a moment ago can still count as unread.
 
 The IDs a query returns (`service`, `chat_id`, `message_id`, `thread_id`, member IDs) are what the other commands take.
 

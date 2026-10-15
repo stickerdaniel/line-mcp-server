@@ -173,7 +173,7 @@ const notes = [
 	'`thread_id` is set inside an OpenChat thread and NULL in the main chat.',
 	'`seq` grows whenever a message row changes (new, edited, unsent, decrypted later); a row shows only its latest state.',
 	'Text search: `message_fts MATCH \'"term"\'` finds a quoted term of three or more characters anywhere in the text, ignoring case; shorter terms need `instr(text, ...)`. Both match text as written: search Traditional and Simplified Chinese separately.',
-	"Unread: `read_state.marker` is the ID of the last message the user read in that chat; NULL means unknown. Unread messages are in the main chat (`thread_id IS NULL`), not unsent, not the user's own, with an ID numerically above `marker`. `line_count` is LINE's own unread count as of `count_at`, valid while `count_marker = marker`. It names no messages and can differ from the archive's count; the archive does not record why."
+	"Unread: `read_state.marker` is the ID of the last message the user read in that chat; NULL or no row means unknown. Unread messages are in the main chat (`thread_id IS NULL`), not unsent, not the user's own, with an ID numerically above `marker`. `line_count` is LINE's own unread count as of `count_at`, valid while `count_marker IS marker`. It names no messages and can differ from the archive's count; the archive does not record why."
 ];
 
 const signature = (relation: Relation) =>
