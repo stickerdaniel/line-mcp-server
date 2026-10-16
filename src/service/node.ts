@@ -26,12 +26,19 @@ function executable(path: string): boolean {
 
 /** `24.18.0` for the Node at `path`, or undefined when it does not run. */
 export function nodeVersion(path: string): string | undefined {
+	const probeStart = performance.now();
 	try {
 		return execFileSync(path, ['--version'], { encoding: 'utf-8', timeout: 10_000 })
 			.trim()
 			.replace(/^v/, '');
 	} catch {
 		return undefined;
+	} finally {
+		if (process.env.LINE_MCP_DOCTOR_TIMING) {
+			process.stderr.write(
+				`probe node_version ${Math.round(performance.now() - probeStart)} ms ${path}\n`
+			);
+		}
 	}
 }
 

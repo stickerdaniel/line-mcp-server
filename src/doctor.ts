@@ -32,6 +32,14 @@ export async function doctor(input: {
 	node?: string;
 	nodeVersion?: string;
 }): Promise<Check[]> {
+	const probe = { at: performance.now() };
+	const stage = (name: string) => {
+		const now = performance.now();
+		if (input.env.LINE_MCP_DOCTOR_TIMING)
+			process.stderr.write(`probe stage ${name} ${Math.round(now - probe.at)} ms\n`);
+		probe.at = now;
+	};
+	stage(`process_start_to_doctor(${Math.round(probe.at)})`);
 	const checks: Check[] = [];
 	let node: string;
 	try {
@@ -40,7 +48,9 @@ export async function doctor(input: {
 		node = process.execPath;
 		checks.push({ name: 'node_override', ok: false, detail: mapError(error, 'doctor').message });
 	}
+	stage('select_node');
 	const runs = input.nodeVersion ?? nodeVersion(node);
+	stage('node_version');
 	checks.push(
 		{
 			name: 'node',
@@ -66,7 +76,9 @@ export async function doctor(input: {
 
 	// Before the archive exists too: a first login on Windows refuses an
 	// exposed state root and points here.
+	stage('paths_fts5');
 	const privacy = await input.privacy.diagnose(input.root);
+	stage('privacy_diagnose');
 	checks.push(...privacy.checks);
 	const path = databasePath(input.root);
 	if (!existsSync(path)) {
@@ -80,10 +92,14 @@ export async function doctor(input: {
 		checks.push(...archiveChecks(input.root));
 	}
 
+	stage('archive');
 	const { service } = input;
 	checks.push(await definitionCheck(service, { node, cli: input.cli, env: input.env }));
+	stage('definition');
 	checks.push(...(await service.diagnose()));
+	stage('service_diagnose');
 	const held = await lockInUse();
+	stage('lock_in_use');
 	checks.push({
 		name: 'daemon',
 		ok: held,

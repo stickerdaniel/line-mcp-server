@@ -107,6 +107,20 @@ async function runCli(
 	};
 }
 
+/** Probe: runs doctor with stage timings on stderr and prints them with the wall time. */
+async function timedDoctor(label: string, options: RunOptions) {
+	const at = new Date().toISOString();
+	const started = performance.now();
+	const result = await runCli(['doctor'], {
+		...options,
+		env: { ...options.env, LINE_MCP_DOCTOR_TIMING: '1' }
+	});
+	console.log(
+		`probe doctor ${label}: started ${at}, wall ${Math.round(performance.now() - started)} ms, exit ${result.code}\n${result.stderr}`
+	);
+	return result;
+}
+
 /**
  * The environment of a CLI run under `home`: the state root `<home>/state`,
  * the lock port, and the service runner fixture with its replies, recording
@@ -497,16 +511,32 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 		expect(failed.plistKept).toBe(true);
 	});
 
-	it('warns in doctor when the selected Node is in a versioned directory', async () => {
-		const home = tempRoot();
-		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
-		const node = nodeAt(join(tempRoot(), '.nvm', 'versions', 'node', 'v24.18.0', 'bin'));
+	it(
+		'warns in doctor when the selected Node is in a versioned directory',
+		{ timeout: 120_000 },
+		async () => {
+			const home = tempRoot();
+			seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
+			const started = performance.now();
+			const node = nodeAt(join(tempRoot(), '.nvm', 'versions', 'node', 'v24.18.0', 'bin'));
+			console.log(`probe nodeAt ${Math.round(performance.now() - started)} ms`);
 
-		const result = await runCli(['doctor'], { home, env: { LINE_MCP_NODE: node } });
+			const result = await timedDoctor('A override (the test)', {
+				home,
+				env: { LINE_MCP_NODE: node }
+			});
+			await timedDoctor('B override again', { home, env: { LINE_MCP_NODE: node } });
+			await timedDoctor('C no override', { home });
+			await timedDoctor('D override, task replies', {
+				home,
+				env: { LINE_MCP_NODE: node },
+				replies: { whoami, cscript: absentTask }
+			});
 
-		expect(result.stdout).toContain(`ok   node: ${node}`);
-		expect(result.stdout).toContain(`warn node_path: ${node} is in a versioned nvm directory`);
-	});
+			expect(result.stdout).toContain(`ok   node: ${node}`);
+			expect(result.stdout).toContain(`warn node_path: ${node} is in a versioned nvm directory`);
+		}
+	);
 
 	it.each([
 		['installed', true],
@@ -631,7 +661,10 @@ describe.runIf(windows)('Windows scheduled task', { timeout: 30_000 }, () => {
 		const home = tempRoot();
 		seedLive(join(home, 'state'), selfMid, { authToken: 'token' });
 
-		const result = await runCli(['doctor'], { home, replies: { whoami, cscript: absentTask } });
+		const result = await timedDoctor('E task test', {
+			home,
+			replies: { whoami, cscript: absentTask }
+		});
 
 		const dir = serviceDirIn(home);
 		for (const line of [

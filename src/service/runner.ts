@@ -41,49 +41,62 @@ export function toolRunner(env: NodeJS.ProcessEnv = process.env): ToolRunner {
 	const fake = env.LINE_MCP_SERVICE_RUNNER;
 	const command = (tool: string, args: string[]): [string, string[]] =>
 		fake ? [process.execPath, [fake, parse(tool).name, ...args]] : [tool, args];
+	const timed = (tool: string, result: Promise<ToolResult>): Promise<ToolResult> => {
+		const started = performance.now();
+		return result.then((done) => {
+			if (process.env.LINE_MCP_DOCTOR_TIMING) {
+				const ms = Math.round(performance.now() - started);
+				process.stderr.write(`probe tool ${parse(tool).name} ${ms} ms exit ${done.exit}\n`);
+			}
+			return done;
+		});
+	};
 	return {
 		run: (tool, args, { timeoutMs = defaultToolTimeoutMs, env: toolEnv } = {}) =>
-			new Promise((resolve) => {
-				const [file, argv] = command(tool, args);
-				// `detached` gives the tool its own session and process group on
-				// POSIX. On Windows `windowsHide`, with no inherited stdio, gives it a
-				// console of its own without a window (CREATE_NO_WINDOW), so no Ctrl-C
-				// on the terminal's console reaches it. `detached` there would leave
-				// it without any console (DETACHED_PROCESS), and PowerShell then
-				// writes nothing to its stdout.
-				const ownGroup = process.platform !== 'win32';
-				const child = spawn(file, argv, {
-					stdio: ['ignore', 'pipe', 'ignore'],
-					detached: ownGroup,
-					windowsHide: true,
-					env: toolEnv
-				});
-				let stdout = '';
-				let timedOut = false;
-				const timer = setTimeout(() => {
-					timedOut = true;
-					// The whole group, so a wrapper's descendants go too.
-					try {
-						if (ownGroup && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-						else child.kill('SIGKILL');
-					} catch {
-						child.kill('SIGKILL');
-					}
-					// A descendant that left the group may still hold stdout open; `close`
-					// must not wait for it.
-					child.stdout.destroy();
-				}, timeoutMs);
-				child.stdout.setEncoding('utf-8').on('data', (chunk: string) => (stdout += chunk));
-				// A tool that does not start (ENOENT) emits `error`, and may emit `close` after it.
-				child.once('error', (error: NodeJS.ErrnoException) => {
-					clearTimeout(timer);
-					resolve({ exit: error.code ?? 'unknown', stdout });
-				});
-				child.once('close', (code, signal) => {
-					clearTimeout(timer);
-					resolve({ exit: timedOut ? 'timeout' : (code ?? signal ?? 'unknown'), stdout });
-				});
-			}),
+			timed(
+				tool,
+				new Promise((resolve) => {
+					const [file, argv] = command(tool, args);
+					// `detached` gives the tool its own session and process group on
+					// POSIX. On Windows `windowsHide`, with no inherited stdio, gives it a
+					// console of its own without a window (CREATE_NO_WINDOW), so no Ctrl-C
+					// on the terminal's console reaches it. `detached` there would leave
+					// it without any console (DETACHED_PROCESS), and PowerShell then
+					// writes nothing to its stdout.
+					const ownGroup = process.platform !== 'win32';
+					const child = spawn(file, argv, {
+						stdio: ['ignore', 'pipe', 'ignore'],
+						detached: ownGroup,
+						windowsHide: true,
+						env: toolEnv
+					});
+					let stdout = '';
+					let timedOut = false;
+					const timer = setTimeout(() => {
+						timedOut = true;
+						// The whole group, so a wrapper's descendants go too.
+						try {
+							if (ownGroup && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+							else child.kill('SIGKILL');
+						} catch {
+							child.kill('SIGKILL');
+						}
+						// A descendant that left the group may still hold stdout open; `close`
+						// must not wait for it.
+						child.stdout.destroy();
+					}, timeoutMs);
+					child.stdout.setEncoding('utf-8').on('data', (chunk: string) => (stdout += chunk));
+					// A tool that does not start (ENOENT) emits `error`, and may emit `close` after it.
+					child.once('error', (error: NodeJS.ErrnoException) => {
+						clearTimeout(timer);
+						resolve({ exit: error.code ?? 'unknown', stdout });
+					});
+					child.once('close', (code, signal) => {
+						clearTimeout(timer);
+						resolve({ exit: timedOut ? 'timeout' : (code ?? signal ?? 'unknown'), stdout });
+					});
+				})
+			),
 		describe: (tool, args) => command(tool, args).flat().join(' ')
 	};
 }
