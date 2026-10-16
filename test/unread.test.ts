@@ -14,6 +14,7 @@ import {
 	dropNonTextColumns,
 	type Handler,
 	otherMid,
+	restoreReadOrderIndexes,
 	seedLive,
 	selfMid,
 	tempRoot
@@ -496,9 +497,10 @@ describe('read state migration', () => {
 		const db = openDatabase(root);
 		const message = row('talk', otherMid, '1001');
 		transaction(db, () => applyChanges(db, [{ kind: 'message', row: message }]));
-		// Schema 8 adds the read state table and an index, schema 9 the non-text columns.
+		// Schema 8 adds the read state table and an index, schema 9 the non-text
+		// columns, schema 10 drops two indexes.
 		db.exec(
-			`DROP TABLE read_state; DROP INDEX message_numeric_order; ${dropNonTextColumns} PRAGMA user_version = 7`
+			`${restoreReadOrderIndexes} DROP TABLE read_state; DROP INDEX message_numeric_order; ${dropNonTextColumns} PRAGMA user_version = 7`
 		);
 		db.close();
 

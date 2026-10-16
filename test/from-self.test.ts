@@ -4,7 +4,14 @@ import { upsertChat } from '../src/archive.ts';
 import { openDatabase, transaction } from '../src/db.ts';
 import { sweepSquareChats } from '../src/sync/square.ts';
 import { applyChanges, type MessageRow } from '../src/sync/normalize.ts';
-import { dropNonTextColumns, otherMid, seedLive, selfMid, tempRoot } from './fake-line.ts';
+import {
+	dropNonTextColumns,
+	otherMid,
+	restoreReadOrderIndexes,
+	seedLive,
+	selfMid,
+	tempRoot
+} from './fake-line.ts';
 import { query, type Served, serve } from './mcp-client.ts';
 import { field } from './sync-fixture.ts';
 
@@ -191,10 +198,11 @@ describe('own OpenChat messages', () => {
 		upsertChat(db, { service: 'square', chatId: message.chatId, type: 'square', name: 'Kept' });
 		transaction(db, () => applyChanges(db, [{ kind: 'message', row: message }]));
 		// Schema 6 adds only the own member table, schema 7 only an index,
-		// schema 8 only the read state table and an index and schema 9 only the
-		// non-text columns; without them this is schema 5.
+		// schema 8 only the read state table and an index, schema 9 only the
+		// non-text columns and schema 10 only drops two indexes; with all of
+		// them undone this is schema 5.
 		db.exec(
-			`DROP TABLE square_self_member; DROP INDEX message_thread_order; DROP TABLE read_state; DROP INDEX message_numeric_order; ${dropNonTextColumns} PRAGMA user_version = 5`
+			`${restoreReadOrderIndexes} DROP TABLE square_self_member; DROP INDEX message_thread_order; DROP TABLE read_state; DROP INDEX message_numeric_order; ${dropNonTextColumns} PRAGMA user_version = 5`
 		);
 		db.close();
 
