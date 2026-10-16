@@ -1,7 +1,7 @@
 // Fake LINE upstream for tests. Nothing here reaches the network: every
 // client gets a fetch that throws, and RPCs are answered by local handlers.
 import { Buffer } from 'node:buffer';
-import { createCipheriv } from 'node:crypto';
+import { createCipheriv, randomInt } from 'node:crypto';
 import {
 	copyFileSync,
 	existsSync,
@@ -13,7 +13,7 @@ import {
 	symlinkSync,
 	writeFileSync
 } from 'node:fs';
-import { createServer, type AddressInfo } from 'node:net';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -280,12 +280,41 @@ export function nodeAt(dir: string): string {
 	return path;
 }
 
+/** Test ports: below the default ephemeral range of Linux (32768) and of macOS and Windows (49152). */
+const testPorts = { from: 20_000, count: 12_000 };
+
+/**
+ * A loopback port that is free now and that no other caller in this test
+ * run gets. A port is free only until its user binds it, and other workers
+ * keep binding ports meanwhile, so it comes from below the default ephemeral
+ * ranges, where no `listen(0)` or outgoing connection lands, and is claimed
+ * run-wide in the `portClaims` directory (test/port-claims.ts).
+ */
 export async function freePort(): Promise<number> {
+	// Imported here, not at the top: fixture subprocesses import this module
+	// without Vitest and would pay for loading it.
+	const { inject } = await import('vitest');
+	const claims = inject('portClaims');
+	for (let attempt = 0; attempt < testPorts.count; attempt++) {
+		const port = testPorts.from + randomInt(testPorts.count);
+		try {
+			mkdirSync(join(claims, String(port)));
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue;
+			throw error;
+		}
+		// Another program may use it, or Windows may reserve it.
+		if (await bindable(port)) return port;
+	}
+	throw new Error(`No unclaimed test port left in ${claims}`);
+}
+
+function bindable(port: number): Promise<boolean> {
 	const server = createServer();
-	await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-	const { port } = server.address() as AddressInfo;
-	await new Promise((resolve) => server.close(resolve));
-	return port;
+	return new Promise((resolve) => {
+		server.once('error', () => resolve(false));
+		server.listen(port, '127.0.0.1', () => server.close(() => resolve(true)));
+	});
 }
 
 /** An empty archive at the current schema, in WAL mode, migrated once per test process. */
