@@ -97,8 +97,7 @@ const migrations = [
 		opened_at INTEGER NOT NULL,
 		closed_at INTEGER
 	) STRICT;`,
-	// Read order of one chat: send time (a tombstone without one sorts as 0),
-	// then row id, so keyset pages never skip or repeat a row.
+	// Read order of one chat for the paged read tools; dropped with them below.
 	`CREATE INDEX message_chat_order ON message (service, chat_id, coalesce(sent_at, 0), id);`,
 	// Mutating actions by caller idempotency key (architecture, Outbox). The frozen
 	// payload keeps message text only as its SHA-256, so no plaintext outlives
@@ -133,7 +132,7 @@ const migrations = [
 		confirmed_at INTEGER NOT NULL,
 		PRIMARY KEY (chat_id, member_id)
 	) STRICT;`,
-	// Search context reads one thread, or the main chat alone, in read order.
+	// Search context of the paged read tools; dropped with them below.
 	`CREATE INDEX message_thread_order ON message (service, chat_id, thread_id, coalesce(sent_at, 0), id);`,
 	// The account's read position per chat and LINE's unread count with the
 	// position it was reported for (architecture, Read state). A NULL marker
@@ -194,7 +193,10 @@ const migrations = [
 				Number(row.id)
 			);
 		}
-	}
+	},
+	// Only the removed paged read tools needed these orders.
+	`DROP INDEX message_chat_order;
+	DROP INDEX message_thread_order;`
 ] satisfies (string | ((db: DatabaseSync) => void))[];
 
 export const schemaVersion = migrations.length;

@@ -14,6 +14,7 @@ import {
 	groupMid,
 	nonTextColumns,
 	otherMid,
+	restoreReadOrderIndexes,
 	seedLive,
 	selfMid,
 	tempRoot
@@ -353,8 +354,9 @@ describe('stored non-text fields', () => {
 				{ kind: 'unsend', service: 'talk', chatId: groupMid, messageId: 'u1' }
 			])
 		);
-		// Schema 9 adds only these columns; without them this is schema 8.
-		db.exec(`${dropNonTextColumns} PRAGMA user_version = 8`);
+		// Schema 9 adds only these columns and schema 10 only drops two indexes;
+		// with both undone this is schema 8.
+		db.exec(`${restoreReadOrderIndexes} ${dropNonTextColumns} PRAGMA user_version = 8`);
 		db.close();
 
 		const fixture = await serve({}, undefined, { root });

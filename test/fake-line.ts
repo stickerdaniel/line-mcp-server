@@ -340,6 +340,10 @@ export const dropNonTextColumns = nonTextColumns
 	.map((column) => `ALTER TABLE message DROP COLUMN ${column};`)
 	.join(' ');
 
+/** SQL that restores the indexes schema 10 drops, for tests that build an older archive. */
+export const restoreReadOrderIndexes = `CREATE INDEX message_chat_order ON message (service, chat_id, coalesce(sent_at, 0), id);
+	CREATE INDEX message_thread_order ON message (service, chat_id, thread_id, coalesce(sent_at, 0), id);`;
+
 /** Every `line_kv` row and the account row, for before/after comparison. */
 export function snapshot(root: string): unknown {
 	const db = new DatabaseSync(databasePath(root), { readOnly: true });
