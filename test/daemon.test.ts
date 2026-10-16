@@ -62,6 +62,10 @@ async function start(
 		...extra
 	});
 	daemons.push(daemon);
+	// The loops commit hundreds of times in a test. Like `fixtureSession`, the
+	// daemon commits without fsync, which stalled worker rounds for seconds on
+	// the Windows runner; tests never cut power.
+	daemon.session.db.exec('PRAGMA synchronous = OFF');
 	return { daemon, upstream };
 }
 
