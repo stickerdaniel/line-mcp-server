@@ -50,7 +50,7 @@ node evals/run.ts --batch main       # in the main checkout
 node evals/summarize.ts --batch branch --base /path/to/main/evals/runs/main
 ```
 
-The paired summary gives the per-case pass difference with a sign test and a bootstrap interval, and the cases each side wins. It names each side's model and judge, and refuses when the sides differ in their cases, in a case's prompt, world, zone or anchor, or in their judge model or sample count, or when either side has an unscored run. It assumes both checkouts have the same worlds and rubrics.
+The paired summary gives the per-case pass difference with a sign test and a bootstrap interval, and the cases each side wins. It names each side's model and judge, and refuses when the sides differ in their cases, in a case's prompt, world, zone, anchor or fixture (a hash of the world and rubric each verdict was graded on), or in their judge model or sample count, or when either side has an unscored run.
 
 A full run is roughly 1.2 million agent tokens (median about 11k per run, mostly cache reads) plus about 340 judge samples of around 5k tokens each. These are approximate: the gate below measured agent runs only.
 

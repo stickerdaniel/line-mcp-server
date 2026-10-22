@@ -6,7 +6,8 @@
 //
 // Writes <batch>/judged.jsonl and skips runs already graded there; a run
 // whose grading failed is graded again, and its latest verdict counts. Each
-// verdict records the judge model and `--samples`; a call whose settings
+// verdict records the judge model, `--samples` and `fixture`, a hash of the
+// world and rubric it was graded on; a call whose settings
 // differ from a successful verdict's refuses, exit 1. A judge sample counts only
 // when it marks every rubric item exactly once. Each rubric item takes the
 // majority of the judge samples, and a run passes when it ended without
@@ -14,6 +15,7 @@
 // verdict is computed here from the item marks, never taken from the judge.
 // A run with fewer valid samples than `--samples` gets no marks, only
 // `judgeError` and `incomplete: true`.
+import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -177,8 +179,12 @@ function marksAll(marks: unknown, count: number, flag: 'met' | 'violated'): bool
 }
 
 async function grade(run: Run) {
-	const rubric =
-		run.rubric ?? setOf(run.split).rubric(run.case, worldAt(run.world, run.anchor), run.anchor);
+	const world = worldAt(run.world, run.anchor);
+	const rubric = run.rubric ?? setOf(run.split).rubric(run.case, world, run.anchor);
+	const fixture = createHash('sha256')
+		.update(JSON.stringify([world, rubric]))
+		.digest('hex')
+		.slice(0, 16);
 	// Independent judge samples, each tried twice; each item takes the majority.
 	const samples: Marks[] = [];
 	let failure: string | undefined;
@@ -228,6 +234,7 @@ async function grade(run: Run) {
 		version: 'g3',
 		judgeModel: values.model,
 		samplesRequested: wanted,
+		fixture,
 		samples: samples.length,
 		incomplete: !complete,
 		pass: run.error === null && met && clean,

@@ -9,7 +9,7 @@ bun install
 bun run verify
 ```
 
-`verify` runs formatting, lint, the type check and the tests, the same steps as CI. It needs Node 24.18 or later and Bun. The tests never contact LINE: each one runs against a fake upstream and its own temporary state root.
+`verify` runs formatting, lint, the type check and the tests, the same steps as CI apart from its eval check (see Evals). It needs Node 24.18 or later and Bun. The tests never contact LINE: each one runs against a fake upstream and its own temporary state root.
 
 `bun run build` writes the npm package's `dist/cli.js` and `dist/query-runner.js`. `bun run smoke-pack` packs the package, installs it into a temporary prefix and runs `test/cli.test.ts`, `test/cli-tools.test.ts` and `test/service-e2e.test.ts` against the installed `line-mcp`, like the `package` CI job. `test/service-e2e.test.ts` installs the real LaunchAgent on macOS, the real systemd unit on Linux and the real scheduled task on Windows; these cases run only in CI with `LINE_MCP_E2E_SERVICE=1` and skip on a developer machine. A test that checks one service manager's command line runs only on that OS, since `install` picks the backend by platform; the backend tests in `test/service.test.ts` run every backend on every OS.
 

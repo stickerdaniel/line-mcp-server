@@ -9,10 +9,10 @@
 // count as one. A run without a verdict, or whose grading failed, is unscored:
 // counted, but left out of every pass figure. A safe pass is a pass without a
 // mutating call or canary leak. --base refuses, exit 1, when the two sides
-// differ in their cases, a case's prompt, world, zone or anchor, or their
-// judge model or sample count, or when either has an unscored run. It assumes
-// both sides ran the same worlds and rubrics. Prints aggregates and case IDs
-// only.
+// differ in their cases, a case's prompt, world, zone, anchor or fixture (the
+// hash of the world and rubric judge.ts graded on), or their judge model or
+// sample count, or when either has an unscored run or a verdict without these
+// records. Prints aggregates and case IDs only.
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -58,6 +58,7 @@ interface Verdict {
 	judgeError: string | null;
 	judgeModel?: string;
 	samplesRequested?: number;
+	fixture?: string;
 }
 
 const jsonl = <T>(path: string): T[] =>
@@ -208,11 +209,17 @@ function bootstrap(diffs: number[], rounds = 10_000): [number, number] {
 	return [sorted[Math.floor(0.025 * rounds)]!, sorted[Math.floor(0.975 * rounds)]!];
 }
 
-/** Each case's prompt, world, zone and anchor, as its runs give them. */
+/** Each case's prompt, world, zone, anchor and fixture, as its runs and verdicts give them. */
 function setups(batch: Batch): Map<string, string> {
 	const found = new Map<string, Set<string>>();
 	for (const run of batch.runs) {
-		const setup = JSON.stringify([run.prompt, run.world, run.zone, run.anchor]);
+		const setup = JSON.stringify([
+			run.prompt,
+			run.world,
+			run.zone,
+			run.anchor,
+			scored(batch, run)?.fixture
+		]);
 		found.set(caseKey(run), (found.get(caseKey(run)) ?? new Set()).add(setup));
 	}
 	return new Map([...found].map(([id, setup]) => [id, [...setup].toSorted().join('\n')]));
@@ -226,7 +233,13 @@ function mismatches(batch: Batch, base: Batch): string[] {
 		const unscored = side.runs.filter((run) => !scored(side, run)).length;
 		return [
 			...(unscored ? [`${side.label}: ${unscored} runs unscored`] : []),
-			...(judges(side).length > 1 ? [`${side.label}: judged with several settings`] : [])
+			...(judges(side).length > 1 ? [`${side.label}: judged with several settings`] : []),
+			...(side.runs.some((run) => {
+				const verdict = scored(side, run);
+				return verdict && (!verdict.judgeModel || !verdict.samplesRequested || !verdict.fixture);
+			})
+				? [`${side.label}: verdicts without judge settings or fixture; judge a copy again`]
+				: [])
 		];
 	});
 	const ourJudges = judges(batch).join('; ');
@@ -238,7 +251,7 @@ function mismatches(batch: Batch, base: Batch): string[] {
 		if (!theirs.has(id)) problems.push(`${id}: only in ${batch.label}`);
 		else if (!ours.has(id)) problems.push(`${id}: only in ${base.label}`);
 		else if (ours.get(id) !== theirs.get(id))
-			problems.push(`${id}: prompt, world, zone or anchor differs`);
+			problems.push(`${id}: prompt, world, zone, anchor or fixture differs`);
 	}
 	return problems;
 }
