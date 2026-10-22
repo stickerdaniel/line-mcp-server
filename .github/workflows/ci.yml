@@ -62,6 +62,10 @@ jobs:
       - name: Test
         run: bun run test
 
+      # The eval's rubrics and served protocol, without a model or LINE.
+      - name: Check evals
+        run: node evals/check.ts
+
   # line-mcp's private state as a standard Windows account sees it; the runner
   # user is an elevated administrator (scripts/windows-leg.ps1).
   privacy-windows:
