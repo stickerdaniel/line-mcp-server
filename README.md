@@ -99,7 +99,9 @@ Reads never mark anything as read. Every send, reaction and unsend needs an `ide
 Every tool is also a `line-mcp` command that calls the running daemon:
 
 ```bash
-line-mcp query --sql "SELECT local_time(sent_at), text FROM message WHERE instr(text, '晚餐') ORDER BY sent_at DESC LIMIT 5"
+line-mcp query --sql "
+  SELECT local_time(sent_at), text FROM message
+  WHERE instr(text, '晚餐') ORDER BY sent_at DESC LIMIT 5"
 ```
 
 <details>
@@ -203,7 +205,7 @@ Set them before `install`, which passes them on to the service.
 
 ```bash
 npm i -g line-mcp-server@latest
-line-mcp install              # rewrites the service and restarts the daemon; the archive and session stay
+line-mcp install              # restarts the daemon; the archive and session stay
 ```
 
 ```bash
