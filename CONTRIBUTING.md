@@ -11,7 +11,7 @@ bun run verify
 
 `verify` runs formatting, lint, the type check and the tests, the same steps as CI. It needs Node 24.18 or later and Bun. The tests never contact LINE: each one runs against a fake upstream and its own temporary state root.
 
-`bun run build` writes the npm package's `dist/cli.js`. `bun run smoke-pack` packs the package, installs it into a temporary prefix and runs `test/cli.test.ts` and `test/cli-tools.test.ts` against the installed `line-mcp`, like the `package` CI job. That job also runs `test/service-e2e.test.ts`, which installs the real LaunchAgent on macOS and the real systemd unit on Linux; it runs only in CI with `LINE_MCP_E2E_SERVICE=1`, never on a developer machine. A test that checks one service manager's command line runs only on that OS, since `install` picks the backend by platform; the backend tests in `test/service.test.ts` run every backend on every OS.
+`bun run build` writes the npm package's `dist/cli.js` and `dist/query-runner.js`. `bun run smoke-pack` packs the package, installs it into a temporary prefix and runs `test/cli.test.ts`, `test/cli-tools.test.ts` and `test/service-e2e.test.ts` against the installed `line-mcp`, like the `package` CI job. `test/service-e2e.test.ts` installs the real LaunchAgent on macOS, the real systemd unit on Linux and the real scheduled task on Windows; it runs only in CI with `LINE_MCP_E2E_SERVICE=1`, never on a developer machine. A test that checks one service manager's command line runs only on that OS, since `install` picks the backend by platform; the backend tests in `test/service.test.ts` run every backend on every OS.
 
 The skill runs `line-mcp` from PATH. To put this checkout's build there:
 
@@ -42,7 +42,7 @@ Maintainers release from `main`:
 bun run release:bump minor   # or major, patch, x.y.z
 ```
 
-This sets the version in `package.json` and both plugin manifests. Open it as `chore(release): Release vX.Y.Z` and merge it. The Release workflow then verifies and packs the commit, tests the package on macOS and Linux, publishes it to npm, tags the commit and creates the GitHub Release with generated notes. Wait for that run to go green before merging another bump. "Re-run all jobs" finishes a failed run, since every step skips what is already done; a failure that needs a code change ships with the next bump.
+This sets the version in `package.json` and both plugin manifests. Open it as `chore(release): Release vX.Y.Z` and merge it. The Release workflow then verifies and packs the commit, tests the package on Linux, macOS and Windows, publishes it to npm, tags the commit and creates the GitHub Release with generated notes. Wait for that run to go green before merging another bump. "Re-run all jobs" finishes a failed run, since every step skips what is already done; a failure that needs a code change ships with the next bump.
 
 npm trusts `release.yml` in the GitHub environment `npm` as a trusted publisher, so the repository holds no npm token.
 

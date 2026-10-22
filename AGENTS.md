@@ -10,7 +10,7 @@ Node 24 runs the TypeScript sources directly (type stripping) in development and
 
 ## Invariants
 
-- Tests never contact LINE. Each test gets its own temporary state root; the real state under `~/Library/Application Support/line-mcp` or `~/.local/share/line-mcp` stays untouched.
+- Tests never contact LINE. Each test gets its own temporary state root; the real state under `~/Library/Application Support/line-mcp`, `~/.local/share/line-mcp` or `%LOCALAPPDATA%\line-mcp` stays untouched.
 - Live checks run only when the user asks for them, and only in the connected account's own chat, unless the user names another recipient and action.
 - Reads never mutate LINE state: no read receipts and no E2EE key registration.
 - Integer LINE IDs and revisions stay decimal strings end to end; MIDs and tokens stay opaque strings.
