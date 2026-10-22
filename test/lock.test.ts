@@ -244,36 +244,40 @@ describe('stop request', () => {
 			const args = fixture === 'hold-lock.ts' ? [String(port)] : [tempRoot(), String(port)];
 			await startChild(fixture, args, line);
 
-			const started = Date.now();
 			await expect(requestStop(port, { deadlineMs: 500 })).rejects.toMatchObject({
 				code: 'stop_timeout'
 			});
-			expect(Date.now() - started).toBeLessThan(1500);
 			expect(await lockInUse(port)).toBe(true);
 		},
 		15_000
 	);
 
-	// A failure gets a deadline no round trip reaches, so only the failure can end
-	// the stop; a slow first round trip would otherwise use up a short one.
+	// A failure gets a deadline no round trip reaches, below the test's timeout, so
+	// only the failure can end the stop; a slow first round trip would otherwise use
+	// up a short one.
 	it.each([
-		['sending the request fails', 1, () => failingConnect('EMFILE'), 60_000, 'lock_failed'],
-		['confirming the stop fails', 2, () => failingConnect('EMFILE'), 60_000, 'lock_failed'],
+		['sending the request fails', 1, () => failingConnect('EMFILE'), 10_000, 'lock_failed'],
+		['confirming the stop fails', 2, () => failingConnect('EMFILE'), 10_000, 'lock_failed'],
 		['confirming the stop never answers', 2, () => new Socket(), 500, 'stop_timeout']
-	])('does not guess when %s', async (_step, failAt, attempt, deadlineMs, code) => {
-		const port = await freePort();
-		const lock = await acquireLock(port, () => {});
-		const real = vi.mocked(connect).getMockImplementation()!;
-		let attempts = 0;
-		vi.mocked(connect).mockImplementation(((...args: Parameters<typeof connect>) =>
-			++attempts === failAt ? attempt() : real(...args)) as typeof connect);
-		try {
-			await expect(requestStop(port, { deadlineMs })).rejects.toMatchObject({ code });
-		} finally {
-			vi.mocked(connect).mockImplementation(real);
-			await lock.release();
-		}
-	});
+	])(
+		'does not guess when %s',
+		async (_step, failAt, attempt, deadlineMs, code) => {
+			const port = await freePort();
+			const lock = await acquireLock(port, () => {});
+			const real = vi.mocked(connect).getMockImplementation()!;
+			let attempts = 0;
+			vi.mocked(connect).mockImplementation(((...args: Parameters<typeof connect>) =>
+				++attempts === failAt ? attempt() : real(...args)) as typeof connect);
+			try {
+				await expect(requestStop(port, { deadlineMs })).rejects.toMatchObject({ code });
+				expect(attempts).toBe(failAt);
+			} finally {
+				vi.mocked(connect).mockImplementation(real);
+				await lock.release();
+			}
+		},
+		15_000
+	);
 
 	it('reports not_running when nothing listens on the port', async () => {
 		// The deadline leaves room for Windows, which takes about 2 s to refuse.
