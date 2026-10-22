@@ -18,7 +18,7 @@ Node 24 runs the TypeScript sources directly (type stripping) in development and
 
 ## Checks
 
-`bun run verify` runs format, lint, type check and tests; CI runs the same steps on Linux, macOS and Windows. A test asserts what a caller observes; one that checks POSIX-only behaviour skips on Windows with `it.skipIf(process.platform === 'win32')` and a one-line reason. Before committing, plant the fault the test guards against and watch it fail.
+`bun run verify` runs format, lint, type check and tests; CI runs the same steps on Linux, macOS and Windows. A test asserts what a caller observes; one that checks POSIX-only behaviour skips on Windows with `it.skipIf(process.platform === 'win32')` and a one-line reason. Before committing, plant the fault the test guards against and watch it fail. A change to `src/query/surface.ts` changes what agents read about the archive: measure it with [`evals/`](evals/README.md), paired against `main`.
 
 ## Commits and pull requests
 

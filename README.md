@@ -177,7 +177,7 @@ bun install
 bun run verify
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). The agent eval of the tools lives in [evals/](evals/README.md).
 
 ## License
 

@@ -26,6 +26,10 @@ The link runs `dist/cli.js`, so run `bun run build` again after a change.
 
 Use synthetic fixtures only: made-up MIDs, IDs, names and message text. Never commit anything taken from a real account, including tokens, keys, envelopes, archive rows, logs or screenshots.
 
+## Evals
+
+[`evals/`](evals/README.md) measures how well an agent answers through the served tools, on synthetic worlds. It needs model access and costs tokens, so it is not part of `verify` or CI, apart from the type check. Measure a change to `src/query/surface.ts` with it, paired against `main`.
+
 ## CLI and skill
 
 The `line-mcp` tool commands and their flags come from the MCP tool schemas at runtime, so a tool change needs no CLI change. `plugins/line-mcp-server/skills/line-mcp/SKILL.md` is written by hand: when you add, rename or remove a tool, update its command list.
