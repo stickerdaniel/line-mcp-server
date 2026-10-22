@@ -2,6 +2,17 @@
 	"name": "line-mcp-server",
 	"version": "0.4.0",
 	"description": "Local MCP server that mirrors a personal LINE account for coding agents",
+	"keywords": [
+		"line",
+		"line-messenger",
+		"mcp",
+		"mcp-server",
+		"model-context-protocol",
+		"claude-code",
+		"codex",
+		"sqlite",
+		"ai-agents"
+	],
 	"license": "Apache-2.0",
 	"repository": {
 		"type": "git",
