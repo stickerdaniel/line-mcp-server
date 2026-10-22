@@ -24,7 +24,11 @@ Node 24 runs the TypeScript sources directly (type stripping) in development and
 
 - Commit and PR title: `<type>(<scope>): <Subject>`, imperative, capitalized, subject under 50 characters. Scope is required unless none fits.
 - One focused change per PR, squash-merged. Commits carry no co-author trailers; the Post No Bills check rejects them.
-- PR bodies follow `.github/pull_request_template.md` and end with `Generated with <model> for <job> in <tool> via <host>.` Repeat `<model> for <job>` joined by `and`; join jobs with `/`. Humans are `Human`. Ask for unknown values.
+- PR bodies follow `.github/pull_request_template.md`.
+- End PR bodies with `<Job> with <model> (<effort>) in <tool> via <host>.`
+  Repeat `<job> with <model> (<effort>)` joined by `and` for each model that did a job.
+  Example: `Implemented with Claude Opus 5.5 (xhigh) and reviewed with GPT-6 Pro (max) in Claude Code via T3 Code.`
+  Effort is the run's reasoning setting, or `effort unknown` if nothing states it. Humans are `Human`. Ask for other unknown values.
 
 ## Releasing
 
