@@ -8,7 +8,6 @@ import {
 	linkSync,
 	mkdirSync,
 	mkdtempSync,
-	readdirSync,
 	readFileSync,
 	symlinkSync,
 	writeFileSync
@@ -384,18 +383,6 @@ export function snapshot(root: string): unknown {
 	} finally {
 		db.close();
 	}
-}
-
-/** Every file under `dir` with its bytes, to show that nothing changed. */
-export function tree(dir: string): Record<string, string> {
-	return Object.fromEntries(
-		readdirSync(dir, { recursive: true, withFileTypes: true })
-			.filter((entry) => entry.isFile())
-			.map((entry) => {
-				const path = join(entry.parentPath, entry.name);
-				return [path, readFileSync(path, 'base64')];
-			})
-	);
 }
 
 export function within<T>(ms: number, promise: Promise<T>, what: string): Promise<T> {
