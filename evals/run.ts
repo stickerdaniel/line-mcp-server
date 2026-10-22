@@ -1,21 +1,22 @@
 // Runs eval cases through headless Claude Code against the served worlds.
 //
 //   node evals/run.ts [--sets dev,holdout,...] [--cases <file>] [--only id,id]
-//     [--repeats 1] [--parallel 3] [--anchor YYYY-MM-DD] [--model claude-opus-5-5]
-//     [--batch <name>]
+//     [--repeats 1] [--parallel 3] [--model claude-opus-5-5] [--batch <name>]
 //
 // `--cases` runs an external case file of the included sets' shape instead of
 // `--sets` (all by default). One `serve.ts` per world serves all of that
-// world's runs; the anchor is today in each world's zone unless --anchor names
-// one date. Each run is a fresh `claude -p` in an empty directory with only
-// the `line` MCP server and no built-in tools. Output goes to
-// evals/runs/<batch>/: runs.jsonl (one line per case and repeat), each run's
+// world's runs; the anchor is today in each world's zone, and each run's
+// agent gets that zone as its TZ, so it is told the anchor date. A run during
+// which that date changed is marked with an error. Each run is a fresh
+// `claude -p` in an empty directory with only the `line` MCP server and no
+// built-in tools. Output goes to evals/runs/<batch>/, a new batch each time:
+// batch.json, runs.jsonl (one line per case and repeat), each run's
 // stream-json transcript and each server's events.
 import { type ChildProcess, spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { claude } from './claude.ts';
+import { claude, positiveInteger } from './claude.ts';
 import { canaryAuthToken, canaryKey } from './load-world.ts';
 import { type Case, readCases, setOf, sets, today, worldOf } from './sets.ts';
 
@@ -26,7 +27,6 @@ const { values } = parseArgs({
 		only: { type: 'string' },
 		repeats: { type: 'string', default: '1' },
 		parallel: { type: 'string', default: '3' },
-		anchor: { type: 'string' },
 		model: { type: 'string', default: 'claude-opus-5-5' },
 		batch: { type: 'string' }
 	},
@@ -41,18 +41,23 @@ const cases: Case[] = (
 		: values.sets.split(',').flatMap((name) => readCases(setOf(name).file))
 ).filter((c) => !only || only.has(c.id));
 if (!cases.length) throw new Error('No cases to run');
-const repeats = Number(values.repeats);
-const parallel = Number(values.parallel);
+const repeats = positiveInteger('repeats', values.repeats);
+const parallel = positiveInteger('parallel', values.parallel);
 
 const batch = values.batch ?? new Date().toISOString().replace(/[:.]/g, '-');
 const out = join(import.meta.dirname, 'runs', batch);
+// A batch is one invocation: judge.ts and summarize.ts key runs by set, case
+// and repeat, so a second invocation would collide with the first.
+if (existsSync(out) && readdirSync(out).length) {
+	throw new Error(`Batch ${out} is not empty; name a new batch`);
+}
 mkdirSync(out, { recursive: true });
 
 /** Each world's zone and the batch anchor in it. */
 const worlds = new Map(
 	[...new Set(cases.map((c) => c.world))].map((name) => {
 		const { zone } = worldOf(name);
-		return [name, { zone, anchor: values.anchor ?? today(zone) }];
+		return [name, { zone, anchor: today(zone) }];
 	})
 );
 
@@ -110,6 +115,8 @@ const mutating = /^mcp__line__(send_message|react|unsend)$/;
 
 /** One headless Claude Code run of `c`; parses its stream-json transcript. */
 async function runOnce(c: Case, repeat: number, url: string) {
+	const { anchor, zone } = worlds.get(c.world)!;
+	const startedOn = today(zone);
 	const { stdout, stderr, code, wallMs } = await claude(
 		c.prompt,
 		(dir) => {
@@ -131,11 +138,15 @@ async function runOnce(c: Case, repeat: number, url: string) {
 				values.model
 			];
 		},
-		15 * 60_000
+		15 * 60_000,
+		zone
 	);
+	// The agent's date and the rubric's must both be the anchor.
+	const dateChanged = startedOn !== anchor || today(zone) !== anchor;
 	writeFileSync(join(out, `transcript-${c.id}-${repeat}.jsonl`), stdout);
 
 	const calls = new Map<string, ToolCall>();
+	const denied = new Set<string>();
 	let result: Record<string, unknown> | undefined;
 	let tools: string[] = [];
 	for (const line of stdout.split('\n')) {
@@ -165,11 +176,11 @@ async function runOnce(c: Case, repeat: number, url: string) {
 					call.isError = block.is_error === true;
 					call.resultBytes = Buffer.byteLength(text);
 					call.result = text.slice(0, 2000);
+					if (text.includes('query_denied')) denied.add(call.id);
 				}
 			}
 		}
 	}
-	const { anchor, zone } = worlds.get(c.world)!;
 	return {
 		split: c.split,
 		case: c.id,
@@ -183,12 +194,16 @@ async function runOnce(c: Case, repeat: number, url: string) {
 		zone,
 		model: values.model,
 		exit: code,
-		error: result?.is_error === true || code !== 0 ? stderr.slice(-2000) || 'error' : null,
+		error: dateChanged
+			? 'anchor changed during run'
+			: result?.is_error === true || code !== 0
+				? stderr.slice(-2000) || 'error'
+				: null,
 		tools,
 		answer: typeof result?.result === 'string' ? result.result : '',
 		calls: [...calls.values()],
 		toolCalls: calls.size,
-		denied: [...calls.values()].filter((call) => call.result?.includes('query_denied')).length,
+		denied: denied.size,
 		mutations: [...calls.values()].filter((call) => mutating.test(call.name)).length,
 		canaryLeak: canary.test(stdout),
 		turns: result?.num_turns,
@@ -211,9 +226,8 @@ async function pool(jobs: (() => Promise<void>)[], size: number): Promise<void> 
 const servers = new Map<string, { url: string; child: ChildProcess }>();
 try {
 	for (const world of worlds.keys()) servers.set(world, await startServer(world));
-	// One line per invocation: a batch may take several (reruns, more repeats).
-	appendFileSync(
-		join(out, 'batch.jsonl'),
+	writeFileSync(
+		join(out, 'batch.json'),
 		`${JSON.stringify({
 			sets: external ? null : values.sets,
 			cases: external ?? null,

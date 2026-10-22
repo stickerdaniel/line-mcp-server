@@ -28,7 +28,7 @@ Use synthetic fixtures only: made-up MIDs, IDs, names and message text. Never co
 
 ## Evals
 
-[`evals/`](evals/README.md) measures how well an agent answers through the served tools, on synthetic worlds. It needs model access and costs tokens, so it is not part of `verify` or CI, apart from the type check. Measure a change to `src/query/surface.ts` with it, paired against `main`.
+[`evals/`](evals/README.md) measures how well an agent answers through the served tools, on synthetic worlds. It needs model access and costs tokens, so it is not part of `verify` or CI, apart from the type check and `node evals/check.ts`, which checks the rubrics and the served protocol without a model. Measure a change to `src/query/surface.ts` with it, paired against `main`.
 
 ## CLI and skill
 

@@ -1,20 +1,23 @@
 // Checks every case's rubric without a model: loads each world through the
 // production write paths (`load-world.ts`), runs the validator of the case's
 // generation, and recounts every count rubric with SQL of its own on the
-// loaded archive.
+// loaded archive. Then checks the served protocol: w1 served by `server.ts`,
+// as `run.ts` serves it, called over MCP.
 //
 //   node evals/check.ts [--sets dev,holdout,...] [--anchor YYYY-MM-DD]
 //
 // The anchor is today in each world's zone unless --anchor names one date.
-// Prints `<set> <case id> ok|mismatch`, the reason of a mismatch on stderr,
-// and exits 1 unless every case is ok.
+// Prints `<set> <case id> ok|mismatch` and `protocol ok|mismatch`, the reason
+// of a mismatch on stderr, and exits 1 unless everything is ok.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { parseArgs } from 'node:util';
-import { databasePath } from '../src/paths.ts';
+import { mutatingTools, readTools } from '../src/mcp/server.ts';
+import { databasePath, stateRoot } from '../src/paths.ts';
 import { loadWorld, worldZone } from './load-world.ts';
+import { type EvalEvent, startEvalServer } from './server.ts';
 import {
 	type Archive,
 	type Case,
@@ -240,6 +243,142 @@ function reason(error: unknown): string {
 	return `${error.message.split('\n')[0]}${frame ? ` (${frame.trim()})` : ''}`;
 }
 
+/** One tool call over MCP: its result text, and whether it is an error. */
+async function callTool(
+	url: string,
+	name: string,
+	args: Record<string, unknown> = {}
+): Promise<{ isError: boolean; text: string }> {
+	const response = await rpc(url, 'tools/call', { name, arguments: args });
+	const result = response.result as { isError?: boolean; content: { text: string }[] };
+	return { isError: result.isError === true, text: result.content.map((c) => c.text).join('') };
+}
+
+let rpcId = 0;
+/** One JSON-RPC request to the MCP server; its answer comes as JSON or as one SSE event. */
+async function rpc(url: string, method: string, params: unknown): Promise<Record<string, unknown>> {
+	const response = await fetch(url, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+		body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method, params })
+	});
+	const body = await response.text();
+	const data = body
+		.split('\n')
+		.filter((line) => line.startsWith('data: '))
+		.at(-1);
+	return JSON.parse(data ? data.slice(6) : body) as Record<string, unknown>;
+}
+
+/**
+ * Serves w1 with the production tool set on a temporary state root and calls
+ * it: the tool list, a query, a denied query, and each mutating tool, which
+ * must fail with no request leaving the process and nothing a query reads
+ * changed. Returns what did not hold.
+ */
+async function protocol(): Promise<string[]> {
+	const problems: string[] = [];
+	const expect = (holds: boolean, what: string) => void (holds || problems.push(what));
+	const outbound: string[] = [];
+	const local = globalThis.fetch;
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(input instanceof Request ? input.url : input);
+		if (url.hostname === '127.0.0.1' || url.hostname === 'localhost') return local(input, init);
+		outbound.push(url.host);
+		throw new Error(`The protocol check refused a request to ${url.host}`);
+	};
+	const events: EvalEvent[] = [];
+	const { world, anchor } = worldAt('w1');
+	const root = mkdtempSync(join(tmpdir(), 'line-mcp-check-'));
+	try {
+		expect(
+			!resolve(root).startsWith(resolve(stateRoot())),
+			'the state root is inside the real one'
+		);
+		const server = await startEvalServer({
+			world,
+			anchor,
+			root,
+			port: 0,
+			record: (event) => void events.push(event),
+			log: () => {}
+		});
+		try {
+			const listed = (await rpc(server.url, 'tools/list', {})).result as {
+				tools: { name: string; description: string }[];
+			};
+			const production = [...readTools, ...mutatingTools];
+			expect(
+				JSON.stringify(listed.tools.map((t) => [t.name, t.description])) ===
+					JSON.stringify(production.map((t) => [t.name, t.description])),
+				`the tools are ${listed.tools.map((t) => t.name).join(', ')}, not the production set`
+			);
+			const rows = async (sql: string) => {
+				const call = await callTool(server.url, 'query', { sql });
+				if (call.isError) throw new Error(`query failed: ${call.text}`);
+				return (JSON.parse(call.text) as { rows: unknown[][] }).rows;
+			};
+			const [[mid, chats] = []] = await rows(
+				'SELECT (SELECT mid FROM account), (SELECT count(*) FROM chat)'
+			);
+			expect(mid === server.loaded.selfMid, 'the account is not the world');
+			expect(
+				chats === Object.keys(server.loaded.chats).length,
+				`query counts ${String(chats)} chats, the world ${Object.keys(server.loaded.chats).length}`
+			);
+
+			const denied = await callTool(server.url, 'query', { sql: 'SELECT * FROM line_kv' });
+			expect(denied.isError && denied.text.includes('query_denied'), 'line_kv is readable');
+			expect(
+				events.some((event) => event.object === 'line_kv'),
+				'the denied query left no event'
+			);
+
+			// What a later query could see of a failed action.
+			const readable = `SELECT (SELECT count(*) FROM chat), (SELECT max(last_activity_at) FROM chat),
+				(SELECT count(*) FROM participant), (SELECT count(*) FROM read_state),
+				(SELECT count(*) FROM message), (SELECT max(seq) FROM message)`;
+			const before = JSON.stringify(await rows(readable));
+			const [[chat, message, own] = []] = await rows(
+				`SELECT m.chat_id, m.message_id, (SELECT o.message_id FROM message o
+					WHERE o.chat_id = m.chat_id AND o.sender = (SELECT mid FROM account) AND o.unsent = 0)
+				FROM message m JOIN chat c ON c.service = 'talk' AND c.chat_id = m.chat_id
+				WHERE c.type = 'group' AND m.unsent = 0 AND EXISTS (SELECT 1 FROM message o
+					WHERE o.chat_id = m.chat_id AND o.sender = (SELECT mid FROM account) AND o.unsent = 0)
+				LIMIT 1`
+			);
+			const target = { service: 'talk', chat_id: chat };
+			for (const [name, args] of [
+				['send_message', { ...target, text: 'hello' }],
+				['react', { ...target, message_id: message, reaction: 'nice' }],
+				['unsend', { ...target, message_id: own }]
+			] as const) {
+				const call = await callTool(server.url, name, {
+					...args,
+					idempotency_key: `check-${name}`
+				});
+				expect(
+					call.isError && call.text.includes('"state":"failed"'),
+					`${name} did not fail before LINE: ${call.text.slice(0, 200)}`
+				);
+			}
+			expect(!outbound.length, `requests left the process to ${outbound.join(', ')}`);
+			expect(
+				JSON.stringify(await rows(readable)) === before,
+				'a failed action changed what query reads'
+			);
+		} finally {
+			await server.close();
+		}
+	} catch (error) {
+		problems.push(reason(error));
+	} finally {
+		globalThis.fetch = local;
+		rmSync(root, { recursive: true, force: true });
+	}
+	return problems;
+}
+
 let failed = 0;
 try {
 	// A generation's validator sees all its sets, for its checks across them,
@@ -288,6 +427,10 @@ try {
 			}
 		}
 	}
+	const problems = await protocol();
+	process.stdout.write(`protocol ${problems.length ? 'mismatch' : 'ok'}\n`);
+	for (const problem of problems) process.stderr.write(`  protocol: ${problem}\n`);
+	if (problems.length) failed++;
 } finally {
 	for (const pending of archives.values()) {
 		const opened = await pending.catch(() => undefined);

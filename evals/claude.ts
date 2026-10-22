@@ -26,12 +26,14 @@ export interface ClaudeResult {
 /**
  * Runs `claude -p <prompt> --bare <args>` in an empty temporary directory,
  * removed afterwards; `args` gets the directory, to write files the
- * arguments name. SIGTERM after `timeoutMs`.
+ * arguments name. `timeZone` sets the CLI's `TZ`, and with it the date the
+ * agent is told. SIGTERM after `timeoutMs`.
  */
 export async function claude(
 	prompt: string,
 	args: (dir: string) => string[],
-	timeoutMs: number
+	timeoutMs: number,
+	timeZone?: string
 ): Promise<ClaudeResult> {
 	const dir = mkdtempSync(join(tmpdir(), 'line-mcp-eval-'));
 	try {
@@ -41,7 +43,8 @@ export async function claude(
 			['-p', prompt, '--bare', ...authArgs(process.env), ...args(dir)],
 			{
 				cwd: dir,
-				stdio: ['ignore', 'pipe', 'pipe']
+				stdio: ['ignore', 'pipe', 'pipe'],
+				env: timeZone ? { ...process.env, TZ: timeZone } : process.env
 			}
 		);
 		let stdout = '';
@@ -57,4 +60,13 @@ export async function claude(
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+/** The value of `--<flag>` as a positive integer; throws otherwise. */
+export function positiveInteger(flag: string, value: string): number {
+	const parsed = Number(value);
+	if (!/^\d+$/.test(value) || !Number.isSafeInteger(parsed) || parsed < 1) {
+		throw new Error(`--${flag} must be a positive integer, not ${value}`);
+	}
+	return parsed;
 }

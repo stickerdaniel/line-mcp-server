@@ -4,15 +4,17 @@
 //   node evals/judge.ts --batch <name|path> [--samples 3] [--parallel 4]
 //     [--model claude-opus-5-5]
 //
-// Writes <batch>/judged.jsonl and skips runs already graded there. Each
+// Writes <batch>/judged.jsonl and skips runs already graded there; a run
+// whose grading failed is graded again, and its latest verdict counts. Each
 // rubric item takes the majority of the judge samples, and a run passes when
 // it ended without error, every required fact is met and no forbidden claim
 // is made: the verdict is computed here from the item marks, never taken from
-// the judge.
+// the judge. A run with fewer valid samples than `--samples` gets no marks,
+// only `judgeError` and `incomplete: true`.
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { claude } from './claude.ts';
+import { claude, positiveInteger } from './claude.ts';
 import { type Rubric, setOf, worldOf } from './sets.ts';
 import type { World } from './world-format.ts';
 
@@ -26,6 +28,8 @@ const { values } = parseArgs({
 	strict: true
 });
 if (!values.batch) throw new Error('--batch <name|path> is required');
+const wanted = positiveInteger('samples', values.samples);
+const parallel = positiveInteger('parallel', values.parallel);
 const dir = resolve(import.meta.dirname, 'runs', values.batch);
 const out = join(dir, 'judged.jsonl');
 
@@ -52,7 +56,18 @@ const key = (run: { split: string; case: string; repeat: number }) =>
 	`${run.split}/${run.case}/${run.repeat}`;
 
 const runs = jsonl<Run>(join(dir, 'runs.jsonl'));
-const done = new Set(existsSync(out) ? jsonl<Run>(out).map(key) : []);
+const seen = new Set<string>();
+for (const run of runs) {
+	if (seen.has(key(run))) throw new Error(`${dir}/runs.jsonl holds ${key(run)} twice`);
+	seen.add(key(run));
+}
+const done = new Set(
+	existsSync(out)
+		? jsonl<Run & { judgeError: string | null }>(out)
+				.filter((verdict) => verdict.judgeError === null)
+				.map(key)
+		: []
+);
 
 /** Worlds as built at an anchor; the rubric reads them. */
 const built = new Map<string, World>();
@@ -144,20 +159,25 @@ async function grade(run: Run) {
 	// Independent judge samples, each tried twice; each item takes the majority.
 	const samples: Marks[] = [];
 	let failure: string | undefined;
-	for (let s = 0; s < Number(values.samples); s++) {
+	for (let s = 0; s < wanted; s++) {
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
 				const reply = await ask(prompt(run, rubric, run.answer, run.anchor, run.zone));
-				samples.push(
-					JSON.parse(reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1)) as Marks
-				);
+				const sample = JSON.parse(
+					reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1)
+				) as Marks;
+				if (!Array.isArray(sample.required) || !Array.isArray(sample.forbidden)) {
+					throw new Error('judge gave no marks');
+				}
+				samples.push(sample);
 				break;
 			} catch (error) {
 				failure = error instanceof Error ? error.message : String(error);
 			}
 		}
 	}
-	const marks: Marks | undefined = samples.length
+	const complete = samples.length === wanted;
+	const marks: Marks | undefined = complete
 		? {
 				required: rubric.required.map((_, k) => ({
 					i: k + 1,
@@ -181,20 +201,21 @@ async function grade(run: Run) {
 		repeat: run.repeat,
 		version: 'g3',
 		samples: samples.length,
+		incomplete: !complete,
 		pass: run.error === null && met && clean,
 		met,
 		clean,
 		requiredMissed: marks ? marks.required.filter((m) => !m.met).map((m) => m.i) : null,
 		forbiddenHit: marks ? marks.forbidden.filter((m) => m.violated).map((m) => m.i) : null,
 		marks,
-		judgeError: marks ? null : (failure ?? 'unknown')
+		judgeError: complete ? null : `${samples.length} of ${wanted} samples: ${failure ?? 'unknown'}`
 	};
 }
 
 const todo = runs.filter((run) => !done.has(key(run)));
 let next = 0;
 await Promise.all(
-	Array.from({ length: Number(values.parallel) }, async () => {
+	Array.from({ length: parallel }, async () => {
 		while (next < todo.length) {
 			const run = todo[next++]!;
 			const verdict = await grade(run);
