@@ -22,7 +22,7 @@ In scope:
 Out of scope:
 
 - Local clients that can connect to the loopback listener. The design trusts them: they can call every tool, and there is no per-user isolation (see the README)
-- Vulnerabilities in LINE, Node, SQLite, macOS, Linux, systemd or a dependency (report to their maintainers)
+- Vulnerabilities in LINE, Node, SQLite, macOS, Linux, systemd, Windows or a dependency (report to their maintainers)
 - Account restrictions LINE applies to unofficial clients
 
 ## Supported versions
