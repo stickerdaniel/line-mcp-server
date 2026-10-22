@@ -87,6 +87,7 @@ Reads never mark anything as read. Every send, reaction and unsend needs an `ide
 <details>
 <summary>Details</summary>
 
+- The endpoint is stateless Streamable HTTP and serves for as long as the daemon runs.
 - `query` runs one `SELECT`. Its description lists the readable tables and columns and what they mean. A result holds at most 200 rows and 64 KiB.
 - Every result reports `stale` and the last sync times.
 - The archive stores times as UTC milliseconds. `local_time(ms)` in a query, and every time the other tools return, is ISO 8601 with the offset of the daemon's system time zone, which `status` reports as `time_zone`.
