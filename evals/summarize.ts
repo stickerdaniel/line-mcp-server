@@ -9,8 +9,10 @@
 // count as one. A run without a verdict, or whose grading failed, is unscored:
 // counted, but left out of every pass figure. A safe pass is a pass without a
 // mutating call or canary leak. --base refuses, exit 1, when the two sides
-// differ in their cases or a case's prompt, world or zone, or when either has
-// an unscored run. Prints aggregates and case IDs only.
+// differ in their cases, a case's prompt, world, zone or anchor, or their
+// judge model or sample count, or when either has an unscored run. It assumes
+// both sides ran the same worlds and rubrics. Prints aggregates and case IDs
+// only.
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -31,6 +33,7 @@ interface Run {
 	world: string;
 	prompt: string;
 	zone: string;
+	anchor: string;
 	model: string;
 	axes: Record<string, string>;
 	repeat: number;
@@ -53,6 +56,8 @@ interface Verdict {
 	repeat: number;
 	pass: boolean;
 	judgeError: string | null;
+	judgeModel?: string;
+	samplesRequested?: number;
 }
 
 const jsonl = <T>(path: string): T[] =>
@@ -92,6 +97,18 @@ const scored = (batch: Batch, run: Run) => {
 	const verdict = batch.verdictOf.get(runKey(run));
 	return verdict && verdict.judgeError === null ? verdict : undefined;
 };
+/** The judge settings of the batch's scored runs, such as `claude-opus-5-5, 3 samples`. */
+const judges = (batch: Batch) =>
+	[
+		...new Set(
+			batch.runs.flatMap((run) => {
+				const verdict = scored(batch, run);
+				return verdict
+					? [`${verdict.judgeModel ?? 'unknown'}, ${verdict.samplesRequested ?? 'unknown'} samples`]
+					: [];
+			})
+		)
+	].toSorted();
 const safe = (run: Run) => run.mutations === 0 && !run.canaryLeak;
 
 const tokens = (run: Run) =>
@@ -128,7 +145,7 @@ function table(batch: Batch): void {
 	const models = [...new Set(batch.runs.map((run) => run.model))].join(', ');
 	const unscored = batch.runs.filter((run) => !scored(batch, run)).length;
 	console.log(
-		`\n${batch.label}: ${scores.size} cases, ${batch.runs.length} runs, model ${models}${unscored ? `; ${unscored} runs unscored (no verdict or judge error), left out of pass` : ''}`
+		`\n${batch.label}: ${scores.size} cases, ${batch.runs.length} runs, model ${models}, judge ${judges(batch).join('; ') || '-'}${unscored ? `; ${unscored} runs unscored (no verdict or judge error), left out of pass` : ''}`
 	);
 	console.log(
 		'group | cases | pass (case mean) | runs passed | safe passes | median tokens | median calls | median wall s | denied | canary leaks | mutating calls | errors | unscored'
@@ -191,11 +208,11 @@ function bootstrap(diffs: number[], rounds = 10_000): [number, number] {
 	return [sorted[Math.floor(0.025 * rounds)]!, sorted[Math.floor(0.975 * rounds)]!];
 }
 
-/** Each case's prompt, world and zone, as its runs give them. */
+/** Each case's prompt, world, zone and anchor, as its runs give them. */
 function setups(batch: Batch): Map<string, string> {
 	const found = new Map<string, Set<string>>();
 	for (const run of batch.runs) {
-		const setup = JSON.stringify([run.prompt, run.world, run.zone]);
+		const setup = JSON.stringify([run.prompt, run.world, run.zone, run.anchor]);
 		found.set(caseKey(run), (found.get(caseKey(run)) ?? new Set()).add(setup));
 	}
 	return new Map([...found].map(([id, setup]) => [id, [...setup].toSorted().join('\n')]));
@@ -207,12 +224,21 @@ function mismatches(batch: Batch, base: Batch): string[] {
 	const theirs = setups(base);
 	const problems = [batch, base].flatMap((side) => {
 		const unscored = side.runs.filter((run) => !scored(side, run)).length;
-		return unscored ? [`${side.label}: ${unscored} runs unscored`] : [];
+		return [
+			...(unscored ? [`${side.label}: ${unscored} runs unscored`] : []),
+			...(judges(side).length > 1 ? [`${side.label}: judged with several settings`] : [])
+		];
 	});
+	const ourJudges = judges(batch).join('; ');
+	const theirJudges = judges(base).join('; ');
+	if (ourJudges !== theirJudges) {
+		problems.push(`judge differs: ${ourJudges} in ${batch.label}, ${theirJudges} in ${base.label}`);
+	}
 	for (const id of new Set([...ours.keys(), ...theirs.keys()])) {
 		if (!theirs.has(id)) problems.push(`${id}: only in ${batch.label}`);
 		else if (!ours.has(id)) problems.push(`${id}: only in ${base.label}`);
-		else if (ours.get(id) !== theirs.get(id)) problems.push(`${id}: prompt, world or zone differs`);
+		else if (ours.get(id) !== theirs.get(id))
+			problems.push(`${id}: prompt, world, zone or anchor differs`);
 	}
 	return problems;
 }

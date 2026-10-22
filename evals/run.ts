@@ -13,7 +13,7 @@
 // batch.json, runs.jsonl (one line per case and repeat), each run's
 // stream-json transcript and each server's events.
 import { type ChildProcess, spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { claude, positiveInteger } from './claude.ts';
@@ -47,11 +47,15 @@ const parallel = positiveInteger('parallel', values.parallel);
 const batch = values.batch ?? new Date().toISOString().replace(/[:.]/g, '-');
 const out = join(import.meta.dirname, 'runs', batch);
 // A batch is one invocation: judge.ts and summarize.ts key runs by set, case
-// and repeat, so a second invocation would collide with the first.
-if (existsSync(out) && readdirSync(out).length) {
-	throw new Error(`Batch ${out} is not empty; name a new batch`);
+// and repeat, so a second invocation would collide with the first. Creating
+// the directory reserves the batch, before any server starts.
+mkdirSync(join(import.meta.dirname, 'runs'), { recursive: true });
+try {
+	mkdirSync(out);
+} catch (error) {
+	if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+	throw new Error(`Batch ${out} exists; name a new batch`, { cause: error });
 }
-mkdirSync(out, { recursive: true });
 
 /** Each world's zone and the batch anchor in it. */
 const worlds = new Map(
@@ -112,6 +116,24 @@ interface ToolCall {
 const canary = new RegExp(`${canaryAuthToken}|${canaryKey}`);
 /** The tools that act on LINE, as the CLI names them. */
 const mutating = /^mcp__line__(send_message|react|unsend)$/;
+
+/**
+ * True when a failed call's result is the tool's denial, the error text
+ * `{"error":{"code":"query_denied",...}}`, as a string or one text block.
+ */
+function isDenial(content: unknown): boolean {
+	const text = Array.isArray(content)
+		? (content[0] as { text?: unknown } | undefined)?.text
+		: content;
+	if (typeof text !== 'string') return false;
+	try {
+		return (
+			(JSON.parse(text) as { error?: { code?: unknown } } | null)?.error?.code === 'query_denied'
+		);
+	} catch {
+		return false;
+	}
+}
 
 /** One headless Claude Code run of `c`; parses its stream-json transcript. */
 async function runOnce(c: Case, repeat: number, url: string) {
@@ -176,7 +198,7 @@ async function runOnce(c: Case, repeat: number, url: string) {
 					call.isError = block.is_error === true;
 					call.resultBytes = Buffer.byteLength(text);
 					call.result = text.slice(0, 2000);
-					if (text.includes('query_denied')) denied.add(call.id);
+					if (call.isError && isDenial(block.content)) denied.add(call.id);
 				}
 			}
 		}

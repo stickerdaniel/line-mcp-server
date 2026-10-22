@@ -6,11 +6,14 @@
 //
 // Writes <batch>/judged.jsonl and skips runs already graded there; a run
 // whose grading failed is graded again, and its latest verdict counts. Each
-// rubric item takes the majority of the judge samples, and a run passes when
-// it ended without error, every required fact is met and no forbidden claim
-// is made: the verdict is computed here from the item marks, never taken from
-// the judge. A run with fewer valid samples than `--samples` gets no marks,
-// only `judgeError` and `incomplete: true`.
+// verdict records the judge model and `--samples`; a call whose settings
+// differ from a successful verdict's refuses, exit 1. A judge sample counts only
+// when it marks every rubric item exactly once. Each rubric item takes the
+// majority of the judge samples, and a run passes when it ended without
+// error, every required fact is met and no forbidden claim is made: the
+// verdict is computed here from the item marks, never taken from the judge.
+// A run with fewer valid samples than `--samples` gets no marks, only
+// `judgeError` and `incomplete: true`.
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -61,13 +64,21 @@ for (const run of runs) {
 	if (seen.has(key(run))) throw new Error(`${dir}/runs.jsonl holds ${key(run)} twice`);
 	seen.add(key(run));
 }
-const done = new Set(
-	existsSync(out)
-		? jsonl<Run & { judgeError: string | null }>(out)
-				.filter((verdict) => verdict.judgeError === null)
-				.map(key)
-		: []
+const graded = existsSync(out)
+	? jsonl<Run & { judgeError: string | null; judgeModel?: string; samplesRequested?: number }>(
+			out
+		).filter((verdict) => verdict.judgeError === null)
+	: [];
+const other = graded.find(
+	(verdict) => verdict.judgeModel !== values.model || verdict.samplesRequested !== wanted
 );
+if (other) {
+	console.error(
+		`${out} holds verdicts of judge ${other.judgeModel ?? 'unknown'} with ${other.samplesRequested ?? 'unknown'} samples, not ${values.model} with ${wanted}; judge with those settings, or copy runs.jsonl to a new batch`
+	);
+	process.exit(1);
+}
+const done = new Set(graded.map(key));
 
 /** Worlds as built at an anchor; the rubric reads them. */
 const built = new Map<string, World>();
@@ -153,6 +164,18 @@ interface Marks {
 	forbidden: { i: number; violated: boolean; why: string }[];
 }
 
+/** True when `marks` holds exactly one entry for each index 1..`count`, each with a boolean `flag`. */
+function marksAll(marks: unknown, count: number, flag: 'met' | 'violated'): boolean {
+	if (!Array.isArray(marks) || marks.length !== count) return false;
+	const entries = marks as ({ i?: unknown } & Record<string, unknown>)[];
+	const indices = new Set(entries.map((mark) => mark?.i));
+	return (
+		indices.size === count &&
+		Array.from({ length: count }, (_, k) => k + 1).every((i) => indices.has(i)) &&
+		entries.every((mark) => typeof mark?.[flag] === 'boolean')
+	);
+}
+
 async function grade(run: Run) {
 	const rubric =
 		run.rubric ?? setOf(run.split).rubric(run.case, worldAt(run.world, run.anchor), run.anchor);
@@ -166,8 +189,11 @@ async function grade(run: Run) {
 				const sample = JSON.parse(
 					reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1)
 				) as Marks;
-				if (!Array.isArray(sample.required) || !Array.isArray(sample.forbidden)) {
-					throw new Error('judge gave no marks');
+				if (
+					!marksAll(sample.required, rubric.required.length, 'met') ||
+					!marksAll(sample.forbidden, rubric.forbidden.length, 'violated')
+				) {
+					throw new Error('judge did not mark every rubric item once');
 				}
 				samples.push(sample);
 				break;
@@ -200,6 +226,8 @@ async function grade(run: Run) {
 		case: run.case,
 		repeat: run.repeat,
 		version: 'g3',
+		judgeModel: values.model,
+		samplesRequested: wanted,
 		samples: samples.length,
 		incomplete: !complete,
 		pass: run.error === null && met && clean,
