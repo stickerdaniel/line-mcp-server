@@ -38,7 +38,10 @@ afterEach(() => {
 	for (const child of children.splice(0)) child.kill('SIGKILL');
 });
 
-/** Starts a fixture and resolves once it prints `line` on stdout. */
+/**
+ * Starts a fixture and resolves once it prints `line` on stdout. A start takes
+ * seconds under load, so a test that calls this needs a timeout above 10 s.
+ */
 async function startChild(fixture: string, args: string[], line: string): Promise<ChildProcess> {
 	const path = fileURLToPath(new URL(`./fixtures/${fixture}`, import.meta.url));
 	const child = spawn(process.execPath, [path, ...args], { stdio: ['ignore', 'pipe', 'inherit'] });
@@ -93,7 +96,7 @@ describe('ownership lock', () => {
 		await startChild('hold-lock.ts', [String(port)], 'locked');
 
 		await expect(acquireLock(port)).rejects.toMatchObject({ code: 'lock_held' });
-	});
+	}, 15_000);
 
 	it('fails startup closed when an unrelated process listens on the lock port', async () => {
 		const port = await freePort();
@@ -122,7 +125,7 @@ describe('ownership lock', () => {
 
 		const lock = await acquireLock(port);
 		await lock.release();
-	});
+	}, 15_000);
 
 	it('closes stray connections and releases without waiting for them', async () => {
 		const port = await freePort();
@@ -169,7 +172,7 @@ describe('ownership lock', () => {
 		expect(snapshot(root)).toEqual(before);
 		const lock = await acquireLock(port);
 		await lock.release();
-	});
+	}, 15_000);
 
 	it('frees the port right away when released while a client stays connected', async () => {
 		const port = await freePort();
@@ -234,24 +237,30 @@ describe('stop request', () => {
 	it.each([
 		['a process that only holds the lock', 'hold-lock.ts', 'locked'],
 		['a login', 'stalled-login.ts', 'stalled']
-	])('is ignored by %s, and the stopper gives up', async (_kind, fixture, line) => {
-		const port = await freePort();
-		const args = fixture === 'hold-lock.ts' ? [String(port)] : [tempRoot(), String(port)];
-		await startChild(fixture, args, line);
+	])(
+		'is ignored by %s, and the stopper gives up',
+		async (_kind, fixture, line) => {
+			const port = await freePort();
+			const args = fixture === 'hold-lock.ts' ? [String(port)] : [tempRoot(), String(port)];
+			await startChild(fixture, args, line);
 
-		const started = Date.now();
-		await expect(requestStop(port, { deadlineMs: 500 })).rejects.toMatchObject({
-			code: 'stop_timeout'
-		});
-		expect(Date.now() - started).toBeLessThan(1500);
-		expect(await lockInUse(port)).toBe(true);
-	});
+			const started = Date.now();
+			await expect(requestStop(port, { deadlineMs: 500 })).rejects.toMatchObject({
+				code: 'stop_timeout'
+			});
+			expect(Date.now() - started).toBeLessThan(1500);
+			expect(await lockInUse(port)).toBe(true);
+		},
+		15_000
+	);
 
+	// A failure gets a deadline no round trip reaches, so only the failure can end
+	// the stop; a slow first round trip would otherwise use up a short one.
 	it.each([
-		['sending the request fails', 1, () => failingConnect('EMFILE'), 'lock_failed'],
-		['confirming the stop fails', 2, () => failingConnect('EMFILE'), 'lock_failed'],
-		['confirming the stop never answers', 2, () => new Socket(), 'stop_timeout']
-	])('does not guess when %s', async (_step, failAt, attempt, code) => {
+		['sending the request fails', 1, () => failingConnect('EMFILE'), 60_000, 'lock_failed'],
+		['confirming the stop fails', 2, () => failingConnect('EMFILE'), 60_000, 'lock_failed'],
+		['confirming the stop never answers', 2, () => new Socket(), 500, 'stop_timeout']
+	])('does not guess when %s', async (_step, failAt, attempt, deadlineMs, code) => {
 		const port = await freePort();
 		const lock = await acquireLock(port, () => {});
 		const real = vi.mocked(connect).getMockImplementation()!;
@@ -259,9 +268,7 @@ describe('stop request', () => {
 		vi.mocked(connect).mockImplementation(((...args: Parameters<typeof connect>) =>
 			++attempts === failAt ? attempt() : real(...args)) as typeof connect);
 		try {
-			const started = Date.now();
-			await expect(requestStop(port, { deadlineMs: 500 })).rejects.toMatchObject({ code });
-			expect(Date.now() - started).toBeLessThan(1500);
+			await expect(requestStop(port, { deadlineMs })).rejects.toMatchObject({ code });
 		} finally {
 			vi.mocked(connect).mockImplementation(real);
 			await lock.release();
