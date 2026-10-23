@@ -23,7 +23,7 @@ line-mcp install   # start the background daemon
 line-mcp doctor    # check the setup without contacting LINE
 ```
 
-line-mcp joins the account as a secondary device; the phone stays the primary one. From then on the daemon syncs every chat, starts again after a reboot, and serves MCP at `http://127.0.0.1:47822/mcp`. If LINE ends the session, it keeps serving the local archive, shows a desktop notification and waits for another `login`.
+line-mcp joins the account as a secondary device; the phone stays the primary one. From then on the daemon syncs every chat, starts again after a reboot, and serves MCP at `http://127.0.0.1:47822/mcp`. If LINE ends the session, it keeps serving the local archive, shows a desktop notification on macOS and Linux, and waits for another `login`.
 
 Linux and Windows have a few extra requirements: see [Platforms](#platforms).
 
@@ -48,7 +48,7 @@ The plugin connects the agent to the running daemon and adds the line-mcp skill.
 <details>
 <summary>Without the plugin, or with another port</summary>
 
-The plugins expect the default port. Otherwise add the server by hand.
+The plugins expect the default port. Otherwise add the server by hand, with your `LINE_MCP_PORT` in place of `47822`.
 
 Claude Code:
 
@@ -65,7 +65,7 @@ url = "http://127.0.0.1:47822/mcp"
 tool_timeout_sec = 180
 ```
 
-For the skill, link or copy `plugins/line-mcp-server/skills/line-mcp/` into the agent's skills directory. It runs `line-mcp` from `PATH`, where the npm install puts it.
+For the skill, link or copy [`plugins/line-mcp-server/skills/line-mcp/`](plugins/line-mcp-server/skills/line-mcp/) from this repository into the agent's skills directory. It runs `line-mcp` from `PATH`, where the npm install puts it.
 
 </details>
 
@@ -82,7 +82,7 @@ For the skill, link or copy `plugins/line-mcp-server/skills/line-mcp/` into the 
 | `react`             | Reacts to a message.                                                                         |
 | `unsend`            | Unsends one of your messages for everyone.                                                   |
 
-Reads never mark anything as read. Every send, reaction and unsend needs an `idempotency_key`: a retry with the same key and arguments never acts twice. Any local process can call these tools: see [SECURITY.md](SECURITY.md).
+Reads never mark anything as read. Every send, reaction and unsend needs an `idempotency_key`: a retry with the same key and arguments never acts twice. A result with state `unknown` means LINE may have acted: check the chat before you retry with a new key. Any local process can call these tools: see [SECURITY.md](SECURITY.md).
 
 ## CLI
 
@@ -94,7 +94,7 @@ line-mcp query --sql "
   WHERE instr(text, '晚餐') ORDER BY sent_at DESC LIMIT 5"
 ```
 
-`line-mcp help` lists the commands. Results are JSON.
+`line-mcp help` lists the commands. The `status` tool is `line-mcp sync-status`, since `line-mcp status` reports the local setup. Results are JSON.
 
 ## Platforms
 

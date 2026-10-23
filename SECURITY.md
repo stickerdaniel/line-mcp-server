@@ -4,7 +4,7 @@ line-mcp holds a live LINE session, its E2EE keys and a local copy of every chat
 
 ## Trust model
 
-The daemon serves MCP on `127.0.0.1:47822` without a token. Every local process that can reach that port can call every tool, including sending, reacting to and unsending messages, and `send_message` with `file_path` sends any file the daemon's user can read. There is no per-user isolation and no confirmation step.
+The daemon serves MCP on `127.0.0.1:47822`, or the port in `LINE_MCP_PORT`, without a token. Every local process that can reach that port can call every tool, including sending, reacting to and unsending messages, and `send_message` with `file_path` sends any file the daemon's user can read. There is no per-user isolation and no confirmation step.
 
 The listener binds `127.0.0.1` only. It refuses any request with an `Origin` header, which every browser request carries, and any `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, and it sends no CORS headers, so web pages cannot reach it.
 
