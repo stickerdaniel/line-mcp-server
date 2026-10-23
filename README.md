@@ -82,18 +82,7 @@ For the skill, link or copy `plugins/line-mcp-server/skills/line-mcp/` into the 
 | `react`             | Reacts to a message.                                                                         |
 | `unsend`            | Unsends one of your messages for everyone.                                                   |
 
-Reads never mark anything as read. Every send, reaction and unsend needs an `idempotency_key`: a retry with the same key and arguments never acts twice.
-
-<details>
-<summary>Details</summary>
-
-- The endpoint is stateless Streamable HTTP and serves for as long as the daemon runs.
-- `query` runs one `SELECT`. Its description lists the readable tables and columns and what they mean. A result holds at most 200 rows and 64 KiB.
-- Every result reports `stale` and the last sync times.
-- The archive stores times as UTC milliseconds. `local_time(ms)` in a query, and every time the other tools return, is ISO 8601 with the offset of the daemon's system time zone, which `status` reports as `time_zone`.
-- A result with state `unknown` means LINE may have acted; line-mcp never resends it on its own.
-
-</details>
+Reads never mark anything as read. Every send, reaction and unsend needs an `idempotency_key`: a retry with the same key and arguments never acts twice. Any local process can call these tools: see [SECURITY.md](SECURITY.md).
 
 ## CLI
 
@@ -105,29 +94,7 @@ line-mcp query --sql "
   WHERE instr(text, '晚餐') ORDER BY sent_at DESC LIMIT 5"
 ```
 
-<details>
-<summary>Commands and output</summary>
-
-- Commands and flags are the tool and field names in kebab case. The `status` tool is `sync-status`, since `line-mcp status` reports the local setup without the daemon.
-- `line-mcp help` lists the commands, `line-mcp <command> --help` a command's flags.
-- A result is JSON on stdout. An error is JSON on stderr with exit code 1, or 2 for a usage error.
-- The skill in `plugins/line-mcp-server/skills/line-mcp/SKILL.md` teaches agents these commands.
-
-</details>
-
-## Security
-
-> [!IMPORTANT]
-> Every local process that can reach `127.0.0.1:47822` can call every tool, including sending, reacting to and unsending messages. `send_message` with `file_path` sends any file the daemon's user can read. There is no token, no per-user isolation and no confirmation step.
-
-<details>
-<summary>What the listener refuses</summary>
-
-The listener binds `127.0.0.1` only. It refuses any request with an `Origin` header, which every browser request carries, and any `Host` other than `127.0.0.1:<port>` or `localhost:<port>`, and it sends no CORS headers. Web pages cannot reach it.
-
-</details>
-
-See [SECURITY.md](SECURITY.md) to report a vulnerability.
+`line-mcp help` lists the commands. Results are JSON.
 
 ## Platforms
 
