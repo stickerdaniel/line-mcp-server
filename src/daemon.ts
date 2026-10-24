@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { win32 } from 'node:path';
 import {
 	type ArchiveStatus,
 	archiveStatus,
@@ -63,6 +64,54 @@ export const notifyLinux = (message: string): Promise<void> =>
 		);
 	});
 
+/**
+ * A Windows toast with fixed text. Windows shows toasts only for a registered
+ * app, so it goes out under Windows PowerShell's app ID; PowerShell 5.1 ships
+ * with Windows and, unlike pwsh, loads the WinRT types. The text arrives in an
+ * environment variable, never in the script, and the script goes encoded, so
+ * no command-line quoting applies. Without a desktop it does nothing; the log
+ * stays the record.
+ */
+const toastScript = `
+$ErrorActionPreference = 'Stop'
+[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime]
+$text = [Security.SecurityElement]::Escape($env:LINE_MCP_NOTICE)
+$xml = [Windows.Data.Xml.Dom.XmlDocument]::new()
+$xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>line-mcp</text><text>$text</text></binding></visual></toast>")
+$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($xml))
+`;
+
+/** The toast as a command; `LINE_MCP_NOTICE` in its environment is the text. */
+export const windowsToast = {
+	file: win32.join(
+		process.env.SystemRoot ?? 'C:\\Windows',
+		'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+	),
+	args: [
+		'-NoProfile',
+		'-NonInteractive',
+		'-EncodedCommand',
+		Buffer.from(toastScript, 'utf16le').toString('base64')
+	]
+};
+
+export const notifyWindows: Notify = (message) =>
+	new Promise<void>((resolve) => {
+		execFile(
+			windowsToast.file,
+			windowsToast.args,
+			{ env: { ...process.env, LINE_MCP_NOTICE: message }, timeout: 10_000, windowsHide: true },
+			() => resolve()
+		);
+	});
+
+const notifiers: Partial<Record<NodeJS.Platform, Notify>> = {
+	linux: notifyLinux,
+	win32: notifyWindows
+};
+
 const notices: Partial<Record<Health, string>> = {
 	needs_login: 'LINE ended the session. Run line-mcp login to scan a new QR code.',
 	storage_error: 'line-mcp cannot write its archive. Sync is stopped.'
@@ -113,7 +162,7 @@ const noop = () => {};
 export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> {
 	const log = options.log ?? stderrLog;
 	const now = options.now ?? Date.now;
-	const notify = options.notify ?? (process.platform === 'linux' ? notifyLinux : notifyMac);
+	const notify = options.notify ?? notifiers[process.platform] ?? notifyMac;
 	const controller = new AbortController();
 	// Assigned once the session is open; a state change during startup is read from the session.
 	let update: () => void = noop;
