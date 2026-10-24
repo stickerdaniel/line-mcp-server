@@ -1,7 +1,8 @@
+import { spawnSync } from 'node:child_process';
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { notifyLinux } from '../src/daemon.ts';
+import { notifyLinux, windowsToast } from '../src/daemon.ts';
 import { tempRoot, within } from './fake-line.ts';
 
 const path = process.env.PATH;
@@ -46,4 +47,18 @@ describe.skipIf(process.platform === 'win32')('Linux notifications', () => {
 
 		await expect(notifyLinux('text')).resolves.toBeUndefined();
 	});
+});
+
+// Windows PowerShell and its WinRT toast types exist only on Windows.
+describe.runIf(process.platform === 'win32')('Windows notifications', () => {
+	it('shows a toast with text that needs XML escaping', () => {
+		const run = spawnSync(windowsToast.file, windowsToast.args, {
+			env: { ...process.env, LINE_MCP_NOTICE: 'Run <line-mcp login> & scan.' },
+			encoding: 'utf-8',
+			timeout: 30_000
+		});
+
+		expect(run.stderr).toBe('');
+		expect(run.status).toBe(0);
+	}, 40_000);
 });

@@ -23,7 +23,7 @@ line-mcp install   # start the background daemon
 line-mcp doctor    # check the setup without contacting LINE
 ```
 
-line-mcp joins the account as a secondary device; the phone stays the primary one. From then on the daemon syncs every chat, starts again after a reboot, and serves MCP at `http://127.0.0.1:47822/mcp`. If LINE ends the session, it keeps serving the local archive, shows a desktop notification on macOS and Linux, and waits for another `login`.
+line-mcp joins the account as a secondary device; the phone stays the primary one. From then on the daemon syncs every chat, starts again after a reboot, and serves MCP at `http://127.0.0.1:47822/mcp`. If LINE ends the session, it keeps serving the local archive, shows a desktop notification and waits for another `login`.
 
 Linux and Windows have a few extra requirements: see [Platforms](#platforms).
 
