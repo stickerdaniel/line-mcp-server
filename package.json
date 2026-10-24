@@ -1,6 +1,6 @@
 {
 	"name": "line-mcp-server",
-	"version": "0.4.0",
+	"version": "0.4.1",
 	"description": "Local MCP server that mirrors a personal LINE account for coding agents",
 	"keywords": [
 		"line",
