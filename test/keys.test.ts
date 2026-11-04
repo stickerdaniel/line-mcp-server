@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { createCipheriv } from 'node:crypto';
-import { BaseClient } from '@evex/linejs/base';
-import type { Message } from '@evex/linejs-types';
+import { BaseClient } from '@evex-dev/linejs/base';
+import type { Message } from '@evex-dev/linejs-types';
 import { describe, expect, it } from 'vitest';
 import { openDatabase } from '../src/db.ts';
 import { decryptMessage } from '../src/keys.ts';
@@ -142,7 +142,7 @@ describe('E2EE key generations', () => {
 	});
 });
 
-/** The creator's side of LINEJS's group key unwrap (base/e2ee/mod.ts:291-355). */
+/** The creator's side of LINEJS's group key unwrap (base/e2ee/mod.ts:240-279). */
 function wrapGroupKey(
 	base: BaseClient,
 	groupPrivate: Buffer,

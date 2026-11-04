@@ -132,7 +132,7 @@ describe('QR login', () => {
 	});
 });
 
-// What LINEJS throws for a 410 without a Thrift body (base/request/mod.ts:183-190).
+// What LINEJS throws for a 410 without a Thrift body (base/request/mod.ts:173-180).
 function gone(): never {
 	throw new Error('Request internal failed: status=410 headers=[] body=<>');
 }

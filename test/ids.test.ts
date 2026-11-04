@@ -1,4 +1,4 @@
-import type { NestedArray } from '@evex/linejs/thrift';
+import type { NestedArray } from '@evex-dev/linejs/thrift';
 import { describe, expect, it } from 'vitest';
 import { openDatabase } from '../src/db.ts';
 import { talkSync } from '../src/probe.ts';

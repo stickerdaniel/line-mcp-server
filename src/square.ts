@@ -1,5 +1,5 @@
-import { type BaseClient, InternalError } from '@evex/linejs/base';
-import { LINEStruct } from '@evex/linejs/thrift';
+import { type BaseClient, InternalError } from '@evex-dev/linejs/base';
+import { LINEStruct } from '@evex-dev/linejs/thrift';
 import type {
 	FetchMyEventsRequest,
 	FetchMyEventsResponse,
@@ -9,12 +9,13 @@ import type {
 	SquareChat,
 	SquareChatStatusWithoutMessage,
 	SquareEvent
-} from '@evex/linejs-types';
+} from '@evex-dev/linejs-types';
 
 /**
  * `fetchSquareChatEvents` through the generated Thrift request, because the
- * handwritten wrapper drops `continuationToken`, `subscriptionId`, `inclusive`
- * and `fetchType` (base/service/square/mod.ts:127-144).
+ * handwritten wrapper's options type omits `continuationToken`,
+ * `subscriptionId`, `inclusive` and `fetchType`, although its body passes them
+ * on (base/service/square/mod.ts:113-128).
  */
 export async function fetchSquareChatEvents(
 	base: BaseClient,
@@ -32,7 +33,7 @@ export async function fetchSquareChatEvents(
 /**
  * `fetchMyEvents` through the generated Thrift request, so a 64-bit
  * `subscriptionId` passes as a bigint (the wrapper types it as `number`,
- * base/service/square/mod.ts:105-125).
+ * base/service/square/mod.ts:93-111).
  */
 export async function fetchMyEvents(
 	base: BaseClient,

@@ -1,5 +1,5 @@
-import type { Message } from '@evex/linejs-types';
-import type { NestedArray } from '@evex/linejs/thrift';
+import type { Message } from '@evex-dev/linejs-types';
+import type { NestedArray } from '@evex-dev/linejs/thrift';
 import { describe, expect, it } from 'vitest';
 import { readState, stateKeys } from '../src/archive.ts';
 import {

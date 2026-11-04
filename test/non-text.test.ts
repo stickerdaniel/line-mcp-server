@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { BaseClient } from '@evex/linejs/base';
-import type { Message, SquareEvent } from '@evex/linejs-types';
+import type { BaseClient } from '@evex-dev/linejs/base';
+import type { Message, SquareEvent } from '@evex-dev/linejs-types';
 import { describe, expect, it } from 'vitest';
 import { openDatabase, transaction } from '../src/db.ts';
 import {

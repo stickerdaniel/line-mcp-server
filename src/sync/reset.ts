@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { enums, type Pb1_X7 as SyncResponse } from '@evex/linejs-types';
+import { enums, type Pb1_X7 as SyncResponse } from '@evex-dev/linejs-types';
 import { closeGap, type Gap, listGaps, openGap } from '../archive.ts';
 import { decimal } from '../probe.ts';
 import { discoverChats, reconcileTalkChat } from './backfill.ts';
@@ -30,7 +30,7 @@ export function applyResetCursor(
  * Records every reset in the response as an open coverage gap: one for a full
  * sync and one per partial-full-sync category, including categories this
  * version does not know. The library loop is not copied here because it
- * advances without reconciliation (base/polling/mod.ts:104-138).
+ * advances without reconciliation (base/polling/mod.ts:108-133).
  */
 export function recordReset(
 	db: DatabaseSync,

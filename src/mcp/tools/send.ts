@@ -2,9 +2,9 @@ import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import { basename, extname, isAbsolute } from 'node:path';
-import type { BaseClient } from '@evex/linejs/base';
-import { LINEStruct } from '@evex/linejs/thrift';
-import type { Message } from '@evex/linejs-types';
+import type { BaseClient } from '@evex-dev/linejs/base';
+import { LINEStruct } from '@evex-dev/linejs/thrift';
+import type { Message } from '@evex-dev/linejs-types';
 import { z } from 'zod';
 import { LineMcpError } from '../../errors.ts';
 import { type SendingKeys, sendingKeys } from '../../keys.ts';
@@ -96,7 +96,7 @@ type TalkFields = Pick<Message, 'contentType' | 'contentMetadata'> & {
 	chunks?: Buffer[];
 };
 
-/** Talk `sendMessage` as LINEJS builds it (base/service/talk/mod.ts:141-171), with our own sequence number. */
+/** Talk `sendMessage` as LINEJS builds it (base/service/talk/mod.ts:135-165), with our own sequence number. */
 async function sendTalk(
 	base: BaseClient,
 	seq: number,
@@ -145,7 +145,7 @@ async function upload(
 }
 
 /**
- * E2EE media as LINEJS's `uploadMediaByE2EE` sends it (base/obs/mod.ts:330-457):
+ * E2EE media as LINEJS's `uploadMediaByE2EE` sends it (base/obs/mod.ts:294-413):
  * the encrypted file (and for images its preview) is uploaded first, which
  * creates no message; only the `sendMessage` carrying its key is the action.
  */
@@ -226,7 +226,7 @@ async function planE2EEMedia(
 
 /**
  * Plain media the way LINEJS's `uploadObjTalk` sends it without an object ID
- * (base/obs/mod.ts:177-237): LINE creates the message from the upload itself,
+ * (base/obs/mod.ts:156-213): LINE creates the message from the upload itself,
  * so the upload is the action, and the message cannot carry a reply.
  */
 async function planUpload(context: ServedContext, send: Send & { file: Upload }): Promise<Plan> {
@@ -311,8 +311,8 @@ async function planTalk(context: ServedContext, send: Send): Promise<Plan> {
 
 /**
  * OpenChat text: `sendMessage` in the chat, or `sendSquareThreadMessage` with
- * the thread's `threadMid` in a thread (base/service/square/mod.ts:147-186,
- * client/features/message/square.ts:502-533).
+ * the thread's `threadMid` in a thread (base/service/square/mod.ts:131-168,
+ * client/features/message/square.ts:490-519).
  */
 async function planSquare(context: ServedContext, send: Send): Promise<Plan> {
 	const { base } = context;

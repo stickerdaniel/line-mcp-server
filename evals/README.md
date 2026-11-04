@@ -24,7 +24,7 @@ A run passes when it ended without error and the judge marks every required fact
 
 ## Prerequisites
 
-- Node 24.18 or later, and `bun install`.
+- Node 24.18 or a later Node 24, or Node 26 or later, and `bun install`.
 - The Claude Code CLI on PATH. Runs use `--bare`, which authenticates with `ANTHROPIC_API_KEY` or an `apiKeyHelper` only: set `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` with `ANTHROPIC_BASE_URL` for a gateway.
 
 ## Commands

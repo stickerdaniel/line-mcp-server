@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { BaseClient } from '@evex/linejs/base';
-import type { FetchSquareChatEventsResponse, SquareEvent } from '@evex/linejs-types';
+import type { BaseClient } from '@evex-dev/linejs/base';
+import type { FetchSquareChatEventsResponse, SquareEvent } from '@evex-dev/linejs-types';
 import {
 	addSquareSelfMember,
 	closeGap,
@@ -321,7 +321,7 @@ const defaults: Required<SquareOptions> = {
  * Lists joined chats (Square discovery) and queues every one for a full fetch.
  * Each chat's read position and unread count are a snapshot as of its
  * `getSquareChat` request. Never `SquareChat.listen()`: it drops the initial
- * pages (client/features/square/mod.ts:213-226).
+ * pages (client/features/square/mod.ts:205-217).
  */
 export async function sweepSquareChats(context: SyncContext): Promise<void> {
 	const joined = await listJoinedSquareChats(context.base, context.now);

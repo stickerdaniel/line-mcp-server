@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { DatabaseSync } from 'node:sqlite';
-import type { BaseClient } from '@evex/linejs/base';
+import type { BaseClient } from '@evex-dev/linejs/base';
 import { type FastMCP, ToolResult } from '@prefecthq/fastmcp-ts/server';
 import { z } from 'zod';
 import type { ArchiveStatus } from '../archive.ts';

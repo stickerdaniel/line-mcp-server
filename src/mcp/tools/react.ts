@@ -1,4 +1,4 @@
-import { LINEStruct } from '@evex/linejs/thrift';
+import { LINEStruct } from '@evex-dev/linejs/thrift';
 import { z } from 'zod';
 import type { Payload } from '../../outbox.ts';
 import { int64 } from '../../sync/normalize.ts';
@@ -40,7 +40,7 @@ export const react = defineTool({
 			payload,
 			async () => {
 				if (args.service === 'talk') {
-					// As LINEJS's `react` (base/service/talk/mod.ts:852-876).
+					// As LINEJS's `react` (base/service/talk/mod.ts:808-832).
 					const reqSeq = await base.getReqseq('talk');
 					return {
 						requestSeq: reqSeq,
@@ -63,7 +63,7 @@ export const react = defineTool({
 						}
 					};
 				}
-				// `reactToMessage` carries the thread (client/features/message/square.ts:539-554).
+				// `reactToMessage` carries the thread (client/features/message/square.ts:525-538).
 				const reqSeq = await base.getReqseq('sq');
 				return {
 					requestSeq: reqSeq,

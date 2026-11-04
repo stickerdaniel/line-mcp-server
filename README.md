@@ -14,7 +14,7 @@ Give your coding agents your LINE chats. line-mcp keeps a local SQLite copy of o
 
 ## Quick start
 
-You need [Node](https://nodejs.org) 24.18 or later on macOS, Linux with systemd or Windows, and the LINE app on your phone, logged in to the account.
+You need [Node](https://nodejs.org) 24.18 or a later Node 24, or Node 26 or later, on macOS, Linux with systemd or Windows, and the LINE app on your phone, logged in to the account.
 
 ```bash
 npm i -g line-mcp-server

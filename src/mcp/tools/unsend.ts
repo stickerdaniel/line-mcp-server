@@ -1,4 +1,4 @@
-import { LINEStruct } from '@evex/linejs/thrift';
+import { LINEStruct } from '@evex-dev/linejs/thrift';
 import { z } from 'zod';
 import { LineMcpError } from '../../errors.ts';
 import type { Payload } from '../../outbox.ts';
@@ -56,7 +56,7 @@ export const unsend = defineTool({
 						}
 					};
 				}
-				// With `threadMid` for a thread message (base/service/square/mod.ts:518-538).
+				// With `threadMid` for a thread message (base/service/square/mod.ts:459-477).
 				return {
 					requestSeq: null,
 					correlation: {},

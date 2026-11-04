@@ -1,4 +1,4 @@
-import type { NestedArray } from '@evex/linejs/thrift';
+import type { NestedArray } from '@evex-dev/linejs/thrift';
 import { describe, expect, it } from 'vitest';
 import { readState, talkSyncedAtKey } from '../src/archive.ts';
 import { backoffMs, runLoop, type Sleep } from '../src/sync/loop.ts';
@@ -283,7 +283,7 @@ describe('Talk sync cadence', () => {
 	});
 });
 
-// What LINEJS throws when an idle long poll ends with HTTP 410 (base/request/mod.ts:183-190).
+// What LINEJS throws when an idle long poll ends with HTTP 410 (base/request/mod.ts:173-180).
 function longPollEnded(): never {
 	throw new Error('Request internal failed: status=410 headers=[] body=<>');
 }
