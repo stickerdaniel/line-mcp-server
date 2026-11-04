@@ -1,5 +1,5 @@
-import { InternalError } from '@evex/linejs/base';
-import { enums } from '@evex/linejs-types';
+import { InternalError } from '@evex-dev/linejs/base';
+import { enums } from '@evex-dev/linejs-types';
 
 export type ErrorCode =
 	| 'lock_held'
@@ -134,7 +134,7 @@ export function mapError(error: unknown, operation: string): MappedError {
 
 /**
  * The HTTP status of a response LINEJS could not parse as Thrift. LINEJS throws
- * a plain Error naming it (base/request/mod.ts:183-190); a long poll that ends
+ * a plain Error naming it (base/request/mod.ts:173-180); a long poll that ends
  * without an answer arrives this way as 410.
  */
 export function isHttpStatus(error: unknown, status: number): boolean {

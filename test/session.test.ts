@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { DatabaseSync } from 'node:sqlite';
-import type { Message } from '@evex/linejs-types';
+import type { Message } from '@evex-dev/linejs-types';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openDatabase, readAccount } from '../src/db.ts';
 import { mapError } from '../src/errors.ts';

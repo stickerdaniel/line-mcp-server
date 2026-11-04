@@ -1,5 +1,5 @@
-import type { BaseClient } from '@evex/linejs/base';
-import { enums, type Message } from '@evex/linejs-types';
+import type { BaseClient } from '@evex-dev/linejs/base';
+import { enums, type Message } from '@evex-dev/linejs-types';
 import {
 	type Service,
 	readState,

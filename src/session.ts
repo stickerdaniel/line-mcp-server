@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { DatabaseSync } from 'node:sqlite';
-import { BaseClient, InternalError } from '@evex/linejs/base';
-import type { BaseStorage } from '@evex/linejs/storage';
+import { BaseClient, InternalError } from '@evex-dev/linejs/base';
+import type { BaseStorage } from '@evex-dev/linejs/storage';
 import {
 	type Account,
 	bindAccount,
@@ -19,7 +19,7 @@ import { type StatePrivacy, statePrivacy } from './privacy.ts';
 import { type KvRow, SqliteStorage, type Value } from './storage.ts';
 
 export const device = 'ANDROIDSECONDARY';
-export const linejsVersion = '3.5.0';
+export const linejsVersion = '3.6.4';
 const tokenKey = 'authToken';
 
 export type SessionState = 'online' | 'needs_login' | 'storage_error';
@@ -226,7 +226,7 @@ export async function login(options: LoginOptions): Promise<LoginResult> {
 		base.on('pincall', options.onPin);
 		// LINE holds the QR poll open a fixed number of times and answers 410 once
 		// nobody scanned; LINEJS retries until the last poll, then rethrows
-		// (base/login/mod.ts:709-742).
+		// (base/login/mod.ts:671-701).
 		const checkQrCodeVerified = base.loginProcess.checkQrCodeVerified.bind(base.loginProcess);
 		base.loginProcess.checkQrCodeVerified = async (...args) => {
 			try {
@@ -397,7 +397,7 @@ const blockedMethods = new Map<string, ErrorCode>([
 
 function installGuards(base: BaseClient, control: Control, storage: SqliteStorage): void {
 	// LINEJS registers a fresh key pair when QR login decodes no keys
-	// (base/login/mod.ts:303-305) and swallows a failed registration, so the
+	// (base/login/mod.ts:298-299) and swallows a failed registration, so the
 	// guard has to fail the login itself rather than only the RPC.
 	base.e2ee.registerE2EEKeyPair = async () => {
 		throw new LineMcpError(
@@ -405,7 +405,7 @@ function installGuards(base: BaseClient, control: Control, storage: SqliteStorag
 			'LINE transferred no E2EE keys and registering a new key pair is disabled'
 		);
 	};
-	// Reached from a NOT_FOUND group key lookup (base/e2ee/mod.ts:240-246), so
+	// Reached from a NOT_FOUND group key lookup (base/e2ee/mod.ts:199-200), so
 	// a read of a keyless group would register one; only a send may.
 	const tryRegisterE2EEGroupKey = base.e2ee.tryRegisterE2EEGroupKey.bind(base.e2ee);
 	base.e2ee.tryRegisterE2EEGroupKey = async (chatMid) => {
@@ -417,7 +417,7 @@ function installGuards(base: BaseClient, control: Control, storage: SqliteStorag
 	};
 
 	// Every dispatch, including LINEJS's private retry after a refresh
-	// (base/request/mod.ts:265-276) and media requests on `base.fetch`, stops
+	// (base/request/mod.ts:242-253) and media requests on `base.fetch`, stops
 	// here once the state forbids upstream work. The original transports stay
 	// in place, so the Node HTTP/2 dispatchers and the push path are unchanged.
 	const { fetch, fetchPush } = base;
@@ -435,7 +435,7 @@ function installGuards(base: BaseClient, control: Control, storage: SqliteStorag
 	});
 
 	// LINEJS resolves a request whose retry after a refresh is told to refresh
-	// again with that refusal instead of throwing (base/request/mod.ts:238-278),
+	// again with that refusal instead of throwing (base/request/mod.ts:217-255),
 	// so its caller would read an empty answer as success. Thrown as LINEJS
 	// throws any other refusal, it counts as auth loss below.
 	const core = base.request as unknown as { requestCore: RequestCore };
@@ -553,7 +553,7 @@ async function refresh(base: BaseClient, storage: SqliteStorage): Promise<void> 
 
 /**
  * True inside the refresh RPC's own async context. LINEJS emits a response's
- * next-access header before reading its body (base/request/mod.ts:170-174), so
+ * next-access header before reading its body (base/request/mod.ts:160-164), so
  * without this a refresh response's header token would commit alone, ahead of
  * the refresh transaction. The scope follows that one request, not the client.
  */
@@ -561,7 +561,7 @@ const insideRefresh = new AsyncLocalStorage<boolean>();
 
 /**
  * The next-access header path emits without assigning the token
- * (base/request/mod.ts:170-173) and the emitter does not await, so the write
+ * (base/request/mod.ts:160-163) and the emitter does not await, so the write
  * happens synchronously here. A failed write throws into the request that
  * carried the token and leaves the session in `storage_error`. The refresh
  * response's header is left to the refresh transaction, which wins.
@@ -582,7 +582,7 @@ const terminalTalkCodes = new Set([
 ]);
 
 /**
- * LINEJS throws these before its own `end` event (base/request/mod.ts:244-262),
+ * LINEJS throws these before its own `end` event (base/request/mod.ts:223-239),
  * so they are read from the thrown error data.
  */
 export function isTerminalAuthError(error: unknown): boolean {

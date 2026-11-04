@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import { BaseStorage, type Storage } from '@evex/linejs/storage';
+import { BaseStorage, type Storage } from '@evex-dev/linejs/storage';
 import { transaction } from './db.ts';
 import { LineMcpError } from './errors.ts';
 
