@@ -699,6 +699,8 @@ describe('Square chat events', () => {
 		for (const wait of waits) expect(wait).toBeGreaterThanOrEqual(1000);
 	});
 
+	// It archives 27 pages of 100 messages, by far the most in this file: about
+	// 0.5 s alone, over 6 s on a loaded machine.
 	it('stops a backfill that rotates through eleven full pages under fresh tokens', async () => {
 		let calls = 0;
 		const fixture = await syncFixture({
@@ -725,7 +727,7 @@ describe('Square chat events', () => {
 		expect(readState<BackfillState>(db, key)?.stopReason).toBe('no_progress');
 		expect(calls).toBeLessThan(3 + 4 * 11);
 		expect(listGaps(db)).toMatchObject([{ reason: 'history_stalled', status: 'incomplete' }]);
-	});
+	}, 15_000);
 
 	it('gives reconciliation and backfill of one chat a shared history slot', async () => {
 		const requests: { from: unknown; at: number }[] = [];
