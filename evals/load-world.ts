@@ -6,9 +6,9 @@
 // Nothing is inserted into an archive table by hand.
 import { Buffer } from 'node:buffer';
 import { createHash, randomBytes } from 'node:crypto';
-import { BaseClient, InternalError } from '@evex/linejs/base';
-import type { BaseStorage } from '@evex/linejs/storage';
-import type { Message as LineMessage, Operation, SquareEvent } from '@evex/linejs-types';
+import { BaseClient, InternalError } from '@evex-dev/linejs/base';
+import type { BaseStorage } from '@evex-dev/linejs/storage';
+import type { Message as LineMessage, Operation, SquareEvent } from '@evex-dev/linejs-types';
 import {
 	addSquareSelfMember,
 	healthKey,

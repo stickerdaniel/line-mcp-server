@@ -1,7 +1,7 @@
 // Shared setup for sync tests: a real session (guards, token handler, archive
 // migrations) on a temporary state root, answered by a fake upstream.
-import type { Message, SquareEvent } from '@evex/linejs-types';
-import type { NestedArray } from '@evex/linejs/thrift';
+import type { Message, SquareEvent } from '@evex-dev/linejs-types';
+import type { NestedArray } from '@evex-dev/linejs/thrift';
 import { afterEach } from 'vitest';
 import type { SyncContext } from '../src/sync/loop.ts';
 import type { Session } from '../src/session.ts';

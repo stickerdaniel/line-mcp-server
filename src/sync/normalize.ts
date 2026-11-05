@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import type { DatabaseSync } from 'node:sqlite';
-import type { BaseClient } from '@evex/linejs/base';
-import { enums, type Message, type Operation, type SquareEvent } from '@evex/linejs-types';
+import type { BaseClient } from '@evex-dev/linejs/base';
+import { enums, type Message, type Operation, type SquareEvent } from '@evex-dev/linejs-types';
 import { readState, type Service, upsertChat, upsertParticipant, writeState } from '../archive.ts';
 import { mapError } from '../errors.ts';
 import { decryptMessage } from '../keys.ts';

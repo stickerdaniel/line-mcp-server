@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
-import { type BaseClient, InternalError } from '@evex/linejs/base';
-import { enums, type Message } from '@evex/linejs-types';
+import { type BaseClient, InternalError } from '@evex-dev/linejs/base';
+import { enums, type Message } from '@evex-dev/linejs-types';
 import { LineMcpError, upstreamCode } from './errors.ts';
 import { allowGroupKeyRegistration, type Log } from './session.ts';
 
@@ -14,8 +14,8 @@ type Missing = Extract<DecryptResult, { state: 'missing_key' }>;
 /**
  * Decrypts an E2EE message only with the exact key generations its envelope
  * names. LINEJS substitutes another self key for a missing DM key
- * (base/e2ee/mod.ts:903-906) and the latest group key for a missing group
- * generation (base/e2ee/mod.ts:209-226); both then fail as a generic
+ * (base/e2ee/mod.ts:725-728) and the latest group key for a missing group
+ * generation (base/e2ee/mod.ts:176-197); both then fail as a generic
  * authentication error. Checking first keeps `invalid` for messages whose
  * keys were verified present. A plain message is `ok` with no payload.
  */
@@ -198,11 +198,11 @@ export interface SendingKeys {
 
 /**
  * The keys LINEJS's `encryptE2EEMessage` uses for a Talk message to `to`
- * (base/e2ee/mod.ts:636-682), or null when a one-to-one peer does not support
+ * (base/e2ee/mod.ts:498-536), or null when a one-to-one peer does not support
  * E2EE. A DM pairs the own key with the peer key LINE negotiates. A group or
  * room uses its current shared key, unwrapped with exactly the generations it
  * names. A group without one gets a new key, registered as LINEJS does
- * (base/e2ee/mod.ts:356-409); that is the only registration line-mcp performs
+ * (base/e2ee/mod.ts:280-319); that is the only registration line-mcp performs
  * (architecture, E2EE key boundaries). Only the send path calls this.
  */
 export async function sendingKeys(

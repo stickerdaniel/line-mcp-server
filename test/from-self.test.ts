@@ -1,4 +1,4 @@
-import type { SquareEvent } from '@evex/linejs-types';
+import type { SquareEvent } from '@evex-dev/linejs-types';
 import { describe, expect, it } from 'vitest';
 import { upsertChat } from '../src/archive.ts';
 import { openDatabase, transaction } from '../src/db.ts';

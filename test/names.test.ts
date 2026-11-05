@@ -1,4 +1,4 @@
-import type { NestedArray } from '@evex/linejs/thrift';
+import type { NestedArray } from '@evex-dev/linejs/thrift';
 import { describe, expect, it } from 'vitest';
 import { transaction } from '../src/db.ts';
 import { type Service, upsertChat } from '../src/archive.ts';

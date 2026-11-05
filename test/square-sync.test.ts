@@ -1,6 +1,6 @@
-import { InternalError } from '@evex/linejs/base';
-import type { SquareEvent } from '@evex/linejs-types';
-import type { NestedArray } from '@evex/linejs/thrift';
+import { InternalError } from '@evex-dev/linejs/base';
+import type { SquareEvent } from '@evex-dev/linejs-types';
+import type { NestedArray } from '@evex-dev/linejs/thrift';
 import { describe, expect, it } from 'vitest';
 import { listGaps, openGap, readState, writeState } from '../src/archive.ts';
 import { transaction } from '../src/db.ts';

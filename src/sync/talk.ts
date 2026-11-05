@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { Pb1_X7 as SyncResponse } from '@evex/linejs-types';
+import type { Pb1_X7 as SyncResponse } from '@evex-dev/linejs-types';
 import { readState, talkSyncedAtKey, writeState } from '../archive.ts';
 import { transaction } from '../db.ts';
 import { isHttpStatus } from '../errors.ts';
@@ -65,7 +65,7 @@ export async function syncTalkOnce(context: SyncContext, limit = 100): Promise<T
 	const started = context.now();
 	let response: Partial<SyncResponse> | undefined;
 	try {
-		// LINEJS sends `sync` with `config.longTimeout` (180 s in 3.5.0), longer
+		// LINEJS sends `sync` with `config.longTimeout` (180 s), longer
 		// than the roughly 110 s LINE holds an idle long poll.
 		response = (await context.base.talk.sync({
 			limit,

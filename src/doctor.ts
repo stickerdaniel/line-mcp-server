@@ -38,14 +38,14 @@ export async function doctor(input: {
 		node = input.node ?? selectNode({ override: input.env.LINE_MCP_NODE }).path;
 	} catch (error) {
 		node = process.execPath;
-		checks.push({ name: 'node_override', ok: false, detail: mapError(error, 'doctor').message });
+		checks.push({ name: 'node_selection', ok: false, detail: mapError(error, 'doctor').message });
 	}
 	const runs = input.nodeVersion ?? nodeVersion(node);
 	checks.push(
 		{
 			name: 'node',
 			ok: isAbsolute(node) && existsSync(node) && supportedNode(runs),
-			detail: `${node} (v${runs ?? 'unknown'}, needs >= 24.18)`
+			detail: `${node} (v${runs ?? 'unknown'}, needs ^24.18 or >= 26)`
 		},
 		pathCheck('node_path', node, 'set LINE_MCP_NODE to a Node outside it'),
 		pathCheck(

@@ -7,7 +7,7 @@
 //     without a tarball it packs this checkout
 //
 // Everything runs under a temporary home, npm prefix and state root, with an
-// empty npm config (no JSR registry), free ports and the service runner
+// empty npm user and global config, free ports and the service runner
 // fixture in place of the service manager; the real service, archive and LINE
 // stay untouched. Only test/service-e2e.test.ts reaches the real service
 // manager, and only on a CI runner with LINE_MCP_E2E_SERVICE=1.

@@ -1,6 +1,6 @@
-import type { NestedArray } from '@evex/linejs/thrift';
-import { LINEStruct } from '@evex/linejs/thrift';
-import type { SquareEvent, SquareEventPayload, SquareEventType } from '@evex/linejs-types';
+import type { NestedArray } from '@evex-dev/linejs/thrift';
+import { LINEStruct } from '@evex-dev/linejs/thrift';
+import type { SquareEvent, SquareEventPayload, SquareEventType } from '@evex-dev/linejs-types';
 import { afterEach, describe, expect, it } from 'vitest';
 import { openSession, type Session } from '../src/session.ts';
 import { listJoinedSquareChats } from '../src/square.ts';
