@@ -98,7 +98,9 @@ process.exitCode = Number(process.env.NPM_EXIT);
 	return { ...env, PATH: [dir, dirname(process.execPath), process.env.PATH].join(delimiter) };
 }
 
-describe('release-plan.ts', () => {
+// Each test starts Node two to four times, the script and the fake npm, one
+// after another. On a loaded Mac one start took up to 1.8 s.
+describe('release-plan.ts', { timeout: 15_000 }, () => {
 	it('prints the detect decision as step outputs', async () => {
 		const { stdout } = await run(['detect', '0.1.0', '0.2.0', '', sha]);
 		expect(stdout).toBe('release=true\nversion=0.2.0\n');

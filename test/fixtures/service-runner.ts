@@ -8,12 +8,12 @@
 // the calls in turn, its last one every call after (counted in
 // LINE_MCP_SERVICE_CALLS). `{"hang": true}` never answers (it
 // gives up after 60 s), so the runner's timeout ends it; `{"delayMs": 500}`
-// answers that much later. `{"descendant": true}` first starts a child that
-// inherits stdout and lives 60 s, as a wrapper script's child would, and
-// prints `descendant <pid>`. launchctl's `print` exits 113 by default, its
-// answer for a service that is not loaded.
+// answers that much later. `{"descendant": "<file>"}` first starts a child
+// that inherits stdout and lives 60 s, as a wrapper script's child would, and
+// then writes its PID to that file. launchctl's `print` exits 113 by default,
+// its answer for a service that is not loaded.
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 interface Reply {
@@ -21,7 +21,7 @@ interface Reply {
 	stdout?: string;
 	hang?: boolean;
 	delayMs?: number;
-	descendant?: boolean;
+	descendant?: string;
 }
 
 const [tool = '', ...args] = process.argv.slice(2);
@@ -48,7 +48,7 @@ if (reply.descendant) {
 	const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], {
 		stdio: ['ignore', 'inherit', 'ignore']
 	});
-	process.stdout.write(`descendant ${child.pid}\n`);
+	writeFileSync(reply.descendant, String(child.pid));
 }
 if (reply.hang) setTimeout(() => {}, 60_000);
 else {

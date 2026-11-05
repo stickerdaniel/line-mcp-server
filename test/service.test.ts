@@ -249,27 +249,17 @@ describe('launchd', () => {
 	});
 });
 
-/** Runs `systemctl --user stop` through the fixture with `reply` and a 2 s timeout. */
-async function stopWith(reply: Record<string, unknown>) {
-	// The fixture reads its script from the environment it inherits.
-	const saved = process.env.LINE_MCP_SERVICE_SCRIPT;
-	process.env.LINE_MCP_SERVICE_SCRIPT = JSON.stringify({ stop: reply });
-	try {
-		return await within(
-			5000,
-			runner.run('systemctl', ['--user', 'stop', 'line-mcp.service'], { timeoutMs: 2000 }),
-			'the call to end'
-		);
-	} finally {
-		if (saved === undefined) delete process.env.LINE_MCP_SERVICE_SCRIPT;
-		else process.env.LINE_MCP_SERVICE_SCRIPT = saved;
-	}
-}
+/** Starts `systemctl --user stop` through the fixture with `reply` and a 2 s timeout. */
+const stopWith = (reply: Record<string, unknown>) =>
+	runner.run('systemctl', ['--user', 'stop', 'line-mcp.service'], {
+		timeoutMs: 2000,
+		env: { ...process.env, LINE_MCP_SERVICE_SCRIPT: JSON.stringify({ stop: reply }) }
+	});
 
 describe('tool runner', () => {
 	// A hung systemctl must not hang install or login; the kill is not "stopped".
 	it('kills a call that outlives its timeout and reports it as a timeout', async () => {
-		expect((await stopWith({ hang: true })).exit).toBe('timeout');
+		expect((await within(5000, stopWith({ hang: true }), 'the call to end')).exit).toBe('timeout');
 	});
 
 	// A wrapper script on PATH may leave a child that holds the output open.
@@ -277,16 +267,34 @@ describe('tool runner', () => {
 		'ends a timed-out call whose descendant still holds its output',
 		{ timeout: 10_000 },
 		async () => {
-			const result = await stopWith({ hang: true, descendant: true });
-			const pid = Number(/descendant (\d+)/.exec(result.stdout)?.[1]);
+			const pidFile = join(tempRoot(), 'descendant');
+			// The runner's deadline runs on a fake clock, so it passes only once
+			// the descendant runs, however long the fixture takes to start.
+			const { setTimeout: realTimeout } = globalThis;
+			vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+			let pid = 0;
 			onTestFinished(() => {
+				// After a failed wait the runner's deadline still fires, so it ends
+				// the call's process group instead of leaving it running.
+				if (vi.isFakeTimers()) vi.advanceTimersByTime(2000);
+				vi.useRealTimers();
+				if (!pid) return;
 				try {
 					process.kill(pid, 'SIGKILL');
 				} catch {}
 			});
+			const call = stopWith({ hang: true, descendant: pidFile });
+			const giveUp = Date.now() + 8000;
+			while (!pid) {
+				if (Date.now() > giveUp) throw new Error('the fixture wrote no descendant PID');
+				await new Promise((resolve) => realTimeout(resolve, 20));
+				pid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf-8')) : 0;
+			}
+			vi.advanceTimersByTime(2000);
+			vi.useRealTimers();
+			const result = await within(5000, call, 'the call to end');
 
 			expect(result.exit).toBe('timeout');
-			expect(pid).toBeGreaterThan(0);
 			// Windows has no process groups: there the descendant outlives the call.
 			if (windows) return;
 			const alive = () => {
