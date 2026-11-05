@@ -60,7 +60,7 @@
 	"devDependencies": {
 		"@evex/linejs": "npm:@jsr/evex__linejs@3.5.0",
 		"@evex/linejs-types": "npm:@jsr/evex__linejs-types@3.5.0",
-		"@types/node": "24",
+		"@types/node": "26",
 		"@types/qrcode-terminal": "0.12.2",
 		"husky": "^9.1.7",
 		"oxlint": "^1.87.0",
