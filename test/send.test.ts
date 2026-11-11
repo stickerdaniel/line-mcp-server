@@ -6,9 +6,9 @@ import { writeFileSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { type BaseClient, InternalError } from '@evex/linejs/base';
-import type { NestedArray } from '@evex/linejs/thrift';
-import type { Message } from '@evex/linejs-types';
+import { type BaseClient, InternalError } from '@evex-dev/linejs/base';
+import type { NestedArray } from '@evex-dev/linejs/thrift';
+import type { Message } from '@evex-dev/linejs-types';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readAccount, transaction } from '../src/db.ts';
 import { decryptMessage } from '../src/keys.ts';
@@ -1166,7 +1166,7 @@ describe('CLI', { timeout: 30_000 }, () => {
 	});
 });
 
-/** The creator's side of LINEJS's group key unwrap (base/e2ee/mod.ts:291-355). */
+/** The creator's side of LINEJS's group key unwrap (base/e2ee/mod.ts:240-279). */
 /** The inverse of `wrapGroupKey`: what a member does with its copy of a group key. */
 function unwrapGroupKey(
 	base: BaseClient,

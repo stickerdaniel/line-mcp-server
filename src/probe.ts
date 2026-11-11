@@ -1,5 +1,5 @@
-import type { BaseClient } from '@evex/linejs/base';
-import type { Message, SquareEvent } from '@evex/linejs-types';
+import type { BaseClient } from '@evex-dev/linejs/base';
+import type { Message, SquareEvent } from '@evex-dev/linejs-types';
 import { mapError } from './errors.ts';
 import { decryptMessage } from './keys.ts';
 import type { Session } from './session.ts';

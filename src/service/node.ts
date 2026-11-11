@@ -35,10 +35,13 @@ export function nodeVersion(path: string): string | undefined {
 	}
 }
 
-/** Node 24.18 or later: `node:sqlite` with FTS5 trigram and type stripping. */
+/**
+ * Node 24.18 or a later Node 24, or Node 26 or later: `node:sqlite` with FTS5
+ * trigram and type stripping, in a line LINEJS supports (it excludes 25).
+ */
 export function supportedNode(version: string | undefined): boolean {
 	const [major = 0, minor = 0] = (version ?? '').split('.').map(Number);
-	return major > 24 || (major === 24 && minor >= 18);
+	return (major === 24 && minor >= 18) || major >= 26;
 }
 
 /**
@@ -64,9 +67,11 @@ export function versionedLayout(path: string): string | undefined {
 
 /**
  * The Node binary the service runs: an explicit override (`--node` or
- * `LINE_MCP_NODE`), which must be an absolute path to an executable Node
- * 24.18 or later; otherwise Homebrew's stable `opt` link, also derived from a
- * Cellar `execPath` under another prefix; otherwise the running Node.
+ * `LINE_MCP_NODE`), which must be an absolute path to an executable Node;
+ * otherwise Homebrew's stable `opt` link, also derived from a Cellar
+ * `execPath` under another prefix; otherwise the running Node. Whichever it
+ * picks must run a version `supportedNode` accepts, otherwise it throws
+ * `invalid_node` rather than fall through to the next choice.
  */
 export function selectNode(
 	input: { override?: string; execPath?: string; stable?: string } = {}
@@ -76,14 +81,25 @@ export function selectNode(
 		if (!isAbsolute(override) || !executable(override) || !supportedNode(nodeVersion(override))) {
 			throw new LineMcpError(
 				'invalid_node',
-				'The Node override (--node or LINE_MCP_NODE) must be an absolute path to an executable Node 24.18 or later'
+				'The Node override (--node or LINE_MCP_NODE) must be an absolute path to an executable Node 24.18 or a later Node 24, or Node 26 or later'
 			);
 		}
 		return { path: override, source: 'override' };
 	}
-	const stable = input.stable ?? stableNode;
+	const selection = automaticNode(input.stable ?? stableNode, input.execPath ?? process.execPath);
+	const version = nodeVersion(selection.path);
+	if (!supportedNode(version)) {
+		throw new LineMcpError(
+			'invalid_node',
+			`The service would run ${selection.path} (v${version ?? 'unknown'}), but needs Node 24.18 or a later Node 24, or Node 26 or later; pass one with --node or LINE_MCP_NODE`
+		);
+	}
+	return selection;
+}
+
+/** The Node `selectNode` picks without an override, before its version check. */
+function automaticNode(stable: string, execPath: string): NodeSelection {
 	if (executable(stable)) return { path: stable, source: 'stable' };
-	const execPath = input.execPath ?? process.execPath;
 	const cellar = /^(.*)\/Cellar\/([^/]+)\/[^/]+\/bin\/node$/.exec(execPath);
 	if (cellar) {
 		const linked = `${cellar[1]}/opt/${cellar[2]}/bin/node`;

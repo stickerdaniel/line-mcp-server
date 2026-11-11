@@ -16,9 +16,9 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { BaseClient, InternalError } from '@evex/linejs/base';
-import type { BaseStorage } from '@evex/linejs/storage';
-import { type NestedArray, Protocols } from '@evex/linejs/thrift';
+import { BaseClient, InternalError } from '@evex-dev/linejs/base';
+import type { BaseStorage } from '@evex-dev/linejs/storage';
+import { type NestedArray, Protocols } from '@evex-dev/linejs/thrift';
 import { bindAccount, migrate, openDatabase } from '../src/db.ts';
 import { databasePath } from '../src/paths.ts';
 import { type StatePrivacy, statePrivacy } from '../src/privacy.ts';
@@ -50,7 +50,7 @@ const rpcOrigin = 'https://fake-rpc.invalid';
 /**
  * Answers RPCs in place of LINEJS's request step, below the session guards.
  * Each RPC first leaves through `base.fetch`, as LINEJS's own request does
- * (base/request/mod.ts:163-169), so the session's transport guards see it;
+ * (base/request/mod.ts:153-159), so the session's transport guards see it;
  * then its handler answers. Plain HTTP requests (media) go to `fetch`, which
  * refuses them by default.
  */

@@ -9,9 +9,9 @@
 	},
 	"packageRules": [
 		{
-			"description": "Group safe non-major updates; LINEJS talks to an unofficial protocol, so its updates stay separate",
+			"description": "Group safe non-major updates; LINEJS talks to an unofficial protocol, so updates of @evex-dev/linejs and @evex-dev/linejs-types stay separate",
 			"matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-			"matchPackageNames": ["!@evex/linejs"],
+			"matchPackageNames": ["!/^@evex-dev\\/linejs/"],
 			"groupName": "all non-major dependencies",
 			"groupSlug": "all-minor-patch"
 		}

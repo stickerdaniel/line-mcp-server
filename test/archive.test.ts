@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
-import { BaseClient } from '@evex/linejs/base';
-import type { Message } from '@evex/linejs-types';
+import { BaseClient } from '@evex-dev/linejs/base';
+import type { Message } from '@evex-dev/linejs-types';
 import { describe, expect, it } from 'vitest';
 import { openDatabase, transaction } from '../src/db.ts';
 import { SqliteStorage } from '../src/storage.ts';

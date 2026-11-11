@@ -4,8 +4,8 @@ import { randomBytes } from 'node:crypto';
 import { readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { type FileHandle, open } from 'node:fs/promises';
 import { extname, join } from 'node:path';
-import { type BaseClient, InternalError } from '@evex/linejs/base';
-import type { Message } from '@evex/linejs-types';
+import { type BaseClient, InternalError } from '@evex-dev/linejs/base';
+import type { Message } from '@evex-dev/linejs-types';
 import { z } from 'zod';
 import { findMessage, readEnvelope, type Service } from '../../archive.ts';
 import { LineMcpError, mapError } from '../../errors.ts';
@@ -130,7 +130,7 @@ function announcesMore(response: Response, limit: number): boolean {
 /**
  * The byte limit and cancellation of the obs download in progress, if any.
  * LINEJS reads an E2EE download whole into a Blob and decrypts it in one piece
- * (base/obs/mod.ts:304-328, :459-488: an HMAC over the whole ciphertext), so
+ * (base/obs/mod.ts:269-292, :415-451: an HMAC over the whole ciphertext), so
  * the only bound below that Blob is on the response: `boundObsFetch` refuses
  * it by Content-Length and errors its body once more than the limit arrived.
  */
@@ -189,7 +189,7 @@ function boundObsFetch(base: BaseClient): void {
 
 /**
  * Plain media: the same request LINEJS's `downloadMessageData` sends
- * (base/obs/mod.ts:107-145), streamed to `partial` and stopped as soon as it
+ * (base/obs/mod.ts:98-127), streamed to `partial` and stopped as soon as it
  * passes `limit`, so an oversized file never sits in memory or on disk.
  */
 async function streamPlain(
@@ -260,7 +260,7 @@ async function downloadE2EE(
 	const { base } = context;
 	// The row only reaches `ok` once the exact key generations its envelope
 	// names were verified (architecture, E2EE key boundaries); LINEJS then decrypts the file
-	// key from the same envelope (base/obs/mod.ts:459-468).
+	// key from the same envelope (base/obs/mod.ts:415-423).
 	if (decryptState !== 'ok') {
 		throw new LineMcpError('missing_key', 'The keys for this E2EE message are not available');
 	}

@@ -1,5 +1,6 @@
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import {
+	chmodSync,
 	cpSync,
 	existsSync,
 	mkdirSync,
@@ -17,7 +18,7 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { healthKey, writeState } from '../src/archive.ts';
 import { openDatabase, setAuthState } from '../src/db.ts';
 import { lockInUse, requestStop } from '../src/lock.ts';
-import { selectNode } from '../src/service/node.ts';
+import { selectNode, supportedNode } from '../src/service/node.ts';
 import { databasePath } from '../src/paths.ts';
 import { freePort, nodeAt, seedLive, selfMid, tempRoot, within } from './fake-line.ts';
 import { callTool, cliEntry, runCli as runTool, type ToolCall } from './mcp-client.ts';
@@ -39,6 +40,15 @@ function npxCopy(): string {
 	// A junction on Windows, where a directory symlink needs a privilege; ignored elsewhere.
 	symlinkSync(join(pkg, 'node_modules'), join(copy, 'node_modules'), 'junction');
 	return join(copy, relative(pkg, cli));
+}
+
+/** `<dir>/node`, a shell script that only answers `--version` with `v<version>`. */
+function fakeNode(dir: string, version: string): string {
+	const path = join(dir, 'node');
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(path, `#!/bin/sh\necho v${version}\n`);
+	chmodSync(path, 0o755);
+	return path;
 }
 
 const windows = process.platform === 'win32';
@@ -401,6 +411,43 @@ describe('install and uninstall', { timeout: 15_000 }, () => {
 				path: opt,
 				source: 'stable'
 			});
+		}
+	);
+
+	it.each([
+		['24.17.1', false],
+		['24.18.0', true],
+		['24.20.3', true],
+		['25.0.0', false],
+		['25.9.0', false],
+		['26.0.0', true],
+		['27.1.0', true]
+	])('treats Node %s as supported: %s', (version, supported) => {
+		expect(supportedNode(version)).toBe(supported);
+	});
+
+	// The fake Node 25 is a shell script, which Windows does not run.
+	it.skipIf(windows)('refuses to select a running Node 25', () => {
+		const prefix = tempRoot();
+		const running = fakeNode(join(prefix, 'bin'), '25.0.0');
+
+		expect(() => selectNode({ execPath: running, stable: join(prefix, 'missing') })).toThrow(
+			expect.objectContaining({ code: 'invalid_node' })
+		);
+	});
+
+	// A `brew upgrade node` moves the opt link to 25 while the old Cellar Node
+	// still runs. Homebrew layouts exist only on macOS and Linux.
+	it.skipIf(windows)(
+		'refuses a Node 25 behind the Homebrew opt link instead of the running Node',
+		() => {
+			const prefix = tempRoot();
+			const cellar = nodeAt(join(prefix, 'Cellar', 'node', '24.18.0', 'bin'));
+			fakeNode(join(prefix, 'opt', 'node', 'bin'), '25.0.0');
+
+			expect(() => selectNode({ execPath: cellar, stable: join(prefix, 'missing') })).toThrow(
+				expect.objectContaining({ code: 'invalid_node' })
+			);
 		}
 	);
 
