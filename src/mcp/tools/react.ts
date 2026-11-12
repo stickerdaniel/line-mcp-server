@@ -1,4 +1,3 @@
-import { LINEStruct } from '@evex-dev/linejs/thrift';
 import { z } from 'zod';
 import type { Payload } from '../../outbox.ts';
 import { int64 } from '../../sync/normalize.ts';
@@ -40,25 +39,14 @@ export const react = defineTool({
 			payload,
 			async () => {
 				if (args.service === 'talk') {
-					// As LINEJS's `react` (base/service/talk/mod.ts:808-832).
+					// LINEJS's `react` takes the outbox's sequence instead of
+					// allocating one (base/service/talk/mod.ts:808-832).
 					const reqSeq = await base.getReqseq('talk');
 					return {
 						requestSeq: reqSeq,
 						correlation: {},
 						dispatch: async () => {
-							await base.request.request(
-								LINEStruct.react_args({
-									reactRequest: {
-										reqSeq,
-										messageId: int64(args.message_id),
-										reactionType: { predefinedReactionType: reaction }
-									}
-								}),
-								'react',
-								4,
-								true,
-								'/S4'
-							);
+							await base.talk.react({ reqSeq, id: int64(args.message_id), reaction });
 							return { messageId: null };
 						}
 					};
