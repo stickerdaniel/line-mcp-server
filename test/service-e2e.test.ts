@@ -154,6 +154,20 @@ const serving = (line: (args: string[]) => Promise<Run>) =>
 		return JSON.parse(run.stdout) as Record<string, unknown>;
 	});
 
+/** The daemon starts `log` records; each daemon logs one. */
+const starts = (log: string) =>
+	(existsSync(log) ? readFileSync(log, 'utf-8') : '').split('"event":"daemon_started"').length - 1;
+
+/**
+ * Waits until `log` records more than `before` daemon starts. A replaced
+ * daemon is told apart by its start, even when the OS hands it the old one's PID.
+ */
+const startedAfter = (log: string, before: number) =>
+	eventually(async () => {
+		const now = starts(log);
+		if (now <= before) throw new Error(`daemon.log records ${now} daemon starts, ${before} before`);
+	});
+
 describe.skipIf(!enabled)('real service manager (CI with LINE_MCP_E2E_SERVICE=1)', () => {
 	// The bin npm installed; the sources would not prove the package works.
 	const bin = process.env.LINE_MCP_TEST_CLI;
@@ -184,16 +198,11 @@ describe.skipIf(!enabled)('real service manager (CI with LINE_MCP_E2E_SERVICE=1)
 				health: 'needs_login',
 				account: { mid: selfMid, auth_state: 'needs_login' }
 			});
-			const first = await manager.pid();
-			expect(first).toBeTypeOf('number');
+			expect(await manager.pid()).toBeTypeOf('number');
 
+			const before = starts(log);
 			succeeds(await line(['install']));
-			const second = await eventually(async () => {
-				const pid = await manager.pid();
-				if (pid === undefined || pid === first) throw new Error(`daemon PID is ${pid}`);
-				return pid;
-			});
-			expect(second).not.toBe(first);
+			await startedAfter(log, before);
 			expect(await serving(line)).toMatchObject({ health: 'needs_login' });
 
 			succeeds(await line(['uninstall']));
@@ -404,16 +413,11 @@ describe.runIf(windowsEnabled)('real Task Scheduler (CI with LINE_MCP_E2E_SERVIC
 				health: 'needs_login',
 				account: { mid: selfMid, auth_state: 'needs_login' }
 			});
-			const first = await lockOwner(port);
-			expect(first).toBeTypeOf('number');
+			expect(await lockOwner(port)).toBeTypeOf('number');
 
+			const before = starts(log);
 			succeeds(await line(['install']));
-			const second = await eventually(async () => {
-				const pid = await lockOwner(port);
-				if (pid === undefined || pid === first) throw new Error(`daemon PID is ${pid}`);
-				return pid;
-			});
-			expect(second).not.toBe(first);
+			await startedAfter(log, before);
 			expect(await serving(line)).toMatchObject({ health: 'needs_login' });
 
 			succeeds(await line(['uninstall']));
