@@ -4,7 +4,7 @@ import { connect, createServer, Socket } from 'node:net';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { acquireLock, lockInUse, requestStop } from '../src/lock.ts';
+import { acquireLock, lockHeld, lockInUse, requestStop } from '../src/lock.ts';
 import { databasePath } from '../src/paths.ts';
 import { login, openSession } from '../src/session.ts';
 import {
@@ -212,6 +212,38 @@ describe('stop request', () => {
 		await expect(requestStop(port, { deadlineMs: 5000 })).resolves.toBe('stopped');
 		expect(await lockInUse(port)).toBe(false);
 	}, 15_000);
+
+	// An owner that closes its listener resets checks still in its accept queue
+	// (observed on macOS); the reset is injected so every OS runs the case.
+	it('resolves stopped when a check is reset while the owner lets go', async () => {
+		const port = await freePort();
+		const lock = await acquireLock(port, () => {});
+		const real = vi.mocked(connect).getMockImplementation()!;
+		let attempts = 0;
+		vi.mocked(connect).mockImplementation(((...args: Parameters<typeof connect>) => {
+			if (++attempts !== 2) return real(...args);
+			void lock.release();
+			return failingConnect('ECONNRESET');
+		}) as typeof connect);
+		try {
+			await expect(requestStop(port, { deadlineMs: 10_000 })).resolves.toBe('stopped');
+			expect(attempts).toBeGreaterThan(2);
+		} finally {
+			vi.mocked(connect).mockImplementation(real);
+			await lock.release();
+		}
+	}, 15_000);
+
+	it('counts a reset check as a held port', async () => {
+		const real = vi.mocked(connect).getMockImplementation()!;
+		vi.mocked(connect).mockImplementationOnce((() =>
+			failingConnect('ECONNRESET')) as typeof connect);
+		try {
+			await expect(lockHeld(await freePort(), { timeoutMs: 5000 })).resolves.toBe(true);
+		} finally {
+			vi.mocked(connect).mockImplementation(real);
+		}
+	});
 
 	it.each([
 		['another first line', ['GET / HTTP/1.1\r\n\r\n']],
