@@ -1,4 +1,3 @@
-import { LINEStruct } from '@evex-dev/linejs/thrift';
 import { z } from 'zod';
 import { LineMcpError } from '../../errors.ts';
 import type { Payload } from '../../outbox.ts';
@@ -45,13 +44,7 @@ export const unsend = defineTool({
 						requestSeq: seq,
 						correlation: {},
 						dispatch: async () => {
-							await base.request.request(
-								LINEStruct.unsendMessage_args({ seq, messageId: args.message_id }),
-								'unsendMessage',
-								4,
-								true,
-								'/S4'
-							);
+							await base.talk.unsendMessage({ seq, messageId: args.message_id });
 							return { messageId: null };
 						}
 					};

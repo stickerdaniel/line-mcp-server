@@ -12,22 +12,17 @@ import type {
 } from '@evex-dev/linejs-types';
 
 /**
- * `fetchSquareChatEvents` through the generated Thrift request, because the
- * handwritten wrapper's options type omits `continuationToken`,
- * `subscriptionId`, `inclusive` and `fetchType`, although its body passes them
- * on (base/service/square/mod.ts:113-128).
+ * `fetchSquareChatEvents` with every field of the generated request. The
+ * wrapper's options type omits `continuationToken`, `subscriptionId`,
+ * `inclusive` and `fetchType`, but its body spreads the options into the
+ * request (base/service/square/mod.ts:113-128), so they reach LINE. `request`
+ * is a variable, not a literal, so TypeScript accepts the extra fields.
  */
 export async function fetchSquareChatEvents(
 	base: BaseClient,
 	request: Partial<FetchSquareChatEventsRequest> & { squareChatMid: string }
 ): Promise<FetchSquareChatEventsResponse> {
-	return await base.request.request(
-		LINEStruct.SquareService_fetchSquareChatEvents_args({ request: { limit: 100, ...request } }),
-		'fetchSquareChatEvents',
-		4,
-		true,
-		'/SQ1'
-	);
+	return await base.square.fetchSquareChatEvents(request);
 }
 
 /**

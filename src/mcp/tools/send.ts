@@ -114,7 +114,6 @@ async function sendTalk(
 				hasContent: false,
 				sessionId: 0,
 				...fields,
-				chunks: fields.chunks as never,
 				...(replyTo
 					? {
 							relatedMessageId: replyTo,

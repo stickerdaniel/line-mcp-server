@@ -585,6 +585,73 @@ describe('idempotency keys', () => {
 	});
 });
 
+/** The path and arguments of every request one RPC received; LINE answers with no result. */
+function received(method: string) {
+	const requests: { path: string; args: Record<number, unknown> }[] = [];
+	const route = async (request: Request) => {
+		requests.push({ path: new URL(request.url).pathname, args: await callArgs(request) });
+		return thriftReply(method, []);
+	};
+	return { requests, route };
+}
+
+/** A server whose next Talk request sequence is 41, so a sequence LINEJS allocates itself differs. */
+async function serveRoute(method: string, route: (request: Request) => Promise<Response>) {
+	const upstream = fakeHttpUpstream({ getProfile: profileReply, [method]: route });
+	const served = await serve({}, undefined, { upstream });
+	(served.session.base.storage as SqliteStorage).setSync('reqseq', JSON.stringify({ talk: 41 }));
+	return served;
+}
+
+const requestSeq = (served: Served, key: string) =>
+	served.session.db.prepare('SELECT request_seq FROM outbox WHERE idempotency_key = ?').get(key)
+		?.request_seq;
+
+describe('react and unsend in Talk', () => {
+	it('reacts with the sequence the outbox recorded, and a repeated key reacts once', async () => {
+		const reacted = received('react');
+		const served = await serveRoute('react', reacted.route);
+		store(served, row({ messageId: '600000000000000123' }));
+		const args = toPeer({
+			message_id: '600000000000000123',
+			reaction: 'love',
+			idempotency_key: 'react-0001'
+		});
+
+		const first = await callTool(served.server.port, 'react', args);
+		const again = await callTool(served.server.port, 'react', args);
+
+		const seq = requestSeq(served, 'react-0001');
+		expect(seq).toBe('41');
+		expect(first.data).toMatchObject({ state: 'sent', replayed: false, request_seq: seq });
+		expect(again.data).toMatchObject({ state: 'sent', replayed: true, request_seq: seq });
+		expect(count(served, 'react')).toBe(1);
+		const [request] = reacted.requests;
+		expect(request?.path).toBe('/S4');
+		// ReactRequest: reqSeq, messageId, reactionType { predefinedReactionType LOVE }.
+		expect(request?.args[1]).toEqual({ 1: Number(seq), 2: 600000000000000123n, 3: { 1: 3 } });
+	});
+
+	it('unsends with the sequence the outbox recorded, and a repeated key unsends once', async () => {
+		const unsent = received('unsendMessage');
+		const served = await serveRoute('unsendMessage', unsent.route);
+		store(served, row({ messageId: '600000000000000124', sender: selfMid }));
+		const args = toPeer({ message_id: '600000000000000124', idempotency_key: 'unsend-0001' });
+
+		const first = await callTool(served.server.port, 'unsend', args);
+		const again = await callTool(served.server.port, 'unsend', args);
+
+		const seq = requestSeq(served, 'unsend-0001');
+		expect(seq).toBe('41');
+		expect(first.data).toMatchObject({ state: 'sent', replayed: false, request_seq: seq });
+		expect(again.data).toMatchObject({ state: 'sent', replayed: true, request_seq: seq });
+		expect(count(served, 'unsendMessage')).toBe(1);
+		const [request] = unsent.requests;
+		expect(request?.path).toBe('/S4');
+		expect([request?.args[1], request?.args[2]]).toEqual([Number(seq), '600000000000000124']);
+	});
+});
+
 describe('outcomes after dispatch', () => {
 	it('reports unknown, not failed, when the answer cannot be parsed', async () => {
 		const token = 'SECRET-NEXT-ACCESS-TOKEN';
