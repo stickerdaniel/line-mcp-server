@@ -149,8 +149,8 @@ export async function requestStop(
 
 /**
  * Whether a process holds the lock port. Unlike `lockInUse` it fails closed:
- * only a refused connection means free, and any other error or no answer
- * within `timeoutMs` rejects with `lock_failed`.
+ * only a refused connection means free, a reset one means held, and any other
+ * error or no answer within `timeoutMs` rejects with `lock_failed`.
  */
 export function lockHeld(port: number, { timeoutMs }: { timeoutMs: number }): Promise<boolean> {
 	const timedOut = () =>
@@ -160,10 +160,12 @@ export function lockHeld(port: number, { timeoutMs }: { timeoutMs: number }): Pr
 
 /**
  * Connects to the lock port and hands the socket to `connected`. Resolves true
- * once a connection was made and has closed, false when it was refused. Any
- * other error rejects, and so does no answer within `timeoutMs` (with
- * `timedOut`): neither proves that the port is free. A refusal can take about
- * 2 s on Windows.
+ * once a connection was made and has closed, false when it was refused. A reset
+ * before `connect` also resolves true: it does not prove the port free, and an
+ * owner that closes its listener while it stops resets the connections still in
+ * its accept queue (observed on macOS). Any other error rejects,
+ * and so does no answer within `timeoutMs` (with `timedOut`): neither proves
+ * that the port is free. A refusal can take about 2 s on Windows.
  */
 function contact(
 	port: number,
@@ -183,9 +185,9 @@ function contact(
 		socket.on('error', (error) => (failure ??= error));
 		socket.once('close', () => {
 			clearTimeout(timer);
-			if (made) resolve(true);
-			else if ((failure as NodeJS.ErrnoException | undefined)?.code === 'ECONNREFUSED')
-				resolve(false);
+			const code = (failure as NodeJS.ErrnoException | undefined)?.code;
+			if (made || code === 'ECONNRESET') resolve(true);
+			else if (code === 'ECONNREFUSED') resolve(false);
 			else if (failure instanceof LineMcpError) reject(failure);
 			else
 				reject(
