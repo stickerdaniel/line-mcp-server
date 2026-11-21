@@ -33,7 +33,11 @@ export const stderrLog: Log = (entry) => {
 };
 
 export function createClient(storage: BaseStorage): BaseClient {
-	return new BaseClient({ device, storage });
+	// V3 JWT tokens trigger LEGY `/enc` in linejs `auto` mode. LINE's gateway has
+	// been returning empty-body 404s there since 2026-11-18 (evex-dev/linejs#280),
+	// which breaks login and every Talk RPC. Plain `/S4` still accepts the same token.
+	// TODO: Restore `encrypted: "auto"` once `/enc` works again (evex-dev/linejs#280).
+	return new BaseClient({ device, storage, legy: { encrypted: false } });
 }
 
 export interface SessionOptions {
