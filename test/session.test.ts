@@ -8,12 +8,14 @@ import { decryptMessage } from '../src/keys.ts';
 import { databasePath } from '../src/paths.ts';
 import {
 	allowGroupKeyRegistration,
+	createClient,
 	type LogEntry,
 	openSession,
 	type Session,
 	type SessionOptions,
 	stderrLog
 } from '../src/session.ts';
+import { SqliteStorage } from '../src/storage.ts';
 import {
 	fakeHttpUpstream,
 	fakeUpstream,
@@ -31,6 +33,13 @@ const sessions: Session[] = [];
 afterEach(async () => {
 	for (const session of sessions.splice(0)) await session.close();
 });
+
+/** JWT-shaped access token: linejs `auto` would route Talk through LEGY `/enc`. */
+function v3AccessToken(): string {
+	const head = Buffer.from(JSON.stringify({ alg: 'HS256' })).toString('base64url');
+	const body = Buffer.from(JSON.stringify({ exp: 9_999_999_999, iat: 1 })).toString('base64url');
+	return `${head}.${body}.signature`;
+}
 
 async function start(root: string, options: SessionOptions): Promise<Session> {
 	const session = await openSession({
@@ -257,6 +266,33 @@ describe('daemon log', () => {
 		expect(line.time).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 		expect(Date.parse(line.time)).toBeGreaterThanOrEqual(before);
 		expect(Date.parse(line.time)).toBeLessThanOrEqual(Date.now());
+	});
+});
+
+describe('createClient', () => {
+	it('disables LEGY encrypted transport so JWT Talk RPCs post on /S4', async () => {
+		const paths: string[] = [];
+		const base = createClient(new SqliteStorage(openDatabase(tempRoot())));
+
+		expect(base.legy.encrypted).toBe(false);
+
+		base.authToken = v3AccessToken();
+		const stubFetch = (async (
+			info: Parameters<typeof base.fetch>[0],
+			init?: Parameters<typeof base.fetch>[1]
+		) => {
+			paths.push(new URL(new Request(info, init).url).pathname);
+			return new Response(new Uint8Array(0), {
+				status: 200,
+				headers: { 'content-type': 'application/x-thrift' }
+			});
+		}) satisfies typeof base.fetch;
+		// LINEJS types `fetch` as readonly; production code replaces it the same way in `installGuards`.
+		Object.assign(base, { fetch: stubFetch });
+
+		await base.talk.getProfile().catch(() => {});
+
+		expect(paths).toEqual(['/S4']);
 	});
 });
 
