@@ -57,7 +57,7 @@
 		"prepare": "husky"
 	},
 	"devDependencies": {
-		"@types/node": "24",
+		"@types/node": "26",
 		"@types/qrcode-terminal": "0.12.2",
 		"husky": "^9.1.7",
 		"oxlint": "^1.87.0",
